@@ -7,7 +7,6 @@
   <maintainer email="user@example.com">Max</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclpy</depend>
@@ -18,7 +17,25 @@
   <depend>sensor_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>action_msgs</depend>
-  <depend>robot_actuators</depend>
+  <depend>tf_transformations</depend>
+  <depend>tf2_ros</depend>
+  <depend>sllidar_ros2</depend>
+
+  <!-- Nav2 navigation stack -->
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_behaviors</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_waypoint_follower</exec_depend>
+  <exec_depend>nav2_costmap_2d</exec_depend>
+  
+  <!-- Additional packages for launch and nodes -->
+  <exec_depend>can_interface</exec_depend>
+  <exec_depend>holonomic_robot_bringup</exec_depend>
+  <exec_depend>rviz2</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

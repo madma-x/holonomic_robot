@@ -1,6 +1,0 @@
-stm32_bridge:
-  ros__parameters:
-    serial_port: "/dev/ttyTHS0"  # Jetson hardware UART
-    baudrate: 921600
-    read_rate_hz: 100
-    publish_tf: true
