@@ -9,7 +9,7 @@ def generate_launch_description():
     # Launch the CAN bridge node
     can_bridge_node = Node(
         package='can_interface',
-        executable='can_test_node',
+        executable='can_node',
         name='can_bridge',
         output='screen'
     )

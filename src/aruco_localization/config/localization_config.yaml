@@ -1,0 +1,14 @@
+aruco_localization_node:
+  ros__parameters:
+    # IDs of positioning/localization tags
+    tag_ids: [20, 21, 22, 23]
+    # World frame X positions matching tag_ids order (meters)
+    tag_world_x: [0.0, 3.0, 3.0, 0.0]
+    # World frame Y positions matching tag_ids order (meters)
+    tag_world_y: [0.0, 0.0, 2.0, 2.0]
+    # World frame yaw (radians) each tag faces — 0 = tag faces +X
+    tag_world_theta: [0.0, 3.14159, 3.14159, 0.0]
+    # Minimum confidence to accept a tag detection (0.0–1.0)
+    confidence_threshold: 0.3
+    # TF broadcast rate in Hz (keep alive even when no tag visible)
+    broadcast_rate_hz: 10.0
