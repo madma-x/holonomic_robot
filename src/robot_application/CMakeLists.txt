@@ -15,7 +15,6 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Install Python executables
 install(PROGRAMS
-  scripts/mission_controller.py
   scripts/patrol_mission.py
   scripts/pick_place_mission.py
   scripts/teleop_mission.py

@@ -30,8 +30,6 @@ setup(
             'teleop_mission = robot_application.teleop_mission:main',
             'game_state_manager = robot_application.game_state_manager:main',
             'task_planner = robot_application.task_planner:main',
-            'waypoint_test = robot_application.waypoint_test:main',
-            'fake_odometry = robot_application.fake_odometry:main',
         ],
     },
 )

@@ -9,7 +9,9 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -27,11 +29,14 @@ ament_target_dependencies(can_node
   geometry_msgs
   nav_msgs
   tf2
+  tf2_ros
+  std_srvs
 )
 
 ament_target_dependencies(can_test_node
   rclcpp
   geometry_msgs
+  std_srvs
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
@@ -48,6 +53,7 @@ ament_export_dependencies(
   geometry_msgs
   nav_msgs
   tf2
+  tf2_ros
   rosidl_default_runtime
 )
 

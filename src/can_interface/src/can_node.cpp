@@ -3,6 +3,8 @@
 #include "can_interface/msg/can_frame.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2_ros/transform_broadcaster.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -17,11 +19,16 @@
 #include <cmath>
 #include <thread>
 #include <chrono>
+#include <atomic>
+#include <mutex>
 
 class CANBridge : public rclcpp::Node
 {
 public:
-    CANBridge() : Node("can_bridge")
+    CANBridge() : Node("can_bridge"),
+        tf_broadcaster_(std::make_unique<tf2_ros::TransformBroadcaster>(*this)),
+        odom_x_(1.5), odom_y_(0.7), odom_theta_(0.0),
+        last_vx_(0.0), last_vy_(0.0), last_wz_(0.0)
     {
         init_can();
         init_motors();
@@ -38,11 +45,18 @@ public:
             "/can_rx", 10);
 
         odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
-        
+
+        last_odom_time_ = now();
+
+        // 50 Hz dead-reckoning odometry from cmd_vel integration
+        odom_timer_ = create_wall_timer(
+            std::chrono::milliseconds(20),
+            std::bind(&CANBridge::publish_odom, this));
+
         running_ = true;
         rx_thread_ = std::thread(&CANBridge::rx_loop, this);
 
-        RCLCPP_INFO(get_logger(), "CAN Bridge started");
+        RCLCPP_INFO(get_logger(), "CAN Bridge started (dead-reckoning odometry active)");
     }
 
     ~CANBridge()
@@ -62,6 +76,14 @@ private:
     rclcpp::Subscription<can_interface::msg::CanFrame>::SharedPtr can_tx_sub_;
     rclcpp::Publisher<can_interface::msg::CanFrame>::SharedPtr can_rx_pub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+    rclcpp::TimerBase::SharedPtr odom_timer_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+    // Dead-reckoning state
+    double odom_x_, odom_y_, odom_theta_;
+    double last_vx_, last_vy_, last_wz_;
+    rclcpp::Time last_odom_time_;
+    std::mutex odom_mutex_;
 
     void init_can()
     {
@@ -114,14 +136,13 @@ private:
         RCLCPP_INFO(get_logger(), "Initializing motors...");
         
         uint8_t motor_ids[] = {0x1, 0x2, 0x3};
-        bool all_success = true;
 
         for (uint8_t id : motor_ids)
         {
             uint8_t data[3];
             data[0] = 0xF3;  // Code
             data[1] = 0x01;  // Enable motor
-            data[2] = calculate_crc(data, 2);
+            data[2] = calculate_crc_with_id(id, data, 2);
 
             send_frame(id, 3, data);
 
@@ -141,12 +162,76 @@ private:
         write(can_socket_, &frame, sizeof(frame));
     }
 
+    void publish_odom()
+    {
+        rclcpp::Time current_time = now();
+        double dt;
+        double vx, vy, wz;
+
+        {
+            std::lock_guard<std::mutex> lock(odom_mutex_);
+            dt = (current_time - last_odom_time_).seconds();
+            last_odom_time_ = current_time;
+            vx = last_vx_;
+            vy = last_vy_;
+            wz = last_wz_;
+        }
+
+        // Integrate pose in world frame (holonomic: vx/vy are robot-frame velocities)
+        double delta_x = (vx * std::cos(odom_theta_) - vy * std::sin(odom_theta_)) * dt;
+        double delta_y = (vx * std::sin(odom_theta_) + vy * std::cos(odom_theta_)) * dt;
+        double delta_theta = wz * dt;
+
+        odom_x_     += delta_x;
+        odom_y_     += delta_y;
+        odom_theta_ += delta_theta;
+
+        tf2::Quaternion q;
+        q.setRPY(0, 0, odom_theta_);
+
+        // Publish /odom
+        nav_msgs::msg::Odometry odom;
+        odom.header.stamp    = current_time;
+        odom.header.frame_id = "odom";
+        odom.child_frame_id  = "base_footprint";
+        odom.pose.pose.position.x  = odom_x_;
+        odom.pose.pose.position.y  = odom_y_;
+        odom.pose.pose.position.z  = 0.0;
+        odom.pose.pose.orientation.x = q.x();
+        odom.pose.pose.orientation.y = q.y();
+        odom.pose.pose.orientation.z = q.z();
+        odom.pose.pose.orientation.w = q.w();
+        odom.twist.twist.linear.x  = vx;
+        odom.twist.twist.linear.y  = vy;
+        odom.twist.twist.angular.z = wz;
+        odom_pub_->publish(odom);
+
+        // Broadcast odom → base_footprint TF
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp    = current_time;
+        tf.header.frame_id = "odom";
+        tf.child_frame_id  = "base_footprint";
+        tf.transform.translation.x = odom_x_;
+        tf.transform.translation.y = odom_y_;
+        tf.transform.translation.z = 0.0;
+        tf.transform.rotation = odom.pose.pose.orientation;
+        tf_broadcaster_->sendTransform(tf);
+    }
+
     // Motor command for three-wheel holonomic robot (120° spacing)
     void cmd_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
     {
         double v_x = msg->linear.x;
         double v_y = msg->linear.y;
         double w_z = msg->angular.z;
+
+        // Store velocities for odometry integration
+        {
+            std::lock_guard<std::mutex> lock(odom_mutex_);
+            last_vx_ = v_x;
+            last_vy_ = v_y;
+            last_wz_ = w_z;
+        }
 
         const double wheel_radius = 0.03;
         const double robot_radius = 0.15;  // distance from center to wheel
@@ -157,9 +242,9 @@ private:
         const double angle2 = 4*M_PI/3.0;
 
         // Inverse kinematics for holonomic drive
-        double v0 = cos(angle0)*v_x + sin(angle0)*v_y + robot_radius*w_z;
-        double v1 = cos(angle1)*v_x + sin(angle1)*v_y + robot_radius*w_z;
-        double v2 = cos(angle2)*v_x + sin(angle2)*v_y + robot_radius*w_z;
+        double v0 = cos(angle0)*v_x - sin(angle0)*v_y + robot_radius*w_z;
+        double v1 = cos(angle1)*v_x - sin(angle1)*v_y + robot_radius*w_z;
+        double v2 = cos(angle2)*v_x - sin(angle2)*v_y + robot_radius*w_z;
 
         // Convert to RPM
         double rpm0 = (v0 / (2*M_PI*wheel_radius)) * 60.0;
@@ -172,7 +257,7 @@ private:
         send_motor_command(0x3, rpm2, acc);
     }
 
-    void can_tx_callback(const my_robot_can::msg::CanFrame::SharedPtr msg)
+    void can_tx_callback(const can_interface::msg::CanFrame::SharedPtr msg)
     {
         uint8_t data[8];
         memcpy(data, msg->data.data(), msg->dlc);
@@ -187,6 +272,16 @@ private:
         {
             int nbytes = read(can_socket_, &frame, sizeof(frame));
 
+            if (nbytes < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                RCLCPP_ERROR(get_logger(), "CAN read error: %s", strerror(errno));
+                continue;
+            }
             if (nbytes > 0)
             {
                 uint16_t id = frame.can_id & 0x7FF;
@@ -208,7 +303,7 @@ private:
                 // -------------------------
                 else if (id == 1 || id == 2 || id == 3)
                 {
-                    auto msg = my_robot_can::msg::CanFrame();
+                    auto msg = can_interface::msg::CanFrame();
                     msg.id = id;
                     msg.dlc = frame.can_dlc;
 
@@ -231,7 +326,7 @@ private:
                     nav_msgs::msg::Odometry odom;
                     odom.header.stamp = now();
                     odom.header.frame_id = "odom";
-                    odom.child_frame_id = "base_link";
+                    odom.child_frame_id = "base_footprint";
 
                     odom.pose.pose.position.x = x;
                     odom.pose.pose.position.y = y;
@@ -250,39 +345,48 @@ private:
                     odom.pose.pose.orientation.w = q.w();
 
                     odom_pub_->publish(odom);
+
+                    // Broadcast odom → base_footprint TF (required by Nav2)
+                    geometry_msgs::msg::TransformStamped tf;
+                    tf.header.stamp = odom.header.stamp;
+                    tf.header.frame_id = "odom";
+                    tf.child_frame_id = "base_footprint";
+                    tf.transform.translation.x = x;
+                    tf.transform.translation.y = y;
+                    tf.transform.translation.z = 0.0;
+                    tf.transform.rotation = odom.pose.pose.orientation;
+                    tf_broadcaster_->sendTransform(tf);
                 }
             }
         }
     }
 
-    uint8_t calculate_crc(uint8_t *data, int len)
+    uint8_t calculate_crc_with_id(uint16_t id, uint8_t *data, int len)
     {
-        uint8_t crc = 0;
+        uint16_t sum = id;
         for (int i = 0; i < len; i++)
-            crc ^= data[i];
-        return crc;
+            sum += data[i];
+        return sum & 0xFF;
     }
 
     void send_motor_command(uint16_t id, double rpm, uint8_t acc)
     {
-        // Clamp speed to 0-3000 RPM range
-        int16_t speed = static_cast<int16_t>(std::abs(rpm));
+        uint16_t speed = static_cast<uint16_t>(std::abs(rpm));
         if (speed > 3000) speed = 3000;
-        if (speed < 0) speed = 0;
 
-        // Determine direction: 0 = CCW, 1 = CW
-        uint8_t dir = (rpm >= 0) ? 1 : 0;
+        // dir: 0 = CCW (forward), 1 = CW (reverse) — per protocol spec
+        uint8_t dir = (rpm >= 0) ? 0 : 1;
 
-        // Encode speed: upper 4 bits in Byte2, lower 8 bits in Byte3
-        uint8_t byte2 = 0xF6 | ((dir & 0x1) << 7) | ((speed >> 8) & 0x0F);
+        // Byte2: bit7 = dir, bits3-0 = speed upper nibble
+        uint8_t byte2 = ((dir & 0x1) << 7) | ((speed >> 8) & 0x0F);
         uint8_t byte3 = speed & 0xFF;
 
         uint8_t data[5];
-        data[0] = 0xF6;  // Code
+        data[0] = 0xF6;
         data[1] = byte2;
         data[2] = byte3;
         data[3] = acc;
-        data[4] = calculate_crc(data, 4);
+        data[4] = calculate_crc_with_id(id, data, 4);
 
         send_frame(id, 5, data);
     }

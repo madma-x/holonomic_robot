@@ -15,6 +15,7 @@
 #include <cmath>
 #include <thread>
 #include <chrono>
+#include <atomic>
 
 class CANTester : public rclcpp::Node
 {
@@ -24,19 +25,23 @@ public:
         init_can();
 
         // Services for testing
-        test_enable_srv_ = create_service<std srvs::srv::Trigger>(
+        test_enable_srv_ = create_service<std_srvs::srv::Trigger>(
             "/can_test/enable_motors",
             std::bind(&CANTester::test_enable_motors, this, std::placeholders::_1, std::placeholders::_2));
 
-        test_spin_srv_ = create_service<std srvs::srv::Trigger>(
+        test_disable_srv_ = create_service<std_srvs::srv::Trigger>(
+            "/can_test/disable_motors",
+            std::bind(&CANTester::test_disable_motors, this, std::placeholders::_1, std::placeholders::_2));
+
+        test_spin_srv_ = create_service<std_srvs::srv::Trigger>(
             "/can_test/spin_motors",
             std::bind(&CANTester::test_spin_motors, this, std::placeholders::_1, std::placeholders::_2));
 
-        test_stop_srv_ = create_service<std srvs::srv::Trigger>(
+        test_stop_srv_ = create_service<std_srvs::srv::Trigger>(
             "/can_test/stop_motors",
             std::bind(&CANTester::test_stop_motors, this, std::placeholders::_1, std::placeholders::_2));
 
-        test_immediate_stop_srv_ = create_service<std srvs::srv::Trigger>(
+        test_immediate_stop_srv_ = create_service<std_srvs::srv::Trigger>(
             "/can_test/emergency_stop",
             std::bind(&CANTester::test_immediate_stop, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -50,6 +55,7 @@ public:
         RCLCPP_INFO(get_logger(), "CAN Tester initialized");
         RCLCPP_INFO(get_logger(), "Available services:");
         RCLCPP_INFO(get_logger(), "  - /can_test/enable_motors");
+        RCLCPP_INFO(get_logger(), "  - /can_test/disable_motors");
         RCLCPP_INFO(get_logger(), "  - /can_test/spin_motors (3 sec @ 500 RPM, then gradual stop)");
         RCLCPP_INFO(get_logger(), "  - /can_test/stop_motors (gradual deceleration)");
         RCLCPP_INFO(get_logger(), "  - /can_test/emergency_stop (immediate stop, use with caution!)");
@@ -69,10 +75,11 @@ private:
     std::thread rx_thread_;
     std::atomic<bool> running_;
 
-    rclcpp::Service<std srvs::srv::Trigger>::SharedPtr test_enable_srv_;
-    rclcpp::Service<std srvs::srv::Trigger>::SharedPtr test_spin_srv_;
-    rclcpp::Service<std srvs::srv::Trigger>::SharedPtr test_stop_srv_;
-    rclcpp::Service<std srvs::srv::Trigger>::SharedPtr test_immediate_stop_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr test_enable_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr test_disable_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr test_spin_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr test_stop_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr test_immediate_stop_srv_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
 
     void init_can()
@@ -111,12 +118,36 @@ private:
         }
         RCLCPP_INFO(get_logger(), "CAN socket bound successfully");
 
-        int flags = fcntl(can_socket_, F_GETFL, 0);
-        fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);
+       //int flags = fcntl(can_socket_, F_GETFL, 0);
+    //fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);
 
         RCLCPP_INFO(get_logger(), "CAN interface ready");
     }
 
+    void set_motor_enable_state(uint16_t id, uint8_t enable)
+    {
+        enable = (enable != 0) ? 0x01 : 0x00;
+
+        uint8_t data[3];
+        data[0] = 0xF3;          // Enable command code
+        data[1] = enable;        // 0x00: disable, 0x01: enable
+        data[2] = calculate_crc_with_id(id, data, 2);
+
+        send_frame(id, 3, data);
+
+        RCLCPP_INFO(get_logger(), "Motor %d %s command sent",
+                    id, enable == 0x01 ? "enable" : "disable");
+    }
+
+    void enable_motor(uint16_t id)
+    {
+        set_motor_enable_state(id, 0x01);
+    }
+
+    void disable_motor(uint16_t id)
+    {
+        set_motor_enable_state(id, 0x00);
+    }
     void send_frame(uint16_t id, uint8_t dlc, uint8_t *data)
     {
         struct can_frame frame{};
@@ -127,22 +158,24 @@ private:
         RCLCPP_DEBUG(get_logger(), "Sent CAN frame ID:0x%X DLC:%d", id, dlc);
     }
 
-    uint8_t calculate_crc(uint8_t *data, int len)
+    uint8_t calculate_crc_with_id(uint16_t id, uint8_t *data, int len)
     {
-        uint8_t crc = 0;
+        uint16_t sum = id;
+
         for (int i = 0; i < len; i++)
-            crc ^= data[i];
-        return crc;
+            sum += data[i];
+
+        return sum & 0xFF;
     }
 
     void send_motor_command(uint16_t id, double rpm, uint8_t acc)
     {
-        int16_t speed = static_cast<int16_t>(std::abs(rpm));
+        uint16_t speed = static_cast<uint16_t>(std::abs(rpm));
         if (speed > 3000) speed = 3000;
-        if (speed < 0) speed = 0;
 
-        uint8_t dir = (rpm >= 0) ? 1 : 0;
-        uint8_t byte2 = 0xF6 | ((dir & 0x1) << 7) | ((speed >> 8) & 0x0F);
+        // dir: 0 = CCW (forward), 1 = CW (reverse) — per protocol spec
+        uint8_t dir = (rpm >= 0) ? 0 : 1;
+        uint8_t byte2 = ((dir & 0x1) << 7) | ((speed >> 8) & 0x0F);
         uint8_t byte3 = speed & 0xFF;
 
         uint8_t data[5];
@@ -150,24 +183,22 @@ private:
         data[1] = byte2;
         data[2] = byte3;
         data[3] = acc;
-        data[4] = calculate_crc(data, 4);
+        data[4] = calculate_crc_with_id(id, data, 4);
 
         send_frame(id, 5, data);
     }
 
     void stop_motor_gradual(uint16_t id, uint8_t decel_acc)
     {
-        // Gradual deceleration stop command
-        // Speed = 0, acc ≠ 0 for smooth deceleration
-        uint8_t data[5];
-        data[0] = 0xF6;  // Code
-        data[1] = 0xF6;  // Direction bit 7 = 0, speed upper 4 bits = 0
-        data[2] = 0x00;  // Speed lower 8 bits = 0
-        data[3] = decel_acc;  // Deceleration rate (e.g., 2)
-        data[4] = calculate_crc(data, 4);
+    uint8_t data[5];
+    data[0] = 0xF6;
+    data[1] = 0x00;     // speed = 0
+    data[2] = 0x00;
+    data[3] = decel_acc;
+    data[4] = calculate_crc_with_id(id, data, 4);
 
-        send_frame(id, 5, data);
-        RCLCPP_INFO(get_logger(), "Motor %d gradual stop command sent (decel: %d)", id, decel_acc);
+    send_frame(id, 5, data);
+    RCLCPP_INFO(get_logger(), "Motor %d gradual stop command sent (decel: %d)", id, decel_acc);
     }
 
     void stop_motor_immediate(uint16_t id)
@@ -179,14 +210,14 @@ private:
         data[1] = 0xF6;  // Direction bit 7 = 0, speed upper 4 bits = 0
         data[2] = 0x00;  // Speed lower 8 bits = 0
         data[3] = 0x00;  // Acceleration = 0 (immediate stop)
-        data[4] = calculate_crc(data, 4);
+        data[4] = calculate_crc_with_id(id, data, 4);
 
         send_frame(id, 5, data);
         RCLCPP_INFO(get_logger(), "Motor %d immediate stop command sent", id);
     }
 
-    bool test_enable_motors(const std::shared_ptr<std srvs::srv::Trigger::Request>,
-                           std::shared_ptr<std srvs::srv::Trigger::Response> response)
+    bool test_enable_motors(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                           std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
         RCLCPP_INFO(get_logger(), "=== Testing Motor Enable ===");
         
@@ -202,8 +233,25 @@ private:
         return true;
     }
 
-    bool test_spin_motors(const std::shared_ptr<std srvs::srv::Trigger::Request>,
-                         std::shared_ptr<std srvs::srv::Trigger::Response> response)
+    bool test_disable_motors(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                            std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        RCLCPP_INFO(get_logger(), "=== Testing Motor Disable ===");
+
+        for (uint8_t id = 1; id <= 3; id++)
+        {
+            disable_motor(id);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        response->success = true;
+        response->message = "Disable commands sent to motors 1, 2, 3";
+        RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+        return true;
+    }
+
+    bool test_spin_motors(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                         std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
         RCLCPP_INFO(get_logger(), "=== Testing Motor Spin (3 sec) ===");
         
@@ -239,8 +287,8 @@ private:
         return true;
     }
 
-    bool test_stop_motors(const std::shared_ptr<std srvs::srv::Trigger::Request>,
-                         std::shared_ptr<std srvs::srv::Trigger::Response> response)
+    bool test_stop_motors(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                         std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
         RCLCPP_INFO(get_logger(), "=== Stopping Motors (Gradual) ===");
         
@@ -256,8 +304,8 @@ private:
         return true;
     }
 
-    bool test_immediate_stop(const std::shared_ptr<std srvs::srv::Trigger::Request>,
-                            std::shared_ptr<std srvs::srv::Trigger::Response> response)
+    bool test_immediate_stop(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                            std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
         RCLCPP_WARN(get_logger(), "=== EMERGENCY STOP (Immediate) ===");
         
@@ -286,9 +334,9 @@ private:
         const double angle1 = 2*M_PI/3.0;
         const double angle2 = 4*M_PI/3.0;
 
-        double v0 = cos(angle0)*v_x + sin(angle0)*v_y + robot_radius*w_z;
-        double v1 = cos(angle1)*v_x + sin(angle1)*v_y + robot_radius*w_z;
-        double v2 = cos(angle2)*v_x + sin(angle2)*v_y + robot_radius*w_z;
+        double v0 = cos(angle0)*v_x - sin(angle0)*v_y + robot_radius*w_z;
+        double v1 = cos(angle1)*v_x - sin(angle1)*v_y + robot_radius*w_z;
+        double v2 = cos(angle2)*v_x - sin(angle2)*v_y + robot_radius*w_z;
 
         double rpm0 = (v0 / (2*M_PI*wheel_radius)) * 60.0;
         double rpm1 = (v1 / (2*M_PI*wheel_radius)) * 60.0;
@@ -297,7 +345,7 @@ private:
         RCLCPP_DEBUG(get_logger(), "cmd_vel: vx=%.2f vy=%.2f wz=%.2f -> rpm0=%.0f rpm1=%.0f rpm2=%.0f",
                      v_x, v_y, w_z, rpm0, rpm1, rpm2);
 
-        const uint8_t acc = 5;
+        const uint8_t acc = 0;
         send_motor_command(1, rpm0, acc);
         send_motor_command(2, rpm1, acc);
         send_motor_command(3, rpm2, acc);
@@ -311,33 +359,31 @@ private:
         {
             int nbytes = read(can_socket_, &frame, sizeof(frame));
 
-            if (nbytes > 0)
-            {
-                uint16_t id = frame.can_id & 0x7FF;
+            if (nbytes <= 0)
+                continue;
 
-                if (frame.data[0] == 0xF3)
+            uint16_t id = frame.can_id & 0x7FF;
+
+            if (frame.can_dlc >= 3 && frame.data[0] == 0xF3)
+            {
+                uint8_t status = frame.data[1];
+                RCLCPP_INFO(get_logger(), "Motor %d enable/disable set response: %s",
+                            id, status == 0x01 ? "SUCCESS" : "FAILED");
+            }
+            else if (frame.data[0] == 0xF6 && frame.can_dlc >= 3)
+            {
+                uint8_t stop_status = frame.data[1];
+                const char* status_str = "";
+
+                switch (stop_status)
                 {
-                    uint8_t status = frame.data[1];
-                    RCLCPP_INFO(get_logger(), "Motor %d enable response: %s",
-                               id, status == 0x01 ? "SUCCESS" : "FAILED");
+                    case 0: status_str = "FAILED"; break;
+                    case 1: status_str = "STOPPING"; break;
+                    case 2: status_str = "STOPPED"; break;
+                    default: status_str = "UNKNOWN"; break;
                 }
-                else if (frame.data[0] == 0xF6 && frame.can_dlc >= 3)
-                {
-                    uint8_t stop_status = frame.data[1];
-                    const char* status_str = "";
-                    switch (stop_status)
-                    {
-                        case 0: status_str = "FAILED"; break;
-                        case 1: status_str = "STOPPING"; break;
-                        case 2: status_str = "STOPPED"; break;
-                        default: status_str = "UNKNOWN"; break;
-                    }
-                    RCLCPP_INFO(get_logger(), "Motor %d stop response: %s", id, status_str);
-                }
-                else
-                {
-                    RCLCPP_DEBUG(get_logger(), "Received frame ID:0x%X DLC:%d", id, frame.can_dlc);
-                }
+
+                RCLCPP_INFO(get_logger(), "Motor %d stop response: %s", id, status_str);
             }
         }
     }
