@@ -1,1 +1,0 @@
-/home/ubuntu/ros2_ws/src/holonomic_robot_bringup/launch/full_navigation.launch.py
