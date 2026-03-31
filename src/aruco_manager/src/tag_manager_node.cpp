@@ -23,8 +23,8 @@ public:
   : Node("tag_manager_node")
   {
     // Parameters
-    declare_parameter<std::vector<long int>>("object_tag_ids",    {});
-    declare_parameter<std::vector<long int>>("localization_tag_ids", {});
+    declare_parameter<std::vector<long int>>("object_tag_ids",    std::vector<long int>{});
+    declare_parameter<std::vector<long int>>("localization_tag_ids", std::vector<long int>{});
     declare_parameter<double>("arm_y_origin",           0.0);   // y of arm[0] in robot frame
     declare_parameter<double>("arm_x_offset",           0.3);   // x approach distance
     declare_parameter<double>("max_assignment_distance", 0.15); // m — ignore tag if farther
@@ -38,9 +38,11 @@ public:
     }
 
     // Build ID sets
-    for (auto id : get_parameter("object_tag_ids").as_integer_array())
+    auto object_ids = get_parameter("object_tag_ids").as_integer_array();
+    for (auto id : object_ids)
       object_ids_.insert(static_cast<uint32_t>(id));
-    for (auto id : get_parameter("localization_tag_ids").as_integer_array())
+    auto localization_ids = get_parameter("localization_tag_ids").as_integer_array();
+    for (auto id : localization_ids)
       localization_ids_.insert(static_cast<uint32_t>(id));
 
     // Publishers
@@ -149,7 +151,6 @@ private:
       for (int a = 0; a < NUM_ARMS; ++a) {
         if (arm_best[a].second < 0) continue;
         int ti = arm_best[a].second;
-        const auto& tp = msg->tags[ti].tag_pose.position;
         valid_pairs.push_back({a, ti});
 
         auto& aa     = result.arms[a];

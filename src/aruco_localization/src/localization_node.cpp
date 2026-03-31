@@ -21,10 +21,10 @@ public:
     // tag_world_x: [1.0, 2.0]
     // tag_world_y: [0.5, 1.5]
     // tag_world_theta: [0.0, 1.57]
-    declare_parameter<std::vector<long int>>("tag_ids",          {});
-    declare_parameter<std::vector<double>>("tag_world_x",        {});
-    declare_parameter<std::vector<double>>("tag_world_y",        {});
-    declare_parameter<std::vector<double>>("tag_world_theta",    {});
+    declare_parameter<std::vector<long int>>("tag_ids",          std::vector<long int>{});
+    declare_parameter<std::vector<double>>("tag_world_x",        std::vector<double>{});
+    declare_parameter<std::vector<double>>("tag_world_y",        std::vector<double>{});
+    declare_parameter<std::vector<double>>("tag_world_theta",    std::vector<double>{});
     declare_parameter<double>("confidence_threshold",            0.3);
     declare_parameter<double>("broadcast_rate_hz",               10.0);
 
