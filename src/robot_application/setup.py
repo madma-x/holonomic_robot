@@ -28,6 +28,7 @@ setup(
             'patrol_mission = robot_application.patrol_mission:main',
             'pick_place_mission = robot_application.pick_place_mission:main',
             'teleop_mission = robot_application.teleop_mission:main',
+            'nut_pickup_mission = robot_application.nut_pickup_mission:main',
             'game_state_manager = robot_application.game_state_manager:main',
             'task_planner = robot_application.task_planner:main',
         ],

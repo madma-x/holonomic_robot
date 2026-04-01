@@ -16,6 +16,7 @@ class TaskType(Enum):
     RETURN_BASE = "return_base"
     PATROL = "patrol"
     WAIT = "wait"
+    PICK_NUT = "pick_nut"
 
 
 class TaskStatus(Enum):
@@ -281,3 +282,28 @@ def create_move_object_task(object_id: str, from_loc: Dict[str, float],
             'to_location': to_loc
         }
     )
+
+
+def create_pick_nut_task(nut_id: str, approach_loc: Dict[str, float],
+                         drop_loc: Dict[str, float],
+                         points: float = 15.0) -> Task:
+    """Create a nut pickup-and-drop task for the NutPickupMission."""
+    return Task(
+        task_id=f"pick_nut_{nut_id}",
+        task_type=TaskType.PICK_NUT,
+        name=f"Pick Nut {nut_id}",
+        description=f"Pick up nut {nut_id} with vacuum pumps and deposit in scoring zone",
+        base_points=points,
+        time_estimate=25.0,
+        success_probability=0.80,
+        base_priority=7,
+        target_location=approach_loc,
+        mission_class="NutPickupMission",
+        parameters={
+            'nut_id': nut_id,
+            'approach_location': approach_loc,
+            'drop_location': drop_loc,
+            'method': 'vacuum',
+        }
+    )
+
