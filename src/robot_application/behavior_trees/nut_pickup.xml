@@ -1,0 +1,476 @@
+<!--
+  nut_pickup.xml — Behavior tree for the nut pickup / drop-off mission.
+
+  MISSION FLOW (per nut target, ordered by priority)
+  ────────────────────────────────────────────────────
+  1. Navigate to an accessible approach point.
+       • Try approach_1 first.
+       • If approach_1 is blocked, try approach_2 (when configured).
+       • If both are blocked (or only one exists and it failed):
+           – Lower the target's priority in memory.
+           – Fail this nut → ForceSuccess → continue to next nut.
+
+  2. Check whether objects are present (ArUco cluster_id visible).
+       • If empty: mark the location as empty in memory, skip to next nut.
+       • If detected: continue to pickup.
+
+  3. Pick up with vacuum pumps (max 1 retry = 2 attempts total).
+       • On success → go to drop.
+       • On failure after retry:
+           – Release pumps safely.
+           – Lower the target's priority.
+           – Continue to next nut.
+
+  4. Deposit objects in the first available drop zone (fixed priority order).
+       • Skip zones that are already marked as occupied.
+       • On successful drop: mark zone as occupied, back up.
+       • If all zones are occupied: emergency-release objects in place.
+
+  BLACKBOARD KEYS (written by ForEachNutTarget for the current nut)
+  ─────────────────────────────────────────────────────────────────
+    {current_nut_id}   string   Nut identifier (e.g. "nut_a")
+    {cluster_id}       int32    ArUco cluster ID for this nut
+    {approach_1}       Pose2D   Primary approach pose {x,y,theta}
+    {approach_2}       Pose2D   Secondary approach pose (may be empty/invalid)
+
+  PERSISTENT STATE (maintained inside custom nodes across BT ticks)
+  ─────────────────────────────────────────────────────────────────
+    Empty-location set    → MarkLocationEmpty / IsLocationEmpty
+    Occupied-zone set     → MarkDropZoneOccupied / IsDropZoneOccupied
+    Target priority table → LowerTargetPriority
+
+  CUSTOM NODES (IDs referenced below)
+  ─────────────────────────────────────────────────────────────────
+    Actions    : LoadNutMission, NavigateToApproach, LowerTargetPriority,
+                 MarkLocationEmpty, AlignToCluster, ActivateAllPumps,
+                 ReleaseAllPumps, NavigateToDropZone, BackupFromDrop,
+                 MarkDropZoneOccupied
+    Conditions : HasValidApproach, CheckObjectsPresent, VerifyVacuumPickup,
+                 IsDropZoneOccupied
+    Controls   : ForEachNutTarget   (iterates the nut list from LoadNutMission;
+                                     always advances to the next nut regardless
+                                     of child return status)
+    Built-ins  : Sequence, Fallback, Inverter, ForceSuccess, ForceFailure,
+                 RetryUntilSuccessful, SubTree, Wait, LogInfo
+-->
+
+<root main_tree_to_execute="NutPickupMission">
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       NODE MODEL
+       Documents the ports of every custom node used in this tree so that
+       BehaviorTree.CPP / Groot can generate the correct interface.
+       ══════════════════════════════════════════════════════════════════════ -->
+  <TreeNodesModel>
+
+    <!-- ── Actions ─────────────────────────────────────────────────────── -->
+
+    <Action ID="LoadNutMission">
+      <input_port name="config_file">Path to nut_pickup_config.yaml</input_port>
+      <input_port name="robot_side">Competition side: "yellow" or "blue"</input_port>
+      <!-- Writes {nut_list} and {drop_zone_list} to the blackboard -->
+    </Action>
+
+    <Action ID="NavigateToApproach">
+      <input_port name="pose">Target Pose2D {x, y, theta} (blackboard key or literal)</input_port>
+      <input_port name="timeout" default="30.0">Navigation timeout in seconds</input_port>
+    </Action>
+
+    <Action ID="LowerTargetPriority">
+      <input_port name="target_id">Nut target identifier to demote</input_port>
+    </Action>
+
+    <Action ID="MarkLocationEmpty">
+      <input_port name="target_id">Nut target identifier to mark as having no objects</input_port>
+    </Action>
+
+    <Action ID="AlignToCluster">
+      <input_port name="cluster_id">ArUco cluster ID to align with</input_port>
+      <input_port name="alignment_threshold" default="0.02">Alignment tolerance in metres</input_port>
+    </Action>
+
+    <Action ID="ActivateAllPumps">
+      <input_port name="num_pumps" default="4">Number of vacuum pumps to activate</input_port>
+      <input_port name="duty_cycle" default="1.0">Pump duty cycle 0.0–1.0</input_port>
+    </Action>
+
+    <Action ID="ReleaseAllPumps">
+      <input_port name="num_pumps" default="4">Number of vacuum pumps to release</input_port>
+    </Action>
+
+    <Action ID="NavigateToDropZone">
+      <input_port name="zone_id">Drop zone identifier (e.g. "zone_a")</input_port>
+      <input_port name="timeout" default="30.0">Navigation timeout in seconds</input_port>
+    </Action>
+
+    <Action ID="BackupFromDrop">
+      <input_port name="distance" default="0.30">Backup distance in metres</input_port>
+      <input_port name="speed" default="0.2">Backup speed in m/s</input_port>
+    </Action>
+
+    <Action ID="MarkDropZoneOccupied">
+      <input_port name="zone_id">Drop zone identifier to mark as occupied</input_port>
+    </Action>
+
+    <!-- ── Conditions ────────────────────────────────────────────────── -->
+
+    <Condition ID="HasValidApproach">
+      <input_port name="pose">Blackboard key for a Pose2D; returns FAILURE if unset or invalid</input_port>
+    </Condition>
+
+    <Condition ID="CheckObjectsPresent">
+      <input_port name="cluster_id">ArUco cluster ID to look for on /cluster_pickability</input_port>
+      <input_port name="detection_timeout_sec" default="0.5">How long to wait for a message</input_port>
+    </Condition>
+
+    <Condition ID="VerifyVacuumPickup">
+      <input_port name="min_pressure_pa" default="10000.0">Minimum absolute pressure (Pa) confirming hold</input_port>
+    </Condition>
+
+    <Condition ID="IsDropZoneOccupied">
+      <input_port name="zone_id">Drop zone identifier to query</input_port>
+    </Condition>
+
+    <!-- ── Controls ─────────────────────────────────────────────────── -->
+
+    <Control ID="ForEachNutTarget">
+      <!--
+        Reads {nut_list} from the blackboard (populated by LoadNutMission).
+        For each nut entry (in descending priority order) writes:
+          {current_nut_id}, {cluster_id}, {approach_1}, {approach_2}
+        Always advances to the next nut regardless of the child's return
+        status (equivalent to ForceSuccess wrapping, but built into the
+        control node for clarity).
+      -->
+    </Control>
+
+  </TreeNodesModel>
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       SUBTREE: PickupAttempt
+       Fine-align to the cluster, activate vacuum pumps, and verify hold.
+       Returns FAILURE if alignment fails, pumps fail, or vacuum is lost.
+       ══════════════════════════════════════════════════════════════════════ -->
+  <BehaviorTree ID="PickupAttempt">
+    <Sequence name="pickup_attempt_seq">
+
+      <!-- Fine-align robot position using ArUco visual servoing -->
+      <Action ID="AlignToCluster"
+              name="visual_servo"
+              cluster_id="{cluster_id}"
+              alignment_threshold="0.02"/>
+
+      <!-- Activate all vacuum pumps -->
+      <Action ID="ActivateAllPumps"
+              name="activate_pumps"
+              num_pumps="4"
+              duty_cycle="1.0"/>
+
+      <!-- Allow vacuum to build up before checking pressure -->
+      <Action ID="Wait"
+              name="pump_buildup_delay"
+              duration="0.5"/>
+
+      <!-- Confirm objects are held (pressure drop indicates suction) -->
+      <Condition ID="VerifyVacuumPickup"
+                 name="check_vacuum_hold"
+                 min_pressure_pa="10000.0"/>
+
+    </Sequence>
+  </BehaviorTree>
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       SUBTREE: DropObjects
+       Iterate drop zones in fixed priority order (zone_a highest).
+       Skip zones that are already occupied.
+       Always succeeds: worst case performs an emergency release in place.
+       ══════════════════════════════════════════════════════════════════════ -->
+  <BehaviorTree ID="DropObjects">
+    <Fallback name="find_available_drop_zone">
+
+      <!-- ── Drop zone A (highest priority) ─────────────────────────── -->
+      <Sequence name="drop_at_zone_a">
+
+        <!-- Skip this zone immediately if it is already occupied. -->
+        <!-- IsDropZoneOccupied → SUCCESS when occupied;            -->
+        <!-- Inverter converts that to FAILURE so the Sequence stops. -->
+        <Inverter name="zone_a_not_occupied">
+          <Condition ID="IsDropZoneOccupied"
+                     name="check_zone_a"
+                     zone_id="zone_a"/>
+        </Inverter>
+
+        <!-- Navigate to the pre-computed robot drop pose for zone A.
+             If navigation fails (path blocked) the Sequence fails and
+             the Fallback will try zone B. -->
+        <Action ID="NavigateToDropZone"
+                name="nav_to_zone_a"
+                zone_id="zone_a"
+                timeout="30.0"/>
+
+        <!-- Release vacuum hold -->
+        <Action ID="ReleaseAllPumps"
+                name="release_pumps_zone_a"
+                num_pumps="4"/>
+
+        <!-- Brief pause to ensure objects settle before backing up -->
+        <Action ID="Wait"
+                name="release_settle_a"
+                duration="0.3"/>
+
+        <!-- Back away from the drop zone -->
+        <Action ID="BackupFromDrop"
+                name="backup_from_zone_a"
+                distance="0.30"
+                speed="0.2"/>
+
+        <!-- Persist: zone A is now occupied for the rest of this run -->
+        <Action ID="MarkDropZoneOccupied"
+                name="mark_zone_a_occupied"
+                zone_id="zone_a"/>
+
+        <Action ID="LogInfo"
+                name="log_dropped_zone_a"
+                message="Objects deposited in zone_a"/>
+
+      </Sequence>
+
+      <!-- ── Drop zone B (lower priority) ──────────────────────────── -->
+      <Sequence name="drop_at_zone_b">
+
+        <Inverter name="zone_b_not_occupied">
+          <Condition ID="IsDropZoneOccupied"
+                     name="check_zone_b"
+                     zone_id="zone_b"/>
+        </Inverter>
+
+        <Action ID="NavigateToDropZone"
+                name="nav_to_zone_b"
+                zone_id="zone_b"
+                timeout="30.0"/>
+
+        <Action ID="ReleaseAllPumps"
+                name="release_pumps_zone_b"
+                num_pumps="4"/>
+
+        <Action ID="Wait"
+                name="release_settle_b"
+                duration="0.3"/>
+
+        <Action ID="BackupFromDrop"
+                name="backup_from_zone_b"
+                distance="0.30"
+                speed="0.2"/>
+
+        <Action ID="MarkDropZoneOccupied"
+                name="mark_zone_b_occupied"
+                zone_id="zone_b"/>
+
+        <Action ID="LogInfo"
+                name="log_dropped_zone_b"
+                message="Objects deposited in zone_b"/>
+
+      </Sequence>
+
+      <!-- ── All zones occupied: emergency release in place ─────────── -->
+      <!--    This branch always succeeds so DropObjects never hard-fails. -->
+      <Sequence name="emergency_release">
+        <Action ID="ReleaseAllPumps"
+                name="emergency_release_pumps"
+                num_pumps="4"/>
+        <Action ID="LogInfo"
+                name="log_all_zones_full"
+                message="All drop zones occupied – objects released in place"/>
+      </Sequence>
+
+    </Fallback>
+  </BehaviorTree>
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       MAIN TREE: NutPickupMission
+       ══════════════════════════════════════════════════════════════════════ -->
+  <BehaviorTree ID="NutPickupMission">
+    <Sequence name="mission_root">
+
+      <!-- ── Initialisation ─────────────────────────────────────────── -->
+      <!-- Reads nut_pickup_config.yaml; writes {nut_list} and           -->
+      <!-- {drop_zone_list} to the blackboard; initialises the           -->
+      <!-- occupied-zone and empty-location memory sets.                 -->
+      <Action ID="LoadNutMission"
+              name="load_mission_config"
+              config_file="{config_file}"
+              robot_side="{robot_side}"/>
+
+      <Action ID="LogInfo"
+              name="log_mission_start"
+              message="Nut pickup mission started (side={robot_side})"/>
+
+      <!-- ── Main nut processing loop ───────────────────────────────── -->
+      <!--
+           ForEachNutTarget reads {nut_list} (sorted descending by
+           priority) and for each iteration writes to the blackboard:
+             {current_nut_id}  – nut identifier string
+             {cluster_id}      – ArUco cluster ID (int)
+             {approach_1}      – primary approach Pose2D
+             {approach_2}      – secondary approach Pose2D (may be invalid)
+
+           Each nut is processed by the child regardless of whether the
+           previous nut succeeded or failed.
+      -->
+      <ForEachNutTarget name="nut_iterator">
+
+        <!--
+             ForceSuccess ensures the ForEachNutTarget always sees SUCCESS
+             from each nut's sub-mission so the loop advances to the next
+             nut even when a nut is skipped, blocked, or pickup fails.
+        -->
+        <ForceSuccess name="always_advance_to_next_nut">
+          <Sequence name="nut_task">
+
+            <!-- ═══════════════════════════════════════════════════════
+                 STEP 1 – Reach an accessible approach point
+                 ─────────────────────────────────────────────────────
+                 Try approach_1.  If it is blocked, try approach_2
+                 (skipped automatically when the pose is unset).
+                 If both fail: lower this target's priority, log the
+                 situation, then fail → ForceSuccess → next nut.
+                 ═══════════════════════════════════════════════════════ -->
+            <Fallback name="try_approaches">
+
+              <!-- Primary approach point -->
+              <Action ID="NavigateToApproach"
+                      name="navigate_approach_1"
+                      pose="{approach_1}"
+                      timeout="30.0"/>
+
+              <!-- Secondary approach point (only tried when configured) -->
+              <Sequence name="try_approach_2">
+                <!-- Condition fails immediately if approach_2 is not set,
+                     preventing a spurious navigation call. -->
+                <Condition ID="HasValidApproach"
+                           name="check_approach_2_configured"
+                           pose="{approach_2}"/>
+                <Action ID="NavigateToApproach"
+                        name="navigate_approach_2"
+                        pose="{approach_2}"
+                        timeout="30.0"/>
+              </Sequence>
+
+              <!-- Both approaches blocked: penalise and signal failure -->
+              <Sequence name="all_approaches_blocked">
+                <Action ID="LowerTargetPriority"
+                        name="lower_priority_on_blocked"
+                        target_id="{current_nut_id}"/>
+                <Action ID="LogInfo"
+                        name="log_all_blocked"
+                        message="All approaches blocked for {current_nut_id} – lowering priority"/>
+                <!-- ForceFailure makes the Fallback return FAILURE,
+                     which propagates up to nut_task → ForceSuccess. -->
+                <ForceFailure name="signal_approach_cancel">
+                  <Wait name="fail_sentinel_approach" duration="0"/>
+                </ForceFailure>
+              </Sequence>
+
+            </Fallback>
+
+
+            <!-- ═══════════════════════════════════════════════════════
+                 STEP 2 – Detect objects at this location
+                 ─────────────────────────────────────────────────────
+                 Check /cluster_pickability for the nut's cluster_id.
+                   • Objects present  → SUCCESS; continue to pickup.
+                   • No objects found → mark location as empty, then
+                     fail so nut_task fails → ForceSuccess → next nut.
+                 ═══════════════════════════════════════════════════════ -->
+            <Fallback name="detect_objects_or_mark_empty">
+
+              <!-- SUCCESS path: objects detected -->
+              <Condition ID="CheckObjectsPresent"
+                         name="detect_objects"
+                         cluster_id="{cluster_id}"
+                         detection_timeout_sec="0.5"/>
+
+              <!-- FAILURE path: no objects – record and skip -->
+              <Sequence name="empty_location_handler">
+                <Action ID="MarkLocationEmpty"
+                        name="remember_empty_location"
+                        target_id="{current_nut_id}"/>
+                <Action ID="LogInfo"
+                        name="log_location_empty"
+                        message="No objects at {current_nut_id} – marking empty and skipping"/>
+                <!-- Both children above succeeded; ForceFailure converts
+                     this Sequence to FAILURE so the parent Fallback
+                     also fails, propagating failure up to nut_task. -->
+                <ForceFailure name="signal_empty_skip">
+                  <Wait name="fail_sentinel_empty" duration="0"/>
+                </ForceFailure>
+              </Sequence>
+
+            </Fallback>
+
+
+            <!-- ═══════════════════════════════════════════════════════
+                 STEP 3 – Pick up objects (with 1 retry) then drop
+                 ─────────────────────────────────────────────────────
+                 Happy path  : pick (retried once on failure) → drop.
+                 Failure path: release pumps safely, lower priority,
+                               and return SUCCESS so the loop continues.
+                 ═══════════════════════════════════════════════════════ -->
+            <Fallback name="pickup_or_penalize">
+
+              <!-- Happy path: attempt pickup then deposit -->
+              <Sequence name="pickup_and_drop">
+
+                <!--
+                     num_attempts="2" → 1 initial attempt + 1 retry.
+                     Returns FAILURE only after both attempts fail.
+                -->
+                <RetryUntilSuccessful num_attempts="2"
+                                      name="pickup_with_one_retry">
+                  <SubTree ID="PickupAttempt"
+                           cluster_id="{cluster_id}"
+                           _autoremap="true"/>
+                </RetryUntilSuccessful>
+
+                <!-- Navigate to drop zone and release objects -->
+                <SubTree ID="DropObjects"
+                         _autoremap="true"/>
+
+              </Sequence>
+
+              <!-- Failure path: both pickup attempts failed -->
+              <Sequence name="pickup_failed_handler">
+                <!-- Ensure pumps are off regardless of failure mode -->
+                <Action ID="ReleaseAllPumps"
+                        name="safe_release_on_pickup_fail"
+                        num_pumps="4"/>
+                <Action ID="LowerTargetPriority"
+                        name="lower_priority_on_pickup_fail"
+                        target_id="{current_nut_id}"/>
+                <Action ID="LogInfo"
+                        name="log_pickup_failed"
+                        message="Pickup failed for {current_nut_id} after retry – lowering priority"/>
+                <!-- This Sequence returns SUCCESS (all children succeeded),
+                     so the Fallback returns SUCCESS and nut_task succeeds,
+                     advancing the loop to the next nut cleanly. -->
+              </Sequence>
+
+            </Fallback>
+
+          </Sequence>
+        </ForceSuccess>
+
+      </ForEachNutTarget>
+
+      <!-- ── Mission complete ───────────────────────────────────────── -->
+      <Action ID="LogInfo"
+              name="log_mission_complete"
+              message="Nut pickup mission finished"/>
+
+    </Sequence>
+  </BehaviorTree>
+
+</root>

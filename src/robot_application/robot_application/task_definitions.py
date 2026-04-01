@@ -298,6 +298,7 @@ def create_pick_nut_task(nut_id: str, approach_loc: Dict[str, float],
         success_probability=0.80,
         base_priority=7,
         target_location=approach_loc,
+        behavior_tree="nut_pickup.xml",
         mission_class="NutPickupMission",
         parameters={
             'nut_id': nut_id,
