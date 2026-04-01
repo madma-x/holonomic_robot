@@ -51,7 +51,6 @@ class Task:
     parameters: Dict[str, Any] = field(default_factory=dict)
     
     # Execution
-    behavior_tree: str = None           # Path to behavior tree XML
     mission_class: str = None           # Mission class name
     
     # State
@@ -171,76 +170,6 @@ def endgame_priority(time_remaining: float, current_score: int,
 
 # Task factory functions
 
-def create_pick_cube_task(cube_id: str, location: Dict[str, float], 
-                         points: float = 10.0) -> Task:
-    """Create a pick cube task."""
-    return Task(
-        task_id=f"pick_cube_{cube_id}",
-        task_type=TaskType.PICK_CUBE,
-        name=f"Pick Cube {cube_id}",
-        description=f"Pick up cube {cube_id} from field",
-        base_points=points,
-        time_estimate=12.0,
-        success_probability=0.85,
-        base_priority=6,
-        target_location=location,
-        behavior_tree="pick_place.xml",
-        parameters={'cube_id': cube_id, 'method': 'gripper'}
-    )
-
-
-def create_place_cube_task(cube_id: str, location: Dict[str, float], 
-                          points: float = 15.0) -> Task:
-    """Create a place cube task."""
-    return Task(
-        task_id=f"place_cube_{cube_id}",
-        task_type=TaskType.PLACE_CUBE,
-        name=f"Place Cube {cube_id}",
-        description=f"Place cube {cube_id} in scoring zone",
-        base_points=points,
-        time_estimate=10.0,
-        success_probability=0.90,
-        base_priority=7,
-        target_location=location,
-        behavior_tree="pick_place.xml",
-        parameters={'cube_id': cube_id}
-    )
-
-
-def create_defend_task(area_id: str, location: Dict[str, float], 
-                      duration: float = 20.0) -> Task:
-    """Create a defense task."""
-    return Task(
-        task_id=f"defend_{area_id}",
-        task_type=TaskType.DEFEND_AREA,
-        name=f"Defend {area_id}",
-        description=f"Defend area {area_id} from opponents",
-        base_points=5.0,  # Defensive bonus
-        time_estimate=duration,
-        success_probability=0.95,
-        base_priority=4,
-        target_location=location,
-        behavior_tree="patrol.xml",
-        parameters={'area_id': area_id, 'duration': duration}
-    )
-
-
-def create_steal_cube_task(cube_id: str, location: Dict[str, float], 
-                          points: float = 20.0) -> Task:
-    """Create a steal cube task (high risk, high reward)."""
-    return Task(
-        task_id=f"steal_cube_{cube_id}",
-        task_type=TaskType.STEAL_CUBE,
-        name=f"Steal Cube {cube_id}",
-        description=f"Steal cube {cube_id} from opponent",
-        base_points=points,
-        time_estimate=18.0,
-        success_probability=0.60,  # Riskier
-        base_priority=8,
-        target_location=location,
-        behavior_tree="pick_place.xml",
-        parameters={'cube_id': cube_id, 'method': 'vacuum', 'aggressive': True}
-    )
 
 
 def create_return_base_task(base_location: Dict[str, float]) -> Task:
@@ -255,29 +184,26 @@ def create_return_base_task(base_location: Dict[str, float]) -> Task:
         success_probability=0.98,
         base_priority=10,  # Highest priority in endgame
         target_location=base_location,
-        behavior_tree="patrol.xml",
         priority_function=endgame_priority,
         parameters={'is_final_return': True}
     )
 
 
-def create_move_object_task(object_id: str, from_loc: Dict[str, float], 
-                           to_loc: Dict[str, float], points: float = 12.0) -> Task:
-    """Create a move object task."""
-    return Task(
-        task_id=f"move_object_{object_id}",
-        task_type=TaskType.MOVE_OBJECT,
-        name=f"Move Object {object_id}",
-        description=f"Move object {object_id} to new location",
-        base_points=points,
-        time_estimate=20.0,
-        success_probability=0.80,
-        base_priority=5,
-        target_location=from_loc,
-        behavior_tree="pick_place.xml",
-        parameters={
-            'object_id': object_id,
-            'from_location': from_loc,
-            'to_location': to_loc
-        }
-    )
+def create_pick_place_task(task_id: str,pick_locations: List[Dict[str, Any]],drop_locations: List[Dict[str, Any]],points: float = 15.0,pickup_method: str = 'pump') -> Task:
+        """Create a pick-place task using priority-ordered pick/drop lists."""
+
+        return Task(
+                task_id=task_id,
+                task_type=TaskType.MOVE_OBJECT,
+                name=f"Prioritized PickPlace {task_id}",
+                description='Select pick and drop targets by priority',
+                base_points=points,
+                time_estimate=18.0,
+                success_probability=0.85,
+                base_priority=7,
+                parameters={
+                        'pickup_method': pickup_method,
+                        'pick_locations': pick_locations,
+                        'drop_locations': drop_locations
+                }
+        )

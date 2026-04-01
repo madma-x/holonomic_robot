@@ -131,6 +131,21 @@ def generate_launch_description():
         ]
     )
 
+    # Single mission executor node (dispatches to in-process handlers)
+    mission_executor_node = Node(
+        package='robot_application',
+        executable='mission_executor',
+        name='mission_executor',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([
+                FindPackageShare('robot_application'),
+                'config',
+                'mission_controller.yaml'
+            ])
+        ]
+    )
+
     # RViz2 for real-time visualization
     rviz_node = Node(
         package='rviz2',
@@ -155,5 +170,6 @@ def generate_launch_description():
         nav2_launch,
         game_state_manager_node,
         task_planner_node,
+        mission_executor_node,
         rviz_node
     ])

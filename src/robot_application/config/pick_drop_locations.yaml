@@ -1,0 +1,181 @@
+# Theoretical location catalog for pick-and-place planning
+# - `pick_locations`: all possible pickup targets with linked approach positions
+# - `drop_locations`: all possible drop targets with linked approach positions
+#
+# Priority convention:
+# - Higher `priority` = preferred first for pick locations
+# - Lower `priority` = preferred first for drop locations
+
+pick_locations:
+  - id: "pick_A"
+    name: "Pick A"
+    priority: 100
+    location:
+      x: 1.00
+      y: 0.50
+      theta: 0.00
+    approach_positions:
+      - id: "pick_A_app_1"
+        priority: 1
+        pose:
+          x: 1.30
+          y: 0.50
+          theta: 0.00
+      - id: "pick_A_app_2"
+        priority: 2
+        pose:
+          x: 1.00
+          y: 0.80
+          theta: 1.57
+
+  - id: "pick_B"
+    name: "Pick B"
+    priority: 90
+    location:
+      x: 1.30
+      y: 0.50
+      theta: 0.00
+    approach_positions:
+      - id: "pick_B_app_1"
+        priority: 1
+        pose:
+          x: 1.60
+          y: 0.50
+          theta: 0.00
+      - id: "pick_B_app_2"
+        priority: 2
+        pose:
+          x: 1.30
+          y: 0.80
+          theta: 1.57
+
+  - id: "pick_C"
+    name: "Pick C"
+    priority: 80
+    location:
+      x: 1.50
+      y: 1.00
+      theta: 1.57
+    approach_positions:
+      - id: "pick_C_app_1"
+        priority: 1
+        pose:
+          x: 1.50
+          y: 0.70
+          theta: 1.57
+      - id: "pick_C_app_2"
+        priority: 2
+        pose:
+          x: 1.80
+          y: 1.00
+          theta: 0.00
+
+  - id: "pick_D"
+    name: "Pick D"
+    priority: 70
+    location:
+      x: 1.50
+      y: 1.50
+      theta: 1.57
+    approach_positions:
+      - id: "pick_D_app_1"
+        priority: 1
+        pose:
+          x: 1.50
+          y: 1.20
+          theta: 1.57
+      - id: "pick_D_app_2"
+        priority: 2
+        pose:
+          x: 1.80
+          y: 1.50
+          theta: 0.00
+
+drop_locations:
+  - id: "drop_A"
+    name: "Drop A"
+    priority: 1
+    capacity: 1
+    location:
+      x: 2.50
+      y: 0.50
+      theta: 0.00
+    approach_positions:
+      - id: "drop_A_app_1"
+        priority: 1
+        pose:
+          x: 2.20
+          y: 0.50
+          theta: 0.00
+      - id: "drop_A_app_2"
+        priority: 2
+        pose:
+          x: 2.50
+          y: 0.80
+          theta: 1.57
+
+  - id: "drop_B"
+    name: "Drop B"
+    priority: 2
+    capacity: 1
+    location:
+      x: 2.50
+      y: 0.90
+      theta: 0.00
+    approach_positions:
+      - id: "drop_B_app_1"
+        priority: 1
+        pose:
+          x: 2.20
+          y: 0.90
+          theta: 0.00
+      - id: "drop_B_app_2"
+        priority: 2
+        pose:
+          x: 2.50
+          y: 1.20
+          theta: 1.57
+
+  - id: "drop_C"
+    name: "Drop C"
+    priority: 3
+    capacity: 1
+    location:
+      x: 0.50
+      y: 1.50
+      theta: 3.14
+    approach_positions:
+      - id: "drop_C_app_1"
+        priority: 1
+        pose:
+          x: 0.80
+          y: 1.50
+          theta: 3.14
+      - id: "drop_C_app_2"
+        priority: 2
+        pose:
+          x: 0.50
+          y: 1.20
+          theta: -1.57
+
+  - id: "drop_D"
+    name: "Drop D"
+    priority: 4
+    capacity: 1
+    location:
+      x: 0.50
+      y: 1.90
+      theta: 3.14
+    approach_positions:
+      - id: "drop_D_app_1"
+        priority: 1
+        pose:
+          x: 0.80
+          y: 1.90
+          theta: 3.14
+      - id: "drop_D_app_2"
+        priority: 2
+        pose:
+          x: 0.50
+          y: 1.60
+          theta: -1.57

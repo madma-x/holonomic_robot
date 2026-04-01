@@ -16,13 +16,15 @@ from geometry_msgs.msg import Point, PoseStamped
 from nav2_msgs.action import NavigateToPose
 import threading
 import time
-from typing import List, Optional
+import os
+import yaml
+import json
+from typing import List, Optional, Dict, Any, Tuple
+from ament_index_python.packages import get_package_share_directory
 
 from robot_application.task_definitions import (
     Task, TaskType, TaskStatus,
-    create_pick_cube_task, create_place_cube_task,
-    create_defend_task, create_steal_cube_task,
-    create_return_base_task, create_move_object_task,
+    create_return_base_task, create_pick_place_task,
     early_game_priority, mid_game_priority,
     late_game_priority, endgame_priority
 )
@@ -53,6 +55,9 @@ class TaskPlanner(Node):
         self.declare_parameter('min_utility_threshold', 0.5)
         self.declare_parameter('base_location_x', 0.0)
         self.declare_parameter('base_location_y', 0.0)
+        self.declare_parameter('mission_executor_assignment_topic', '/planner/task_assignment')
+        self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
+        self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
         
         # Get parameters
         self.replan_interval = self.get_parameter('replan_interval_sec').value
@@ -68,6 +73,8 @@ class TaskPlanner(Node):
         self.current_task: Optional[Task] = None
         self.completed_tasks: List[Task] = []
         self.failed_tasks: List[Task] = []
+        self.empty_pick_locations = set()
+        self.occupied_drop_locations = set()
         
         # Game state tracking
         self.time_remaining = 180.0
@@ -76,6 +83,7 @@ class TaskPlanner(Node):
         self.current_phase = GamePhase.SETUP
         self.match_active = False
         self.robot_position = Point()
+        self.mission_executor_status = 'IDLE'
         
         # Subscribers for game state
         self.time_sub = self.create_subscription(
@@ -92,6 +100,18 @@ class TaskPlanner(Node):
         # Publishers
         self.current_task_pub = self.create_publisher(String, '/planner/current_task', 10)
         self.queue_size_pub = self.create_publisher(Int32, '/planner/queue_size', 10)
+        assignment_topic = self.get_parameter('mission_executor_assignment_topic').value
+        status_topic = self.get_parameter('mission_executor_status_topic').value
+        start_service = self.get_parameter('mission_executor_start_service').value
+
+        self.mission_assignment_pub = self.create_publisher(String, assignment_topic, 10)
+        self.mission_executor_status_sub = self.create_subscription(
+            String,
+            status_topic,
+            self.mission_executor_status_callback,
+            10
+        )
+        self.mission_executor_start_client = self.create_client(Trigger, start_service)
         
         # Services
         self.start_planning_srv = self.create_service(
@@ -117,31 +137,103 @@ class TaskPlanner(Node):
     
     
     def initialize_default_tasks(self):
-        """Initialize default task library."""
-        # Example tasks - these would normally come from vision/perception
-        
-        # Pick and place cubes
-        for i in range(3):
-            cube_loc = {'x': 1.0 + i*0.3, 'y': 0.5, 'theta': 0.0}
-            self.add_task(create_pick_cube_task(f"cube_{i}", cube_loc, points=10.0))
-        
-        # Scoring locations
-        for i in range(3):
-            score_loc = {'x': 2.0, 'y': 0.3 + i*0.3, 'theta': 1.57}
-            self.add_task(create_place_cube_task(f"cube_{i}", score_loc, points=15.0))
-        
-        # Defend high-value area
-        defend_loc = {'x': 1.5, 'y': 1.0, 'theta': 0.0}
-        self.add_task(create_defend_task("scoring_zone", defend_loc, duration=30.0))
-        
-        # Steal from opponent (risky, high reward)
-        steal_loc = {'x': 2.5, 'y': 1.5, 'theta': 3.14}
-        self.add_task(create_steal_cube_task("opponent_cube", steal_loc, points=25.0))
-        
+        """Initialize default task library with pick-and-place tasks.
+
+        - Picks are ordered by descending priority.
+        - Each pick is linked to the closest drop location.
+        """
+        pick_locations, drop_locations = self._load_pick_drop_locations()
+
+        sorted_picks = sorted(pick_locations, key=lambda pick: pick.get('priority', 0), reverse=True)
+
+        for pick in sorted_picks:
+            linked_drop = min(
+                drop_locations,
+                key=lambda drop: self._distance_between_locations(
+                    pick.get('location', {}),
+                    drop.get('location', {})
+                )
+            )
+
+            pick_drop_task = create_pick_place_task(
+                task_id=f"pick_place_{pick['id']}",
+                pick_locations=[pick],
+                drop_locations=[linked_drop],
+                points=15.0,
+                pickup_method='pump'
+            )
+            self.add_task(pick_drop_task)
+
         # Return to base (always available)
         self.add_task(create_return_base_task(self.base_location))
         
         self.get_logger().info(f'Initialized {len(self.task_queue)} default tasks')
+
+    def _load_pick_drop_locations(self):
+        """Load pick/drop location catalog from YAML and normalize schema."""
+        config_path = None
+        try:
+            package_share = get_package_share_directory('robot_application')
+            config_path = os.path.join(package_share, 'config', 'pick_drop_locations.yaml')
+            with open(config_path, 'r', encoding='utf-8') as config_file:
+                config = yaml.safe_load(config_file) or {}
+        except Exception:
+            config_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), '..', 'config', 'pick_drop_locations.yaml')
+            )
+            with open(config_path, 'r', encoding='utf-8') as config_file:
+                config = yaml.safe_load(config_file) or {}
+
+        pick_locations = self._normalize_locations(config.get('pick_locations', []))
+        drop_locations = self._normalize_locations(config.get('drop_locations', []))
+
+        if not pick_locations or not drop_locations:
+            raise RuntimeError(f'pick_drop_locations.yaml is missing picks or drops: {config_path}')
+
+        self.get_logger().info(
+            f'Loaded pick/drop catalog: {len(pick_locations)} picks, {len(drop_locations)} drops'
+        )
+        return pick_locations, drop_locations
+
+    def _normalize_locations(self, locations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert approach positions from {pose: {x,y,theta}} into flat {x,y,theta}."""
+        normalized = []
+        for location in locations:
+            approach_positions = []
+            for approach in location.get('approach_positions', []):
+                pose = approach.get('pose', {})
+                approach_positions.append({
+                    'id': approach.get('id'),
+                    'priority': approach.get('priority', 1),
+                    'x': float(pose.get('x', 0.0)),
+                    'y': float(pose.get('y', 0.0)),
+                    'theta': float(pose.get('theta', 0.0))
+                })
+
+            normalized.append({
+                'id': location.get('id'),
+                'name': location.get('name', location.get('id', 'location')),
+                'priority': int(location.get('priority', 0)),
+                'location': {
+                    'x': float(location.get('location', {}).get('x', 0.0)),
+                    'y': float(location.get('location', {}).get('y', 0.0)),
+                    'theta': float(location.get('location', {}).get('theta', 0.0))
+                },
+                'approach_positions': sorted(
+                    approach_positions,
+                    key=lambda approach: int(approach.get('priority', 1))
+                )
+            })
+
+        return normalized
+
+    def _distance_between_locations(self, from_location: Dict[str, float], to_location: Dict[str, float]) -> float:
+        """Compute planar distance between two {x, y, theta} dict locations."""
+        from_x = float(from_location.get('x', 0.0))
+        from_y = float(from_location.get('y', 0.0))
+        to_x = float(to_location.get('x', 0.0))
+        to_y = float(to_location.get('y', 0.0))
+        return ((from_x - to_x) ** 2 + (from_y - to_y) ** 2) ** 0.5
     
     def add_task(self, task: Task):
         """Add a task to the queue."""
@@ -316,34 +408,7 @@ class TaskPlanner(Node):
             time.sleep(0.5)
         
         self.get_logger().info('Strategic planning loop stopped')
-    
-    def execute_task(self, task: Task) -> bool:
-        """Execute a task using appropriate mission."""
-        # This is a simplified execution - in practice, you'd dispatch to
-        # appropriate mission classes based on task type
-        
-        self.get_logger().info(f'Executing {task.task_type.value}: {task.name}')
-        
-        # Simulate task execution for now
-        # In real implementation, this would:
-        # 1. Load appropriate behavior tree or mission class
-        # 2. Execute with task parameters
-        # 3. Monitor progress
-        # 4. Handle interruptions
-        
-        # For demonstration, just sleep for estimated time
-        sleep_time = min(task.time_estimate, self.time_remaining * 0.8)
-        
-        start_time = time.time()
-        while time.time() - start_time < sleep_time:
-            if self.stop_requested or not self.planning_active:
-                return False
-            time.sleep(0.1)
-        
-        # Simulate success/failure based on probability
-        import random
-        return random.random() < task.success_probability
-    
+
     def interrupt_current_task(self):
         """Interrupt currently executing task."""
         if self.current_task:
@@ -354,6 +419,94 @@ class TaskPlanner(Node):
     def pose_callback(self, msg: PoseStamped):
         """Update robot position."""
         self.robot_position = msg.pose.position
+
+    def pick_place_status_callback(self, msg: String):
+        """Track mission state from pick_place mission node."""
+        self.pick_place_status = msg.data
+
+    def execute_task(self, task: Task) -> bool:
+        """Execute task by dispatching to mission implementation."""
+        self.get_logger().info(f'Executing {task.task_type.value}: {task.name}')
+
+        if task.task_type == TaskType.MOVE_OBJECT:
+            return self._execute_move_object_task(task)
+
+        # Fallback simulation for non pick-place task types.
+        sleep_time = min(task.time_estimate, self.time_remaining * 0.8)
+        start_time = time.time()
+        while time.time() - start_time < sleep_time:
+            if self.stop_requested or not self.planning_active:
+                return False
+            time.sleep(0.1)
+        return True
+
+    def _execute_move_object_task(self, task: Task) -> bool:
+        """Send task to mission executor and wait for outcome."""
+        payload = {
+            'name': task.name,
+            'task_id': task.task_id,
+            'task_type': task.task_type.value,
+            'pick_locations': task.parameters.get('pick_locations', []),
+            'drop_positions': task.parameters.get('drop_locations', []),
+            'pickup_method': task.parameters.get('pickup_method', 'pump'),
+            'pickup_duration': task.parameters.get('pickup_duration', 2.0),
+            'priority': task.base_priority
+        }
+
+        assignment_msg = String()
+        assignment_msg.data = json.dumps(payload)
+        self.mission_assignment_pub.publish(assignment_msg)
+        self.get_logger().info(f'Dispatched task to mission_executor: {task.task_id}')
+
+        start_ok = self._start_mission_executor()
+        if not start_ok:
+            self.get_logger().error('Failed to start mission_executor mission')
+            return False
+
+        timeout = max(15.0, float(task.time_estimate) + 25.0)
+        return self._wait_for_mission_executor_result(timeout)
+
+    def _start_mission_executor(self) -> bool:
+        """Call mission_executor start_mission service."""
+        if not self.mission_executor_start_client.wait_for_service(timeout_sec=2.0):
+            return False
+
+        future = self.mission_executor_start_client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+        response = future.result()
+        if response is None:
+            return False
+
+        if response.success:
+            return True
+
+        # Mission might already be running and able to consume assignment.
+        return 'already running' in response.message.lower()
+
+    def _wait_for_mission_executor_result(self, timeout_sec: float) -> bool:
+        """Wait for mission state transition to COMPLETED/FAILED."""
+        deadline = time.time() + timeout_sec
+        saw_running = (self.mission_executor_status == 'RUNNING')
+
+        while time.time() < deadline and not self.stop_requested:
+            status = self.mission_executor_status
+            if status == 'RUNNING':
+                saw_running = True
+            if saw_running and status == 'COMPLETED':
+                return True
+            if saw_running and status == 'FAILED':
+                return False
+            time.sleep(0.1)
+
+        return False
+
+    def pick_place_status_callback(self, msg: String):
+        """Backward-compatibility callback alias."""
+        self.mission_executor_status_callback(msg)
+
+    def mission_executor_status_callback(self, msg: String):
+        """Track mission state from mission_executor node."""
+        self.mission_executor_status = msg.data
     
     def publish_status(self):
         """Publish planner status."""
