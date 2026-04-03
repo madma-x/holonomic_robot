@@ -8,14 +8,9 @@ import math
 
 class TaskType(Enum):
     """Types of tasks the robot can perform."""
-    PICK_CUBE = "pick_cube"
-    PLACE_CUBE = "place_cube"
+    FLIP_OBJECT = "flip_object"
     MOVE_OBJECT = "move_object"
-    DEFEND_AREA = "defend_area"
-    STEAL_CUBE = "steal_cube"
     RETURN_BASE = "return_base"
-    PATROL = "patrol"
-    WAIT = "wait"
 
 
 class TaskStatus(Enum):
@@ -47,11 +42,8 @@ class Task:
     priority_function: Callable = None  # Custom priority calculation
     
     # Task parameters
-    target_location: Dict[str, float] = field(default_factory=dict)  # {x, y, theta}
     parameters: Dict[str, Any] = field(default_factory=dict)
     
-    # Execution
-    mission_class: str = None           # Mission class name
     
     # State
     status: TaskStatus = TaskStatus.PENDING
@@ -189,21 +181,19 @@ def create_return_base_task(base_location: Dict[str, float]) -> Task:
     )
 
 
-def create_pick_place_task(task_id: str,pick_locations: List[Dict[str, Any]],drop_locations: List[Dict[str, Any]],points: float = 15.0,pickup_method: str = 'pump') -> Task:
+def create_pick_place_task(task_id: str,pick_location: Dict[str, Any],drop_location: Dict[str, Any]) -> Task:
         """Create a pick-place task using priority-ordered pick/drop lists."""
 
         return Task(
                 task_id=task_id,
                 task_type=TaskType.MOVE_OBJECT,
-                name=f"Prioritized PickPlace {task_id}",
+                name=f"PickPlace {task_id}",
                 description='Select pick and drop targets by priority',
-                base_points=points,
                 time_estimate=18.0,
                 success_probability=0.85,
                 base_priority=7,
                 parameters={
-                        'pickup_method': pickup_method,
-                        'pick_locations': pick_locations,
-                        'drop_locations': drop_locations
+                        'pick_location': pick_location,
+                        'drop_location': drop_location
                 }
         )

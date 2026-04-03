@@ -2,7 +2,7 @@
 
 import json
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import rclpy
 from std_msgs.msg import String
@@ -22,6 +22,7 @@ class MissionExecutor(MissionBase):
 
         self.task_queue: List[dict] = []
         self.handlers = [PickPlaceHandler(self)]
+        self.outcome_seq = 0
 
         self.assignment_sub = self.create_subscription(
             String,
@@ -80,12 +81,21 @@ class MissionExecutor(MissionBase):
             handler = self._find_handler(task)
             if handler is None:
                 self.get_logger().error(f"No handler for task_type={task.get('task_type')}")
+                self._publish_outcome(self._normalize_outcome(task, None, status='FAILED', reason='NO_HANDLER'))
                 self.state = MissionState.FAILED
                 return
 
             self.get_logger().info(f"Executing task_id={task.get('task_id', 'unknown')}")
-            success = handler.execute(task)
-            if not success:
+            handler_result = handler.execute(task)
+            outcome = self._normalize_outcome(task, handler_result)
+            self._publish_outcome(outcome)
+
+            outcome_status = str(outcome.get('status', 'FAILED')).upper()
+            if outcome_status == 'REPLAN_REQUIRED':
+                self.state = MissionState.RUNNING
+                continue
+
+            if outcome_status != 'COMPLETED':
                 self.state = MissionState.FAILED
                 return
 
@@ -93,6 +103,51 @@ class MissionExecutor(MissionBase):
             self.progress = min(99.0, float(completed) * 20.0)
 
         self.state = MissionState.IDLE
+
+    def _normalize_outcome(
+        self,
+        task: dict,
+        handler_result: Any,
+        status: str = 'FAILED',
+        reason: str = 'UNKNOWN'
+    ) -> Dict[str, Any]:
+        allowed_statuses = {'COMPLETED', 'FAILED', 'REPLAN_REQUIRED'}
+        if isinstance(handler_result, dict):
+            outcome = dict(handler_result)
+        elif isinstance(handler_result, bool):
+            outcome = {
+                'status': 'COMPLETED' if handler_result else status,
+                'outcome_reason': 'PLACED' if handler_result else reason
+            }
+        else:
+            outcome = {
+                'status': status,
+                'outcome_reason': reason
+            }
+
+        self.outcome_seq += 1
+        outcome.setdefault('task_id', str(task.get('task_id', 'unknown')))
+        outcome.setdefault('task_type', str(task.get('task_type', 'unknown')))
+        outcome.setdefault('status', status)
+        outcome.setdefault('outcome_reason', reason)
+        outcome.setdefault('carry_object', False)
+        outcome.setdefault('source_pick_id', str(task.get('source_pick_id', '')))
+        outcome.setdefault('target_drop_id', str(task.get('target_drop_id', '')))
+        outcome.setdefault('object_color_before', str(task.get('object_color_before', 'unknown')))
+        outcome.setdefault('object_color_after', str(task.get('object_color_after', 'unknown')))
+        normalized_status = str(outcome.get('status', 'FAILED')).upper()
+        if normalized_status not in allowed_statuses:
+            normalized_status = 'FAILED'
+            outcome['outcome_reason'] = 'INVALID_STATUS'
+        outcome['status'] = normalized_status
+        outcome['timestamp'] = time.time()
+        outcome['outcome_seq'] = self.outcome_seq
+        return outcome
+
+    def _publish_outcome(self, outcome: Dict[str, Any]):
+        status_msg = String()
+        status_msg.data = json.dumps(outcome)
+        self.status_pub.publish(status_msg)
 
     def _find_handler(self, task: dict) -> Optional[PickPlaceHandler]:
         for handler in self.handlers:

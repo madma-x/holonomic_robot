@@ -6,14 +6,10 @@
 # - Higher `priority` = preferred first for pick locations
 # - Lower `priority` = preferred first for drop locations
 
-pick_locations:
-  - id: "pick_A"
+pick:
+  - id: 1
     name: "Pick A"
     priority: 100
-    location:
-      x: 1.00
-      y: 0.50
-      theta: 0.00
     approach_positions:
       - id: "pick_A_app_1"
         priority: 1
@@ -28,13 +24,9 @@ pick_locations:
           y: 0.80
           theta: 1.57
 
-  - id: "pick_B"
+  - id: 2
     name: "Pick B"
     priority: 90
-    location:
-      x: 1.30
-      y: 0.50
-      theta: 0.00
     approach_positions:
       - id: "pick_B_app_1"
         priority: 1
@@ -49,13 +41,9 @@ pick_locations:
           y: 0.80
           theta: 1.57
 
-  - id: "pick_C"
+  - id: 3
     name: "Pick C"
     priority: 80
-    location:
-      x: 1.50
-      y: 1.00
-      theta: 1.57
     approach_positions:
       - id: "pick_C_app_1"
         priority: 1
@@ -70,13 +58,9 @@ pick_locations:
           y: 1.00
           theta: 0.00
 
-  - id: "pick_D"
+  - id: 4
     name: "Pick D"
     priority: 70
-    location:
-      x: 1.50
-      y: 1.50
-      theta: 1.57
     approach_positions:
       - id: "pick_D_app_1"
         priority: 1
@@ -92,14 +76,9 @@ pick_locations:
           theta: 0.00
 
 drop_locations:
-  - id: "drop_A"
+  - id: 1
     name: "Drop A"
     priority: 1
-    capacity: 1
-    location:
-      x: 2.50
-      y: 0.50
-      theta: 0.00
     approach_positions:
       - id: "drop_A_app_1"
         priority: 1
@@ -114,14 +93,9 @@ drop_locations:
           y: 0.80
           theta: 1.57
 
-  - id: "drop_B"
+  - id: 2
     name: "Drop B"
     priority: 2
-    capacity: 1
-    location:
-      x: 2.50
-      y: 0.90
-      theta: 0.00
     approach_positions:
       - id: "drop_B_app_1"
         priority: 1
@@ -136,14 +110,9 @@ drop_locations:
           y: 1.20
           theta: 1.57
 
-  - id: "drop_C"
+  - id: 3
     name: "Drop C"
     priority: 3
-    capacity: 1
-    location:
-      x: 0.50
-      y: 1.50
-      theta: 3.14
     approach_positions:
       - id: "drop_C_app_1"
         priority: 1
@@ -158,14 +127,9 @@ drop_locations:
           y: 1.20
           theta: -1.57
 
-  - id: "drop_D"
+  - id: 4
     name: "Drop D"
     priority: 4
-    capacity: 1
-    location:
-      x: 0.50
-      y: 1.90
-      theta: 3.14
     approach_positions:
       - id: "drop_D_app_1"
         priority: 1

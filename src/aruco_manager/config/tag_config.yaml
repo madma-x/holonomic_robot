@@ -12,3 +12,5 @@ tag_manager_node:
     max_assignment_distance: 0.15
     # Maximum residual error after rigid fit to be considered pickable (meters)
     consistency_threshold: 0.03
+    # Pick handler enables this only during the pick window
+    sticky_assignment: false

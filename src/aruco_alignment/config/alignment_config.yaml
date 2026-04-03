@@ -1,0 +1,38 @@
+alignment_node:
+  ros__parameters:
+    # Control loop frequency (Hz)
+    control_loop_rate: 50.0
+    
+    # Cluster tracking
+    cluster_timeout_ms: 500  # If no update for 500ms, use last_confident_pose
+    
+    # Single-loop PID gains for XY position correction
+    # Input: position error (meters) → Output: velocity command (m/s)
+    pid_xy:
+      kp: 0.5          # proportional gain (m/s per meter error)
+      ki: 0.05         # integral gain (m/s per meter-second integrated error)
+      kd: 0.1          # derivative gain (m/s per meter/s error rate)
+      
+      # Limits
+      max_integral_error: 0.5      # max m/s from integral term (anti-windup)
+      max_velocity: 0.5            # max linear velocity output (m/s)
+    
+    # Single-loop PID gains for rotation (theta)
+    # Input: angle error (radians) → Output: angular velocity command (rad/s)
+    pid_theta:
+      kp: 0.3          # proportional gain (rad/s per radian error)
+      ki: 0.02         # integral gain (rad/s per radian-second error)
+      kd: 0.05         # derivative gain (rad/s per radian/s error rate)
+      
+      # Limits
+      max_integral_error: 0.3      # max rad/s from integral term (anti-windup)
+      max_angular_velocity: 1.0    # max angular velocity output (rad/s)
+    
+    # Alignment convergence criteria
+    pos_tolerance: 0.02      # meters, XY error must be below this
+    ang_tolerance: 0.05      # radians, theta error must be below this
+    
+    # Topics
+    cluster_topic: "/aruco_manager/cluster_pickability"
+    odometry_topic: "/odom"
+    cmd_vel_topic: "/cmd_vel"

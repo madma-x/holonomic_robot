@@ -58,11 +58,15 @@ class TaskPlanner(Node):
         self.declare_parameter('mission_executor_assignment_topic', '/planner/task_assignment')
         self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
         self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
+        self.declare_parameter('team_color', 'blue')
+        self.declare_parameter('drop_full_cooldown_sec', 20.0)
         
         # Get parameters
         self.replan_interval = self.get_parameter('replan_interval_sec').value
         self.enable_interruption = self.get_parameter('enable_task_interruption').value
         self.min_utility_threshold = self.get_parameter('min_utility_threshold').value
+        self.team_color = str(self.get_parameter('team_color').value)
+        self.drop_full_cooldown_sec = float(self.get_parameter('drop_full_cooldown_sec').value)
         
         base_x = self.get_parameter('base_location_x').value
         base_y = self.get_parameter('base_location_y').value
@@ -75,6 +79,13 @@ class TaskPlanner(Node):
         self.failed_tasks: List[Task] = []
         self.empty_pick_locations = set()
         self.occupied_drop_locations = set()
+        self.pick_locations_catalog: Dict[str, Dict[str, Any]] = {}
+        self.drop_locations_catalog: Dict[str, Dict[str, Any]] = {}
+        self.pick_state: Dict[str, Dict[str, Any]] = {}
+        self.drop_state: Dict[str, Dict[str, Any]] = {}
+        self.recent_outcomes = set()
+        self.last_mission_outcome: Optional[Dict[str, Any]] = None
+        self.task_context_by_id: Dict[str, Dict[str, Any]] = {}
         
         # Game state tracking
         self.time_remaining = 180.0
@@ -144,6 +155,10 @@ class TaskPlanner(Node):
         """
         pick_locations, drop_locations = self._load_pick_drop_locations()
 
+        self.pick_locations_catalog = {str(pick['id']): pick for pick in pick_locations}
+        self.drop_locations_catalog = {str(drop['id']): drop for drop in drop_locations}
+        self._initialize_world_state(pick_locations, drop_locations)
+
         sorted_picks = sorted(pick_locations, key=lambda pick: pick.get('priority', 0), reverse=True)
 
         for pick in sorted_picks:
@@ -157,10 +172,8 @@ class TaskPlanner(Node):
 
             pick_drop_task = create_pick_place_task(
                 task_id=f"pick_place_{pick['id']}",
-                pick_locations=[pick],
-                drop_locations=[linked_drop],
-                points=15.0,
-                pickup_method='pump'
+                pick_location=pick,
+                drop_location=linked_drop
             )
             self.add_task(pick_drop_task)
 
@@ -214,6 +227,7 @@ class TaskPlanner(Node):
                 'id': location.get('id'),
                 'name': location.get('name', location.get('id', 'location')),
                 'priority': int(location.get('priority', 0)),
+                'capacity': int(location.get('capacity', 1)),
                 'location': {
                     'x': float(location.get('location', {}).get('x', 0.0)),
                     'y': float(location.get('location', {}).get('y', 0.0)),
@@ -227,6 +241,48 @@ class TaskPlanner(Node):
 
         return normalized
 
+    def _initialize_world_state(self, pick_locations: List[Dict[str, Any]], drop_locations: List[Dict[str, Any]]):
+        self.pick_state = {
+            str(pick['id']): {
+                'empty': False,
+                'last_update': time.time()
+            }
+            for pick in pick_locations
+        }
+
+        self.drop_state = {
+            str(drop['id']): {
+                'occupancy': 0,
+                'capacity': int(drop.get('capacity', 1)),
+                'blocked_until': 0.0,
+                'last_known_color': 'unknown',
+                'color_confidence': 0.0,
+                'last_update': time.time()
+            }
+            for drop in drop_locations
+        }
+
+    def is_drop_available(self, drop_id: str) -> bool:
+        drop = self.drop_state.get(drop_id)
+        if drop is None:
+            return False
+        return int(drop.get('occupancy', 0)) < int(drop.get('capacity', 1))
+
+    def mark_pick_empty(self, pick_id: str):
+        if pick_id not in self.pick_state:
+            return
+        self.pick_state[pick_id]['empty'] = True
+        self.pick_state[pick_id]['last_update'] = time.time()
+        self.empty_pick_locations.add(pick_id)
+
+    def mark_drop_full_temporarily(self, drop_id: str):
+        drop = self.drop_state.get(drop_id)
+        if drop is None:
+            return
+        drop['blocked_until'] = time.time() + self.drop_full_cooldown_sec
+        drop['last_update'] = time.time()
+        self.occupied_drop_locations.add(drop_id)
+
     def _distance_between_locations(self, from_location: Dict[str, float], to_location: Dict[str, float]) -> float:
         """Compute planar distance between two {x, y, theta} dict locations."""
         from_x = float(from_location.get('x', 0.0))
@@ -235,6 +291,8 @@ class TaskPlanner(Node):
         to_y = float(to_location.get('y', 0.0))
         return ((from_x - to_x) ** 2 + (from_y - to_y) ** 2) ** 0.5
     
+
+
     def add_task(self, task: Task):
         """Add a task to the queue."""
         self.task_queue.append(task)
@@ -396,7 +454,7 @@ class TaskPlanner(Node):
                     self.current_task.status = TaskStatus.PENDING
                     self.get_logger().warn(
                         f'Task attempt {self.current_task.attempts} failed, will retry'
-                    )
+                    )   
             
             # Remove from queue if completed or failed
             if self.current_task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
@@ -416,13 +474,6 @@ class TaskPlanner(Node):
             self.get_logger().warn(f'Task interrupted: {self.current_task.name}')
             # In real implementation, would cancel active action goals
     
-    def pose_callback(self, msg: PoseStamped):
-        """Update robot position."""
-        self.robot_position = msg.pose.position
-
-    def pick_place_status_callback(self, msg: String):
-        """Track mission state from pick_place mission node."""
-        self.pick_place_status = msg.data
 
     def execute_task(self, task: Task) -> bool:
         """Execute task by dispatching to mission implementation."""
@@ -430,18 +481,15 @@ class TaskPlanner(Node):
 
         if task.task_type == TaskType.MOVE_OBJECT:
             return self._execute_move_object_task(task)
+        elif task.task_type == TaskType.RETURN_BASE:
+            return self._execute_return_base_task(task)
 
-        # Fallback simulation for non pick-place task types.
-        sleep_time = min(task.time_estimate, self.time_remaining * 0.8)
-        start_time = time.time()
-        while time.time() - start_time < sleep_time:
-            if self.stop_requested or not self.planning_active:
-                return False
-            time.sleep(0.1)
         return True
 
     def _execute_move_object_task(self, task: Task) -> bool:
         """Send task to mission executor and wait for outcome."""
+        full_drop_ids = [drop_id for drop_id in self.drop_state if not self.is_drop_available(drop_id)]
+
         payload = {
             'name': task.name,
             'task_id': task.task_id,
@@ -450,8 +498,17 @@ class TaskPlanner(Node):
             'drop_positions': task.parameters.get('drop_locations', []),
             'pickup_method': task.parameters.get('pickup_method', 'pump'),
             'pickup_duration': task.parameters.get('pickup_duration', 2.0),
-            'priority': task.base_priority
+            'priority': task.base_priority,
+            'carry_object': bool(task.parameters.get('carry_object', False)),
+            'source_pick_id': str(task.parameters.get('source_pick_id', '')),
+            'target_drop_id': str(task.parameters.get('target_drop_id', '')),
+            'target_team_color': self.team_color,
+            'object_color_before': str(task.parameters.get('object_color_before', 'unknown')),
+            'full_drop_ids': full_drop_ids,
+            'excluded_drop_ids': list(task.parameters.get('excluded_drop_ids', []))
         }
+
+        self.task_context_by_id[task.task_id] = payload
 
         assignment_msg = String()
         assignment_msg.data = json.dumps(payload)
@@ -492,21 +549,130 @@ class TaskPlanner(Node):
             status = self.mission_executor_status
             if status == 'RUNNING':
                 saw_running = True
-            if saw_running and status == 'COMPLETED':
+            if status == 'REPLAN_REQUIRED':
+                outcome = self.last_mission_outcome or {}
+                if self._handle_replan_required_outcome(outcome):
+                    self.mission_executor_status = 'RUNNING'
+                    continue
+                return False
+            if status == 'COMPLETED':
                 return True
-            if saw_running and status == 'FAILED':
+            if status == 'FAILED':
                 return False
             time.sleep(0.1)
 
+        if saw_running:
+            self.get_logger().warn('Mission executor timed out waiting for terminal outcome')
         return False
-
-    def pick_place_status_callback(self, msg: String):
-        """Backward-compatibility callback alias."""
-        self.mission_executor_status_callback(msg)
 
     def mission_executor_status_callback(self, msg: String):
         """Track mission state from mission_executor node."""
-        self.mission_executor_status = msg.data
+        raw = msg.data.strip()
+        if not raw:
+            return
+
+        if raw.startswith('{'):
+            try:
+                outcome = json.loads(raw)
+            except json.JSONDecodeError:
+                self.mission_executor_status = raw
+                return
+
+            dedupe_key = (
+                str(outcome.get('task_id', '')),
+                str(outcome.get('status', '')),
+                str(outcome.get('outcome_seq', outcome.get('timestamp', '')))
+            )
+            if dedupe_key in self.recent_outcomes:
+                return
+            self.recent_outcomes.add(dedupe_key)
+
+            self.last_mission_outcome = outcome
+            status = str(outcome.get('status', 'UNKNOWN')).upper()
+            self.mission_executor_status = status
+            self._apply_outcome_to_world_state(outcome)
+            return
+
+        self.mission_executor_status = raw
+
+    def _apply_outcome_to_world_state(self, outcome: Dict[str, Any]):
+        status = str(outcome.get('status', '')).upper()
+        reason = str(outcome.get('outcome_reason', '')).upper()
+        source_pick_id = str(outcome.get('source_pick_id', ''))
+        target_drop_id = str(outcome.get('target_drop_id', ''))
+
+        if status == 'FAILED' and reason == 'PICK_EMPTY' and source_pick_id:
+            self.mark_pick_empty(source_pick_id)
+            self.task_queue = [
+                task for task in self.task_queue
+                if source_pick_id not in [str(pick.get('id', '')) for pick in task.parameters.get('pick_locations', [])]
+            ]
+            self.replan_tasks()
+            return
+
+        if status == 'REPLAN_REQUIRED' and reason == 'DROP_FULL' and target_drop_id:
+            self.mark_drop_full_temporarily(target_drop_id)
+            return
+
+        if status == 'COMPLETED':
+            if source_pick_id:
+                self.mark_pick_empty(source_pick_id)
+            if target_drop_id:
+                self.commit_drop_color(target_drop_id, str(outcome.get('object_color_after', 'unknown')))
+            task_id = str(outcome.get('task_id', ''))
+            if task_id and task_id in self.task_context_by_id:
+                del self.task_context_by_id[task_id]
+
+    def _handle_replan_required_outcome(self, outcome: Dict[str, Any]) -> bool:
+        reason = str(outcome.get('outcome_reason', '')).upper()
+        carry_object = bool(outcome.get('carry_object', False))
+        task_id = str(outcome.get('task_id', ''))
+
+        if reason != 'DROP_FULL' or not carry_object or not task_id:
+            return False
+
+        original_payload = self.task_context_by_id.get(task_id)
+        if not original_payload:
+            return False
+
+        blocked_drop_id = str(outcome.get('target_drop_id', ''))
+        excluded_ids = set(original_payload.get('excluded_drop_ids', []))
+        if blocked_drop_id:
+            excluded_ids.add(blocked_drop_id)
+
+        candidate_drops = list(original_payload.get('drop_positions', []))
+        next_drop = None
+        for drop in sorted(candidate_drops, key=lambda item: int(item.get('priority', 999))):
+            drop_id = str(drop.get('id', ''))
+            if drop_id in excluded_ids:
+                continue
+            if self.is_drop_available(drop_id):
+                next_drop = drop
+                break
+
+        if next_drop is None:
+            return False
+
+        continuation_payload = dict(original_payload)
+        continuation_payload['carry_object'] = True
+        continuation_payload['source_pick_id'] = str(outcome.get('source_pick_id', continuation_payload.get('source_pick_id', '')))
+        continuation_payload['target_drop_id'] = str(next_drop.get('id', ''))
+        continuation_payload['excluded_drop_ids'] = sorted(list(excluded_ids))
+        continuation_payload['full_drop_ids'] = [drop_id for drop_id in self.drop_state if not self.is_drop_available(drop_id)]
+        continuation_payload['drop_positions'] = [next_drop] + [
+            drop for drop in candidate_drops
+            if str(drop.get('id', '')) != str(next_drop.get('id', ''))
+        ]
+        continuation_payload['object_color_before'] = str(outcome.get('object_color_before', continuation_payload.get('object_color_before', 'unknown')))
+
+        self.task_context_by_id[task_id] = continuation_payload
+        assignment_msg = String()
+        assignment_msg.data = json.dumps(continuation_payload)
+        self.mission_assignment_pub.publish(assignment_msg)
+        self.get_logger().info(
+            f'Replanned drop for {task_id}: blocked={blocked_drop_id}, next={continuation_payload["target_drop_id"]}'
+        )
+        return True
     
     def publish_status(self):
         """Publish planner status."""

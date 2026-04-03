@@ -1,0 +1,10 @@
+# Request
+int32 cluster_id                    # cluster to align to
+float32 alignment_threshold         # correction_magnitude below which alignment is done (meters)
+float32 max_wait_time              # max seconds to wait for alignment (0 = no limit)
+---
+# Response
+bool success                        # true if aligned within threshold
+geometry_msgs/Vector3 final_correction  # final correction applied (robot frame)
+float32 final_magnitude             # final correction magnitude
+string status_message               # diagnostic info
