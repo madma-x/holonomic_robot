@@ -35,8 +35,8 @@ public:
     declare_parameter<std::vector<long int>>("object_tag_ids",    std::vector<long int>{});
     declare_parameter<std::vector<long int>>("localization_tag_ids", std::vector<long int>{});
     declare_parameter<double>("arm_y_origin",           0.0);   // y of arm[0] in robot frame
-    declare_parameter<double>("arm_x_offset",           0.3);   // x approach distance
-    declare_parameter<double>("max_assignment_distance", 0.15); // m — ignore tag if farther
+    declare_parameter<double>("arm_x_offset",           0.0);   // x approach distance
+    declare_parameter<double>("max_assignment_distance", 0.5); // m — ignore tag if farther
     declare_parameter<double>("consistency_threshold",   0.03); // m — max residual to be pickable
     declare_parameter<bool>("sticky_assignment",         false); // handler enables this only during pick window
 
@@ -44,7 +44,7 @@ public:
     double y0  = get_parameter("arm_y_origin").as_double();
     double x0  = get_parameter("arm_x_offset").as_double();
     for (int i = 0; i < NUM_ARMS; ++i) {
-      arm_poses_[i] = { x0, y0 + i * ARM_SPACING };
+      arm_poses_[i] = { x0+ i * ARM_SPACING, y0};
     }
 
     // Build ID sets
@@ -61,9 +61,10 @@ public:
     localization_pub_ = create_publisher<aruco_interfaces::msg::DetectedTagArray>(
       "/localization_tags", 10);
 
-    // Subscriber
+    // Subscriber — use BEST_EFFORT to match sensor publishers
     tags_sub_ = create_subscription<aruco_interfaces::msg::DetectedTagArray>(
-      "/detected_tags", 10,
+      "aruco_picker/detected_tags",
+      rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(),
       std::bind(&TagManagerNode::tags_callback, this, std::placeholders::_1));
 
     RCLCPP_INFO(get_logger(), "tag_manager_node started");

@@ -15,7 +15,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedTagArray.msg"
   "msg/ArmAssignment.msg"
   "msg/ClusterPickability.msg"
-  "action/AlignToCluster.action"
   "srv/AlignToCluster.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
