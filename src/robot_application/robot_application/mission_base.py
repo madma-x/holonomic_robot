@@ -1,5 +1,7 @@
 """Base class for mission implementations."""
 
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -8,9 +10,17 @@ from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import String, Float32
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
-from robot_actuators.action import MoveServo, ControlPump, ControlGripper
 import threading
 from enum import Enum
+
+try:
+    from robot_actuators.action import MoveServo, ControlPump, ControlGripper
+    HAS_ROBOT_ACTUATORS = True
+except ImportError:
+    MoveServo = None
+    ControlPump = None
+    ControlGripper = None
+    HAS_ROBOT_ACTUATORS = False
 
 
 class MissionState(Enum):
@@ -42,6 +52,8 @@ class MissionBase(Node):
         self.declare_parameter('pump_timeout_sec', 30.0)
         self.declare_parameter('enable_recovery', True)
         self.declare_parameter('max_recovery_attempts', 3)
+        self.declare_parameter('mock_navigation', False)
+        self.declare_parameter('mock_actuators', not HAS_ROBOT_ACTUATORS)
         
         # Get parameters
         self.nav_timeout = self.get_parameter('nav_timeout_sec').value
@@ -49,12 +61,23 @@ class MissionBase(Node):
         self.pump_timeout = self.get_parameter('pump_timeout_sec').value
         self.enable_recovery = self.get_parameter('enable_recovery').value
         self.max_recovery_attempts = self.get_parameter('max_recovery_attempts').value
+        self.mock_navigation = self.get_parameter('mock_navigation').value
+        self.mock_actuators = self.get_parameter('mock_actuators').value
         
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        self.servo_client = ActionClient(self, MoveServo, 'move_servo')
-        self.pump_client = ActionClient(self, ControlPump, 'control_pump')
-        self.gripper_client = ActionClient(self, ControlGripper, 'control_gripper')
+        if HAS_ROBOT_ACTUATORS and not self.mock_actuators:
+            self.servo_client = ActionClient(self, MoveServo, 'move_servo')
+            self.pump_client = ActionClient(self, ControlPump, 'control_pump')
+            self.gripper_client = ActionClient(self, ControlGripper, 'control_gripper')
+        else:
+            self.servo_client = None
+            self.pump_client = None
+            self.gripper_client = None
+            if self.mock_actuators:
+                self.get_logger().warn('MissionBase running with mock actuators enabled')
+            else:
+                self.get_logger().warn('robot_actuators package unavailable; actuator actions disabled')
         
         # Services
         self.load_srv = self.create_service(
@@ -170,9 +193,24 @@ class MissionBase(Node):
         progress_msg = Float32()
         progress_msg.data = self.progress
         self.progress_pub.publish(progress_msg)
+
+    def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
+        """Wait for an async future without re-entering the spinning executor."""
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline and not self.stop_requested:
+            if future.done():
+                return True
+            time.sleep(poll_interval)
+        return future.done()
     
     def navigate_to_pose(self, x: float, y: float, theta: float) -> bool:
         """Navigate to a pose using Nav2."""
+        if self.mock_navigation:
+            self.get_logger().info(
+                f'[MOCK] Navigating to: x={x:.2f}, y={y:.2f}, theta={theta:.2f}'
+            )
+            return True
+
         if not self.nav_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('Nav2 action server not available')
             return False
@@ -191,7 +229,9 @@ class MissionBase(Node):
         self.get_logger().info(f'Navigating to: x={x:.2f}, y={y:.2f}, theta={theta:.2f}')
         
         send_goal_future = self.nav_client.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_goal_future, timeout_sec=5.0)
+        if not self._wait_for_future(send_goal_future, timeout_sec=5.0):
+            self.get_logger().error('Navigation goal request timed out')
+            return False
         
         goal_handle = send_goal_future.result()
         if not goal_handle.accepted:
@@ -199,17 +239,26 @@ class MissionBase(Node):
             return False
         
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self.nav_timeout)
+        if not self._wait_for_future(result_future, timeout_sec=self.nav_timeout):
+            self.get_logger().error('Navigation timeout')
+            return False
         
         if result_future.result() is not None:
             self.get_logger().info('Navigation succeeded')
             return True
-        else:
-            self.get_logger().error('Navigation timeout')
-            return False
+        self.get_logger().error('Navigation failed without result')
+        return False
     
     def move_servo(self, servo_id: int, angle: float, speed: float = 30.0) -> bool:
         """Move servo to target angle."""
+        if self.mock_actuators:
+            self.get_logger().info(f'[MOCK] Moving servo {servo_id} to {angle}° at {speed}°/s')
+            return True
+
+        if self.servo_client is None:
+            self.get_logger().error('Servo action client unavailable')
+            return False
+
         if not self.servo_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error('Servo action server not available')
             return False
@@ -222,7 +271,9 @@ class MissionBase(Node):
         self.get_logger().info(f'Moving servo {servo_id} to {angle}°')
         
         send_goal_future = self.servo_client.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_goal_future, timeout_sec=2.0)
+        if not self._wait_for_future(send_goal_future, timeout_sec=2.0):
+            self.get_logger().error('Servo goal request timed out')
+            return False
         
         goal_handle = send_goal_future.result()
         if not goal_handle.accepted:
@@ -230,17 +281,29 @@ class MissionBase(Node):
             return False
         
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self.servo_timeout)
+        if not self._wait_for_future(result_future, timeout_sec=self.servo_timeout):
+            self.get_logger().error('Servo action timeout')
+            return False
         
         if result_future.result() is not None:
             return result_future.result().result.success
-        else:
-            self.get_logger().error('Servo action timeout')
-            return False
+        self.get_logger().error('Servo action failed without result')
+        return False
     
     def control_pump(self, pump_id: int, enable: bool, duty_cycle: float = 1.0, 
                      duration: float = 0.0) -> bool:
         """Control pump on/off with optional duration."""
+        if self.mock_actuators:
+            action = 'ON' if enable else 'OFF'
+            self.get_logger().info(
+                f'[MOCK] Turning pump {pump_id} {action} duty={duty_cycle:.2f} duration={duration:.2f}s'
+            )
+            return True
+
+        if self.pump_client is None:
+            self.get_logger().error('Pump action client unavailable')
+            return False
+
         if not self.pump_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error('Pump action server not available')
             return False
@@ -255,7 +318,9 @@ class MissionBase(Node):
         self.get_logger().info(f'Turning pump {pump_id} {action}')
         
         send_goal_future = self.pump_client.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_goal_future, timeout_sec=2.0)
+        if not self._wait_for_future(send_goal_future, timeout_sec=2.0):
+            self.get_logger().error('Pump goal request timed out')
+            return False
         
         goal_handle = send_goal_future.result()
         if not goal_handle.accepted:
@@ -265,13 +330,13 @@ class MissionBase(Node):
         # If duration > 0, wait for completion
         if duration > 0:
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future, 
-                                           timeout_sec=duration + self.pump_timeout)
-            if result_future.result() is not None:
-                return result_future.result().result.success
-            else:
+            if not self._wait_for_future(result_future, timeout_sec=duration + self.pump_timeout):
                 self.get_logger().error('Pump action timeout')
                 return False
+            if result_future.result() is not None:
+                return result_future.result().result.success
+            self.get_logger().error('Pump action failed without result')
+            return False
         
         return True
     

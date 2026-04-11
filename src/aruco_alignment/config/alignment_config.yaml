@@ -33,6 +33,6 @@ alignment_node:
     ang_tolerance: 0.05      # radians, theta error must be below this
     
     # Topics
-    cluster_topic: "/aruco_manager/cluster_pickability"
+    cluster_topic: "/cluster_pickability"
     odometry_topic: "/odom"
     cmd_vel_topic: "/cmd_vel"

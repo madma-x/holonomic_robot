@@ -63,7 +63,7 @@ public:
 
     // Subscriber — use BEST_EFFORT to match sensor publishers
     tags_sub_ = create_subscription<aruco_interfaces::msg::DetectedTagArray>(
-      "aruco_picker/detected_tags",
+      "findeeznuts/detected_tags",
       rclcpp::QoS(rclcpp::KeepLast(10)).best_effort(),
       std::bind(&TagManagerNode::tags_callback, this, std::placeholders::_1));
 

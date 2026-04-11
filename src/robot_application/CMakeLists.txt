@@ -15,10 +15,8 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Install Python executables
 install(PROGRAMS
-  scripts/patrol_mission.py
-  scripts/pick_place_mission.py
-  scripts/teleop_mission.py
   scripts/game_state_manager.py
+  scripts/mission_executor.py
   scripts/task_planner.py
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -32,8 +30,10 @@ install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config)
 
 # Install behavior tree XML files
-install(DIRECTORY behavior_trees/
-  DESTINATION share/${PROJECT_NAME}/behavior_trees)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees")
+  install(DIRECTORY behavior_trees/
+    DESTINATION share/${PROJECT_NAME}/behavior_trees)
+endif()
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

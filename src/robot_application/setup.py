@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import find_packages, setup
 import os
 from glob import glob
 
@@ -7,7 +7,7 @@ package_name = 'robot_application'
 setup(
     name=package_name,
     version='1.0.0',
-    packages=[package_name],
+    packages=find_packages(),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -25,9 +25,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'patrol_mission = robot_application.patrol_mission:main',
-            'pick_place_mission = robot_application.pick_place_mission:main',
-            'teleop_mission = robot_application.teleop_mission:main',
             'game_state_manager = robot_application.game_state_manager:main',
             'task_planner = robot_application.task_planner:main',
             'mission_executor = robot_application.mission_executor:main',

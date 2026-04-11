@@ -175,25 +175,26 @@ def create_return_base_task(base_location: Dict[str, float]) -> Task:
         time_estimate=8.0,
         success_probability=0.98,
         base_priority=10,  # Highest priority in endgame
-        target_location=base_location,
         priority_function=endgame_priority,
-        parameters={'is_final_return': True}
+        parameters={
+            'target_location': base_location,
+            'is_final_return': True,
+        }
     )
 
 
-def create_pick_place_task(task_id: str,pick_location: Dict[str, Any],drop_location: Dict[str, Any]) -> Task:
-        """Create a pick-place task using priority-ordered pick/drop lists."""
-
-        return Task(
-                task_id=task_id,
-                task_type=TaskType.MOVE_OBJECT,
-                name=f"PickPlace {task_id}",
-                description='Select pick and drop targets by priority',
-                time_estimate=18.0,
-                success_probability=0.85,
-                base_priority=7,
-                parameters={
-                        'pick_location': pick_location,
-                        'drop_location': drop_location
-                }
-        )
+def create_pick_place_task(task_id: str, pick_location: Dict[str, Any], drop_location: Dict[str, Any]) -> Task:
+    """Create a pick-place task using priority-ordered pick/drop lists."""
+    return Task(
+            task_id=task_id,
+            task_type=TaskType.MOVE_OBJECT,
+            name=f"PickPlace {task_id}",
+            description='Select pick and drop targets by priority',
+            time_estimate=18.0,
+            success_probability=0.85,
+            base_priority=7,
+            parameters={
+                    'pick_location': pick_location,
+                    'drop_location': drop_location
+            }
+    )

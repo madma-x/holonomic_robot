@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import rclpy
 from rclpy.duration import Duration
 from rclpy.parameter import Parameter
-from rclpy.parameter_client import AsyncParametersClient
+from rclpy.parameter_client import AsyncParameterClient
 
 from aruco_interfaces.msg import ClusterPickability
 from aruco_interfaces.srv import AlignToCluster as AlignToClusterSrv
@@ -31,7 +31,7 @@ class PickPlaceHandler:
         tag_manager_node_name = self.node.get_parameter('tag_manager_node_name').value
 
         self.align_client = self.node.create_client(AlignToClusterSrv, align_service_name)
-        self.tag_manager_params = AsyncParametersClient(self.node, str(tag_manager_node_name))
+        self.tag_manager_params = AsyncParameterClient(self.node, str(tag_manager_node_name))
         self.pickability_sub = self.node.create_subscription(
             ClusterPickability,
             pickability_topic,
@@ -51,48 +51,89 @@ class PickPlaceHandler:
         source_pick_id = str(task.get('source_pick_id', ''))
         pick_ref: Optional[dict] = None
 
+        self.node.get_logger().info(
+            'PickPlace execute() start: '
+            f"task_id={task.get('task_id', 'unknown')} "
+            f"carry_object={carry_object} "
+        )
+
         if not carry_object:
+            self.node.get_logger().info('Step 1: preparing pickup sequence')
             self._set_sticky_assignment(False)
             try:
                 approach_positions = self.extract_approach_positions(task)
+                self.node.get_logger().info(
+                    f'Step 2: extracted {len(approach_positions)} approach position(s)'
+                )
                 approached = False
-                for approach_pose in approach_positions[:2]:
+                for index, approach_pose in enumerate(approach_positions[:2], start=1):
+                    self.node.get_logger().info(
+                        'Step 3: attempting approach '
+                        f'#{index} at x={float(approach_pose.get("x", 0.0)):.2f}, '
+                        f'y={float(approach_pose.get("y", 0.0)):.2f}, '
+                        f'theta={float(approach_pose.get("theta", 0.0)):.2f}'
+                    )
                     if self.node.navigate_to_pose(
                         float(approach_pose.get('x', 0.0)),
                         float(approach_pose.get('y', 0.0)),
                         float(approach_pose.get('theta', 0.0))
                     ):
+                        self.node.get_logger().info(f'Step 3: approach #{index} succeeded')
                         approached = True
                         break
 
+                    self.node.get_logger().warn(f'Step 3: approach #{index} failed')
+
                 if not approached:
+                    self.node.get_logger().error('Step 4: all pickup approaches failed')
                     self.lower_pick_priority(task, pick_ref, 'approach unreachable')
                     return self._build_outcome(task, 'FAILED', 'NAV_FAIL', False, source_pick_id=source_pick_id)
 
                 # Keep arm->tag mapping stable only while robot is in the pick window.
+                self.node.get_logger().info('Step 5: enabling sticky arm-tag assignment')
                 self._set_sticky_assignment(True)
 
+                self.node.get_logger().info('Step 6: waiting for pickability message')
                 pickability = self.wait_for_pickability()
                 if pickability is None or not bool(pickability.is_pickable):
+                    self.node.get_logger().warn('Step 6: pickability check failed or timed out')
                     self.lower_pick_priority(task, pick_ref, 'not pickable')
                     return self._build_outcome(task, 'FAILED', 'PICK_EMPTY', False, source_pick_id=source_pick_id)
 
+                self.node.get_logger().info(
+                    'Step 6: pickability confirmed '
+                    f'cluster_id={int(getattr(pickability, "cluster_id", 0))} '
+                    f'magnitude={float(getattr(pickability, "correction_magnitude", 0.0)):.3f}'
+                )
+
                 cluster_id = int(getattr(pickability, 'cluster_id', 0))
+                self.node.get_logger().info(f'Step 7: calling align_to_cluster for cluster_id={cluster_id}')
                 if not self.align_to_cluster(cluster_id):
+                    self.node.get_logger().error('Step 7: alignment failed')
                     self.lower_pick_priority(task, pick_ref, 'alignment failed')
                     return self._build_outcome(task, 'FAILED', 'ALIGN_FAIL', False, source_pick_id=source_pick_id)
 
+                self.node.get_logger().info('Step 7: alignment succeeded')
+
+                self.node.get_logger().info('Step 8: lowering arm and enabling pump')
                 if not self.lower_arm_and_enable_pump(task):
+                    self.node.get_logger().error('Step 8: actuator sequence failed')
                     self.lower_pick_priority(task, pick_ref, 'actuation failed')
                     return self._build_outcome(task, 'FAILED', 'ACTUATION_FAIL', False, source_pick_id=source_pick_id)
 
+                self.node.get_logger().info('Step 8: pickup actuation succeeded')
                 carry_object = True
             finally:
+                self.node.get_logger().info('Step 9: disabling sticky arm-tag assignment')
                 self._set_sticky_assignment(False)
 
         excluded_ids = set(task.get('excluded_drop_ids', []))
+        self.node.get_logger().info(
+            f'Step 10: selecting drop location, excluded_ids={sorted(list(excluded_ids))}'
+        )
         drop_info = self.select_drop_location(task, excluded_ids=excluded_ids)
         if drop_info is None:
+            self.node.get_logger().warn('Step 10: no drop location available')
             if pick_ref is not None:
                 self.lower_pick_priority(task, pick_ref, 'no drop location')
             return self._build_outcome(
@@ -105,7 +146,14 @@ class PickPlaceHandler:
 
         drop_location, drop_ref = drop_info
         drop_id = str(drop_ref.get('id', task.get('target_drop_id', '')))
+        self.node.get_logger().info(
+            'Step 11: selected drop '
+            f'id={drop_id} at x={float(drop_location.get("x", 0.0)):.2f}, '
+            f'y={float(drop_location.get("y", 0.0)):.2f}, '
+            f'theta={float(drop_location.get("theta", 0.0)):.2f}'
+        )
         if self._is_drop_full(task, drop_ref):
+            self.node.get_logger().warn(f'Step 11: drop {drop_id} is marked full')
             excluded_ids.add(drop_id)
             task['excluded_drop_ids'] = sorted(list(excluded_ids))
             return self._build_outcome(
@@ -117,11 +165,13 @@ class PickPlaceHandler:
                 target_drop_id=drop_id
             )
 
+        self.node.get_logger().info(f'Step 12: navigating to drop {drop_id}')
         if not self.node.navigate_to_pose(
             float(drop_location.get('x', 0.0)),
             float(drop_location.get('y', 0.0)),
             float(drop_location.get('theta', 0.0))
         ):
+            self.node.get_logger().error(f'Step 12: navigation to drop {drop_id} failed')
             if pick_ref is not None:
                 self.lower_pick_priority(task, pick_ref, 'drop unreachable')
             return self._build_outcome(
@@ -133,6 +183,7 @@ class PickPlaceHandler:
                 target_drop_id=drop_id
             )
 
+        self.node.get_logger().info(f'Step 13: task completed successfully, placed at drop {drop_id}')
         return self._build_outcome(
             task,
             'COMPLETED',
@@ -185,7 +236,9 @@ class PickPlaceHandler:
 
         timeout = float(self.node.get_parameter('align_timeout_sec').value)
         future = self.align_client.call_async(request)
-        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout + 1.0)
+        if not self._wait_for_future(future, timeout_sec=timeout + 1.0):
+            self.node.get_logger().error('AlignToCluster service call timed out')
+            return False
         
         if future.result() is None:
             self.node.get_logger().error('AlignToCluster service call timed out')
@@ -223,9 +276,77 @@ class PickPlaceHandler:
         self.node.get_logger().warn(f'Pick priority lowered ({reason})')
 
     def _set_sticky_assignment(self, enabled: bool) -> None:
-        if not self.tag_manager_params.wait_for_service(timeout_sec=0.2):
+        if not self.tag_manager_params.wait_for_services(timeout_sec=0.2):
             return
 
         param = Parameter('sticky_assignment', Parameter.Type.BOOL, bool(enabled))
         future = self.tag_manager_params.set_parameters([param])
-        rclpy.spin_until_future_complete(self.node, future, timeout_sec=0.5)
+        self._wait_for_future(future, timeout_sec=0.5)
+
+    def extract_approach_positions(self, task: dict) -> List[dict]:
+        """Return priority-ordered approach poses for the selected pick target."""
+        primary_pick = task.get('pick_location')
+        if not primary_pick:
+            return []
+
+        approach_positions = list(primary_pick.get('approach_positions', []))
+        if approach_positions:
+            return sorted(
+                approach_positions,
+                key=lambda approach: int(approach.get('priority', 999))
+            )
+
+        location = primary_pick.get('location', {})
+        if location:
+            return [{
+                'id': str(primary_pick.get('id', 'pick_location')),
+                'priority': int(primary_pick.get('priority', 1)),
+                'x': float(location.get('x', 0.0)),
+                'y': float(location.get('y', 0.0)),
+                'theta': float(location.get('theta', 0.0)),
+            }]
+
+        return []
+
+    def select_drop_location(
+        self,
+        task: dict,
+        excluded_ids: Optional[set] = None
+    ) -> Optional[Tuple[dict, dict]]:
+        """Select the first available drop location not excluded by replanning."""
+        excluded_ids = excluded_ids or set()
+        drop_ref = task.get('drop_location')
+        if drop_ref:
+            drop_positions = [drop_ref]
+        else:
+            drop_positions = task.get('drop_positions', []) or task.get('drop_locations', [])
+
+        for drop_ref in drop_positions:
+            drop_id = str(drop_ref.get('id', ''))
+            if drop_id in excluded_ids:
+                continue
+
+            task['target_drop_id'] = drop_id
+            location = drop_ref.get('location')
+            if not location:
+                approaches = drop_ref.get('approach_positions', [])
+                location = approaches[0] if approaches else {'x': 0.0, 'y': 0.0, 'theta': 0.0}
+
+            return location, drop_ref
+
+        return None
+
+    def _is_drop_full(self, task: dict, drop_ref: dict) -> bool:
+        """Check whether the planner marked the drop target as full."""
+        drop_id = str(drop_ref.get('id', ''))
+        full_ids = {str(item) for item in task.get('full_drop_ids', [])}
+        return drop_id in full_ids
+
+    def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
+        """Wait for an async future without re-entering the spinning executor."""
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline and not self.node.stop_requested:
+            if future.done():
+                return True
+            time.sleep(poll_interval)
+        return future.done()

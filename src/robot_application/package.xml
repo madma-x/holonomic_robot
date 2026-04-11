@@ -17,6 +17,7 @@
   <depend>sensor_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>action_msgs</depend>
+  <depend>aruco_interfaces</depend>
   <depend>tf_transformations</depend>
   <depend>tf2_ros</depend>
   <depend>sllidar_ros2</depend>
@@ -33,6 +34,7 @@
   <exec_depend>nav2_costmap_2d</exec_depend>
   
   <!-- Additional packages for launch and nodes -->
+  <exec_depend>aruco_alignment</exec_depend>
   <exec_depend>can_interface</exec_depend>
   <exec_depend>holonomic_robot_bringup</exec_depend>
   <exec_depend>rviz2</exec_depend>

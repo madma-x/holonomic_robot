@@ -101,12 +101,10 @@ class TaskPlanner(Node):
             Float32, '/game/time_remaining', self.time_callback, 10)
         self.score_sub = self.create_subscription(
             Int32, '/game/score', self.score_callback, 10)
-        self.opponent_score_sub = self.create_subscription(
-            Int32, '/game/opponent_score', self.opponent_score_callback, 10)
         self.phase_sub = self.create_subscription(
             String, '/game/phase', self.phase_callback, 10)
         self.pose_sub = self.create_subscription(
-            PoseStamped, '/amcl_pose', self.pose_callback, 10)
+            PoseStamped, '/odom', self.pose_callback, 10)
         
         # Publishers
         self.current_task_pub = self.create_publisher(String, '/planner/current_task', 10)
@@ -138,7 +136,7 @@ class TaskPlanner(Node):
         self.stop_requested = False
         
         # Timers
-        self.replan_timer = self.create_timer(self.replan_interval, self.replan_tasks)
+        #self.replan_timer = self.create_timer(self.replan_interval, self.replan_tasks)
         self.status_timer = self.create_timer(1.0, self.publish_status)
         
         # Initialize default tasks
@@ -197,8 +195,11 @@ class TaskPlanner(Node):
             with open(config_path, 'r', encoding='utf-8') as config_file:
                 config = yaml.safe_load(config_file) or {}
 
-        pick_locations = self._normalize_locations(config.get('pick_locations', []))
-        drop_locations = self._normalize_locations(config.get('drop_locations', []))
+        pick_locations_raw = config.get('pick_locations', config.get('pick', []))
+        drop_locations_raw = config.get('drop_locations', config.get('drop', []))
+
+        pick_locations = self._normalize_locations(pick_locations_raw)
+        drop_locations = self._normalize_locations(drop_locations_raw)
 
         if not pick_locations or not drop_locations:
             raise RuntimeError(f'pick_drop_locations.yaml is missing picks or drops: {config_path}')
@@ -209,12 +210,25 @@ class TaskPlanner(Node):
         return pick_locations, drop_locations
 
     def _normalize_locations(self, locations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Convert approach positions from {pose: {x,y,theta}} into flat {x,y,theta}."""
+        """Normalize pick/drop entries using prioritized approach positions.
+
+        Expected YAML shape per entry:
+        - `id`
+        - `name`
+        - `priority`
+        - `approach_positions`
+
+        Each approach can provide pose either as:
+        - `{id, priority, pose: {x, y, theta}}`
+        - `{id, priority, x, y, theta}`
+
+        The entry `location` is derived from the first prioritized approach pose.
+        """
         normalized = []
         for location in locations:
             approach_positions = []
             for approach in location.get('approach_positions', []):
-                pose = approach.get('pose', {})
+                pose = approach.get('pose', approach)
                 approach_positions.append({
                     'id': approach.get('id'),
                     'priority': approach.get('priority', 1),
@@ -223,20 +237,16 @@ class TaskPlanner(Node):
                     'theta': float(pose.get('theta', 0.0))
                 })
 
+            approach_positions = sorted(
+                approach_positions,
+                key=lambda approach: int(approach.get('priority', 1))
+            )
             normalized.append({
                 'id': location.get('id'),
                 'name': location.get('name', location.get('id', 'location')),
                 'priority': int(location.get('priority', 0)),
                 'capacity': int(location.get('capacity', 1)),
-                'location': {
-                    'x': float(location.get('location', {}).get('x', 0.0)),
-                    'y': float(location.get('location', {}).get('y', 0.0)),
-                    'theta': float(location.get('location', {}).get('theta', 0.0))
-                },
-                'approach_positions': sorted(
-                    approach_positions,
-                    key=lambda approach: int(approach.get('priority', 1))
-                )
+                'approach_positions': approach_positions
             })
 
         return normalized
@@ -320,6 +330,10 @@ class TaskPlanner(Node):
             self.current_phase = GamePhase[msg.data]
         except KeyError:
             pass
+
+    def pose_callback(self, msg: PoseStamped):
+        """Update robot pose estimate used by utility functions."""
+        self.robot_position = msg.pose.position
     
     def replan_tasks(self):
         """Re-evaluate and re-prioritize task queue."""
@@ -494,18 +508,10 @@ class TaskPlanner(Node):
             'name': task.name,
             'task_id': task.task_id,
             'task_type': task.task_type.value,
-            'pick_locations': task.parameters.get('pick_locations', []),
-            'drop_positions': task.parameters.get('drop_locations', []),
-            'pickup_method': task.parameters.get('pickup_method', 'pump'),
-            'pickup_duration': task.parameters.get('pickup_duration', 2.0),
+            'pick_location': task.parameters.get('pick_location', []),
+            'drop_location': task.parameters.get('drop_location', []),
             'priority': task.base_priority,
             'carry_object': bool(task.parameters.get('carry_object', False)),
-            'source_pick_id': str(task.parameters.get('source_pick_id', '')),
-            'target_drop_id': str(task.parameters.get('target_drop_id', '')),
-            'target_team_color': self.team_color,
-            'object_color_before': str(task.parameters.get('object_color_before', 'unknown')),
-            'full_drop_ids': full_drop_ids,
-            'excluded_drop_ids': list(task.parameters.get('excluded_drop_ids', []))
         }
 
         self.task_context_by_id[task.task_id] = payload
@@ -529,7 +535,8 @@ class TaskPlanner(Node):
             return False
 
         future = self.mission_executor_start_client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+        if not self._wait_for_future(future, timeout_sec=3.0):
+            return False
         response = future.result()
         if response is None:
             return False
@@ -539,6 +546,15 @@ class TaskPlanner(Node):
 
         # Mission might already be running and able to consume assignment.
         return 'already running' in response.message.lower()
+
+    def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
+        """Wait for an async future without re-entering the spinning executor."""
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline and not self.stop_requested:
+            if future.done():
+                return True
+            time.sleep(poll_interval)
+        return future.done()
 
     def _wait_for_mission_executor_result(self, timeout_sec: float) -> bool:
         """Wait for mission state transition to COMPLETED/FAILED."""
@@ -696,7 +712,8 @@ def main(args=None):
         pass
     finally:
         planner.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

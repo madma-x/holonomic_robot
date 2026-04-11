@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import Float32, Int32, String, Bool
 from geometry_msgs.msg import PoseStamped, Point
 import time
@@ -30,6 +31,7 @@ class GameStateManager(Node):
         self.declare_parameter('mid_phase_threshold', 30.0)
         self.declare_parameter('late_phase_threshold', 10.0)
         self.declare_parameter('auto_start', False)
+        self.declare_parameter('planner_start_service', '/planner/start')
         
         # Get parameters
         self.match_duration = self.get_parameter('match_duration_sec').value
@@ -43,23 +45,20 @@ class GameStateManager(Node):
         self.current_score = 0
         self.opponent_score = 0
         self.current_phase = GamePhase.SETUP
-        self.robot_position = Point()
         self.base_position = Point()  # Home position
         self.objectives_completed = set()
         
         # Publishers
         self.time_remaining_pub = self.create_publisher(Float32, '/game/time_remaining', 10)
         self.score_pub = self.create_publisher(Int32, '/game/score', 10)
-        self.opponent_score_pub = self.create_publisher(Int32, '/game/opponent_score', 10)
         self.phase_pub = self.create_publisher(String, '/game/phase', 10)
         self.match_active_pub = self.create_publisher(Bool, '/game/match_active', 10)
+
+        planner_start_service = self.get_parameter('planner_start_service').value
+        self.planner_start_client = self.create_client(Trigger, str(planner_start_service))
         
-        # Subscribers
-        self.pose_sub = self.create_subscription(
-            PoseStamped, '/amcl_pose', self.pose_callback, 10)
         
         # Services
-        from std_srvs.srv import Trigger, SetBool
         self.start_match_srv = self.create_service(
             Trigger, '/game/start_match', self.start_match_callback)
         self.stop_match_srv = self.create_service(
@@ -79,9 +78,11 @@ class GameStateManager(Node):
     
     def start_match_callback(self, request, response):
         """Start match timer."""
-        self.start_match()
-        response.success = True
-        response.message = f'Match started - {self.match_duration}s duration'
+        planner_started, planner_message = self.start_match()
+        response.success = planner_started
+        response.message = (
+            f'Match started - {self.match_duration}s duration. {planner_message}'
+        )
         return response
     
     def stop_match_callback(self, request, response):
@@ -103,7 +104,7 @@ class GameStateManager(Node):
         return response
     
     def start_match(self):
-        """Start the match."""
+        """Start the match and request planner execution."""
         self.match_started = True
         self.match_start_time = time.time()
         self.current_score = 0
@@ -111,11 +112,44 @@ class GameStateManager(Node):
         self.objectives_completed.clear()
         self.current_phase = GamePhase.EARLY
         self.get_logger().info(f'Match started! Duration: {self.match_duration}s')
-    
-    def pose_callback(self, msg: PoseStamped):
-        """Update robot position."""
-        self.robot_position = msg.pose.position
-    
+        return self.start_task_planner()
+
+    def start_task_planner(self):
+        """Request task planner startup through the planner start service."""
+        service_name = str(self.get_parameter('planner_start_service').value)
+        if not self.planner_start_client.wait_for_service(timeout_sec=2.0):
+            message = f'Task planner start service unavailable: {service_name}'
+            self.get_logger().error(message)
+            return False, message
+
+        future = self.planner_start_client.call_async(Trigger.Request())
+        if not self._wait_for_future(future, timeout_sec=3.0):
+            message = 'Task planner start request timed out'
+            self.get_logger().error(message)
+            return False, message
+
+        result = future.result()
+        if result is None:
+            message = 'Task planner start request timed out'
+            self.get_logger().error(message)
+            return False, message
+
+        if result.success:
+            self.get_logger().info(f'Task planner started: {result.message}')
+            return True, result.message
+
+        self.get_logger().warn(f'Task planner did not start cleanly: {result.message}')
+        return False, result.message
+
+    def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
+        """Wait for an async future without re-entering the spinning executor."""
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            if future.done():
+                return True
+            time.sleep(poll_interval)
+        return future.done()
+
     def update_game_state(self):
         """Update game state based on time."""
         if not self.match_started:
@@ -171,11 +205,7 @@ class GameStateManager(Node):
         score_msg = Int32()
         score_msg.data = self.current_score
         self.score_pub.publish(score_msg)
-        
-        opp_score_msg = Int32()
-        opp_score_msg.data = self.opponent_score
-        self.opponent_score_pub.publish(opp_score_msg)
-        
+                
         # Phase
         phase_msg = String()
         phase_msg.data = self.current_phase.name
@@ -186,12 +216,6 @@ class GameStateManager(Node):
         active_msg.data = self.match_started
         self.match_active_pub.publish(active_msg)
     
-    def get_distance_to_base(self) -> float:
-        """Calculate distance from robot to base."""
-        import math
-        dx = self.robot_position.x - self.base_position.x
-        dy = self.robot_position.y - self.base_position.y
-        return math.sqrt(dx*dx + dy*dy)
 
 
 def main(args=None):
@@ -204,7 +228,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
