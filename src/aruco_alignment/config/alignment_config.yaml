@@ -29,7 +29,7 @@ alignment_node:
       max_angular_velocity: 1.0    # max angular velocity output (rad/s)
     
     # Alignment convergence criteria
-    pos_tolerance: 0.02      # meters, XY error must be below this
+    pos_tolerance: 0.01      # meters, XY error must be below this
     ang_tolerance: 0.05      # radians, theta error must be below this
     
     # Topics

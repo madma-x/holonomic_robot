@@ -23,6 +23,11 @@ install(TARGETS tag_manager_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/aruco_pose_debug_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )

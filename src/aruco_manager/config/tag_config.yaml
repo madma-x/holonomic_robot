@@ -4,13 +4,18 @@ tag_manager_node:
     object_tag_ids: [36, 47]
     # IDs of fixed positioning tags for global localization
     localization_tag_ids: [20]
+    # X position of arm[0] in robot frame (meters)
+    arm_x_origin: -0.075
     # Y position of arm[0] in robot frame (meters)
-    arm_x_origin: -0.05
-    # X approach distance of arms from robot origin (meters)
-    arm_y_offset: 0.00
+    arm_y_origin: 0.00
     # Maximum distance for a tag to be assigned to an arm (meters)
     max_assignment_distance: 0.15
     # Maximum residual error after rigid fit to be considered pickable (meters)
     consistency_threshold: 0.03
     # Pick handler enables this only during the pick window
     sticky_assignment: false
+    # Require this many consecutive frames before switching to a new assignment
+    assignment_switch_confirm_frames: 3
+    # Systematic x offset to subtract so correction.x reads 0 when aligned
+    correction_x_bias: 0.0
+    
