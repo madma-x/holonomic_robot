@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <deque>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -56,6 +57,8 @@ public:
     declare_parameter<double>("tracking_min_confidence", 0.6);  // [0,1] ignore unstable detections in tracker
     declare_parameter<double>("assignment_min_confidence", -1.0); // [0,1], <0 => use tracking_min_confidence
     declare_parameter<int>("assignment_switch_confirm_frames", 3); // frames — hysteresis before switching assignment
+    declare_parameter<int>("sticky_loss_confirm_frames", 10); // frames — mark lost only after sustained disappearance
+    declare_parameter<int>("sticky_stable_window_frames", 5); // frames — averaging window for frozen correction
     declare_parameter<double>("correction_x_bias", 0.05); // m — subtracted from tx to zero out systematic x error
 
     // Build arm poses
@@ -404,6 +407,46 @@ private:
     latched_track_ids_.fill(-1);
   }
 
+  void clear_stable_correction_history()
+  {
+    stable_correction_window_.clear();
+    stable_correction_avg_.x = 0.0;
+    stable_correction_avg_.y = 0.0;
+    stable_correction_avg_.z = 0.0;
+    has_stable_correction_ = false;
+  }
+
+  void push_stable_correction_sample(double x, double y, double theta)
+  {
+    int window_frames = get_parameter("sticky_stable_window_frames").as_int();
+    if (window_frames < 1) {
+      window_frames = 1;
+    }
+
+    geometry_msgs::msg::Vector3 sample;
+    sample.x = x;
+    sample.y = y;
+    sample.z = theta;
+    stable_correction_window_.push_back(sample);
+    while (static_cast<int>(stable_correction_window_.size()) > window_frames) {
+      stable_correction_window_.pop_front();
+    }
+
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double sum_theta = 0.0;
+    for (const auto& s : stable_correction_window_) {
+      sum_x += s.x;
+      sum_y += s.y;
+      sum_theta += s.z;
+    }
+    const double inv_n = 1.0 / static_cast<double>(stable_correction_window_.size());
+    stable_correction_avg_.x = sum_x * inv_n;
+    stable_correction_avg_.y = sum_y * inv_n;
+    stable_correction_avg_.z = sum_theta * inv_n;
+    has_stable_correction_ = true;
+  }
+
   std::array<int, NUM_ARMS> extract_assignment_track_ids(
     const AssignmentCandidate& assignment,
     const std::vector<int>& track_id_by_detection)
@@ -513,6 +556,24 @@ private:
     if (switch_confirm_frames < 1) {
       switch_confirm_frames = 1;
     }
+    int sticky_loss_confirm_frames = get_parameter("sticky_loss_confirm_frames").as_int();
+    if (sticky_loss_confirm_frames < 1) {
+      sticky_loss_confirm_frames = 1;
+    }
+
+    if (sticky_assignment && !sticky_mode_prev_) {
+      sticky_locked_assignment_ = false;
+      sticky_missing_frames_ = 0;
+      clear_stable_correction_history();
+      RCLCPP_INFO(get_logger(), "Sticky assignment enabled: locking assignment for pick window");
+    } else if (!sticky_assignment && sticky_mode_prev_) {
+      sticky_locked_assignment_ = false;
+      sticky_missing_frames_ = 0;
+      clear_latched_assignment();
+      clear_stable_correction_history();
+      RCLCPP_INFO(get_logger(), "Sticky assignment disabled: returning to dynamic assignment");
+    }
+    sticky_mode_prev_ = sticky_assignment;
 
     // Split tags
     aruco_interfaces::msg::DetectedTagArray loc_array;
@@ -560,22 +621,55 @@ private:
     }
 
     AssignmentCandidate best;
-    bool reused_latched_assignment = false;
 
     if (sticky_assignment) {
-      std::vector<std::pair<int, int>> latched_pairs;
-      if (build_latched_pairs(msg, index_by_track_id, max_assign, latched_pairs)) {
-        best.pairs = latched_pairs;
-        best.matched_count = static_cast<int>(latched_pairs.size());
-        reused_latched_assignment = true;
+      if (!sticky_locked_assignment_) {
+        std::vector<std::pair<int, int>> current_latched_pairs;
+        if (build_latched_pairs(msg, index_by_track_id, max_assign, current_latched_pairs) &&
+            !current_latched_pairs.empty()) {
+          best.pairs = current_latched_pairs;
+          best.matched_count = static_cast<int>(current_latched_pairs.size());
+          sticky_locked_assignment_ = true;
+          sticky_missing_frames_ = 0;
+        } else {
+          AssignmentCandidate instant_best =
+            compute_best_assignment(assignment_object_tag_indices, msg, max_assign, consist_thr);
+          best = instant_best;
+          if (!best.pairs.empty()) {
+            latch_assignment(best, msg, track_id_by_detection);
+            sticky_locked_assignment_ = true;
+            sticky_missing_frames_ = 0;
+          } else {
+            clear_latched_assignment();
+            sticky_locked_assignment_ = false;
+          }
+        }
+        pending_switch_track_ids_.fill(-1);
+        pending_switch_frames_ = 0;
+      } else {
+        std::vector<std::pair<int, int>> locked_pairs;
+        if (build_latched_pairs(msg, index_by_track_id, max_assign, locked_pairs)) {
+          best.pairs = locked_pairs;
+          best.matched_count = static_cast<int>(locked_pairs.size());
+          sticky_missing_frames_ = 0;
+        } else {
+          sticky_missing_frames_ += 1;
+        }
+        pending_switch_track_ids_.fill(-1);
+        pending_switch_frames_ = 0;
       }
-    }
+    } else {
+      sticky_missing_frames_ = 0;
+      sticky_locked_assignment_ = false;
 
-    if (!reused_latched_assignment) {
       AssignmentCandidate instant_best =
         compute_best_assignment(assignment_object_tag_indices, msg, max_assign, consist_thr);
 
-      if (sticky_assignment) {
+      std::vector<std::pair<int, int>> active_pairs;
+      const bool has_active_assignment =
+        build_latched_pairs(msg, index_by_track_id, max_assign, active_pairs);
+
+      if (!has_active_assignment) {
         best = instant_best;
         if (!best.pairs.empty()) {
           latch_assignment(best, msg, track_id_by_detection);
@@ -585,81 +679,74 @@ private:
         pending_switch_track_ids_.fill(-1);
         pending_switch_frames_ = 0;
       } else {
-        std::vector<std::pair<int, int>> active_pairs;
-        const bool has_active_assignment =
-          build_latched_pairs(msg, index_by_track_id, max_assign, active_pairs);
+        AssignmentCandidate active_best;
+        active_best.pairs = active_pairs;
+        active_best.matched_count = static_cast<int>(active_pairs.size());
 
-        if (!has_active_assignment) {
-          best = instant_best;
-          if (!best.pairs.empty()) {
-            latch_assignment(best, msg, track_id_by_detection);
-          } else {
-            clear_latched_assignment();
-          }
+        const auto instant_tracks =
+          extract_assignment_track_ids(instant_best, track_id_by_detection);
+        const auto active_tracks =
+          extract_assignment_track_ids(active_best, track_id_by_detection);
+
+        if (same_track_assignment(instant_tracks, active_tracks)) {
+          best = active_best;
           pending_switch_track_ids_.fill(-1);
           pending_switch_frames_ = 0;
         } else {
-          AssignmentCandidate active_best;
-          active_best.pairs = active_pairs;
-          active_best.matched_count = static_cast<int>(active_pairs.size());
+          bool switch_preferred = false;
+          if (instant_best.matched_count > active_best.matched_count) {
+            switch_preferred = true;
+          } else if (instant_best.matched_count == active_best.matched_count) {
+            double instant_max_residual = std::numeric_limits<double>::infinity();
+            bool instant_consistent = false;
+            evaluate_candidate_geometry(
+              instant_best.pairs, msg, instant_max_residual, instant_consistent, consist_thr);
 
-          const auto instant_tracks =
-            extract_assignment_track_ids(instant_best, track_id_by_detection);
-          const auto active_tracks =
-            extract_assignment_track_ids(active_best, track_id_by_detection);
+            double active_max_residual = std::numeric_limits<double>::infinity();
+            bool active_consistent = false;
+            evaluate_candidate_geometry(
+              active_best.pairs, msg, active_max_residual, active_consistent, consist_thr);
 
-          if (same_track_assignment(instant_tracks, active_tracks)) {
+            const double eps = 1e-9;
+            if (instant_consistent != active_consistent) {
+              switch_preferred = instant_consistent;
+            } else if (instant_max_residual + eps < active_max_residual) {
+              switch_preferred = true;
+            }
+          }
+
+          if (switch_preferred && !instant_best.pairs.empty()) {
+            if (same_track_assignment(instant_tracks, pending_switch_track_ids_)) {
+              pending_switch_frames_ += 1;
+            } else {
+              pending_switch_track_ids_ = instant_tracks;
+              pending_switch_frames_ = 1;
+            }
+
+            if (pending_switch_frames_ >= switch_confirm_frames) {
+              best = instant_best;
+              latch_assignment(best, msg, track_id_by_detection);
+              pending_switch_track_ids_.fill(-1);
+              pending_switch_frames_ = 0;
+            } else {
+              best = active_best;
+            }
+          } else {
             best = active_best;
             pending_switch_track_ids_.fill(-1);
             pending_switch_frames_ = 0;
-          } else {
-            bool switch_preferred = false;
-            if (instant_best.matched_count > active_best.matched_count) {
-              switch_preferred = true;
-            } else if (instant_best.matched_count == active_best.matched_count) {
-              double instant_max_residual = std::numeric_limits<double>::infinity();
-              bool instant_consistent = false;
-              evaluate_candidate_geometry(
-                instant_best.pairs, msg, instant_max_residual, instant_consistent, consist_thr);
-
-              double active_max_residual = std::numeric_limits<double>::infinity();
-              bool active_consistent = false;
-              evaluate_candidate_geometry(
-                active_best.pairs, msg, active_max_residual, active_consistent, consist_thr);
-
-              const double eps = 1e-9;
-              if (instant_consistent != active_consistent) {
-                switch_preferred = instant_consistent;
-              } else if (instant_max_residual + eps < active_max_residual) {
-                switch_preferred = true;
-              }
-            }
-
-            if (switch_preferred && !instant_best.pairs.empty()) {
-              if (same_track_assignment(instant_tracks, pending_switch_track_ids_)) {
-                pending_switch_frames_ += 1;
-              } else {
-                pending_switch_track_ids_ = instant_tracks;
-                pending_switch_frames_ = 1;
-              }
-
-              if (pending_switch_frames_ >= switch_confirm_frames) {
-                best = instant_best;
-                latch_assignment(best, msg, track_id_by_detection);
-                pending_switch_track_ids_.fill(-1);
-                pending_switch_frames_ = 0;
-              } else {
-                best = active_best;
-              }
-            } else {
-              best = active_best;
-              pending_switch_track_ids_.fill(-1);
-              pending_switch_frames_ = 0;
-            }
           }
         }
       }
     }
+
+    const bool cluster_lost =
+      sticky_assignment && sticky_locked_assignment_ &&
+      (sticky_missing_frames_ > sticky_loss_confirm_frames);
+    result.sticky_active = sticky_assignment;
+    result.cluster_lost = cluster_lost;
+    result.lost_tracking_frames = sticky_assignment ?
+      static_cast<uint16_t>(std::min(sticky_missing_frames_, 65535)) : 0;
 
     for (const auto& [arm_idx, tag_idx] : best.pairs) {
       auto& aa = result.arms[arm_idx];
@@ -685,7 +772,8 @@ private:
       result.correction.x = tx + x_bias;
       result.correction.y = ty;
       result.correction.z = theta;
-      result.correction_magnitude = static_cast<float>(dist2d(tx, ty));
+      result.correction_magnitude =
+        static_cast<float>(dist2d(result.correction.x, result.correction.y));
 
       bool all_consistent = true;
       for (double r : residuals) {
@@ -695,12 +783,21 @@ private:
         }
       }
       result.is_pickable = all_consistent;
+      if (all_consistent) {
+        push_stable_correction_sample(result.correction.x, result.correction.y, result.correction.z);
+      }
     } else {
       result.is_pickable = false;
-      result.correction.x = 0.0;
-      result.correction.y = 0.0;
-      result.correction.z = 0.0;
-      result.correction_magnitude = 0.0f;
+      if (sticky_assignment && has_stable_correction_) {
+        result.correction = stable_correction_avg_;
+        result.correction_magnitude =
+          static_cast<float>(dist2d(result.correction.x, result.correction.y));
+      } else {
+        result.correction.x = 0.0;
+        result.correction.y = 0.0;
+        result.correction.z = 0.0;
+        result.correction_magnitude = 0.0f;
+      }
     }
 
     pickability_pub_->publish(result);
@@ -712,6 +809,12 @@ private:
   std::array<int, NUM_ARMS> latched_track_ids_;
   std::array<int, NUM_ARMS> pending_switch_track_ids_{{-1, -1, -1, -1}};
   int pending_switch_frames_ = 0;
+  bool sticky_mode_prev_ = false;
+  bool sticky_locked_assignment_ = false;
+  int sticky_missing_frames_ = 0;
+  std::deque<geometry_msgs::msg::Vector3> stable_correction_window_;
+  geometry_msgs::msg::Vector3 stable_correction_avg_;
+  bool has_stable_correction_ = false;
   std::unordered_set<uint32_t>  object_ids_;
   std::unordered_set<uint32_t>  localization_ids_;
   std::vector<TrackedTag> tracks_;

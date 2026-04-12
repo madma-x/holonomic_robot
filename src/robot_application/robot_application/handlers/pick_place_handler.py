@@ -24,6 +24,7 @@ class PickPlaceHandler:
         self.node.declare_parameter('align_timeout_sec', 12.0)
         self.node.declare_parameter('align_threshold', 0.02)
         self.node.declare_parameter('pickability_wait_sec', 2.0)
+        self.node.declare_parameter('sticky_confirm_wait_sec', 0.4)
         self.node.declare_parameter('tag_manager_node_name', '/tag_manager_node')
 
         pickability_topic = self.node.get_parameter('pickability_topic').value
@@ -89,12 +90,9 @@ class PickPlaceHandler:
                     self.lower_pick_priority(task, pick_ref, 'approach unreachable')
                     return self._build_outcome(task, 'FAILED', 'NAV_FAIL', False, source_pick_id=source_pick_id)
 
-                # Keep arm->tag mapping stable only while robot is in the pick window.
-                self.node.get_logger().info('Step 5: enabling sticky arm-tag assignment')
-                self._set_sticky_assignment(True)
-
+  
                 self.node.get_logger().info('Step 6: waiting for pickability message')
-                pickability = self.wait_for_pickability()
+                pickability = self.wait_for_pickability(require_sticky=True)
                 if pickability is None or not bool(pickability.is_pickable):
                     self.node.get_logger().warn('Step 6: pickability check failed or timed out')
                     self.lower_pick_priority(task, pick_ref, 'not pickable')
@@ -105,6 +103,14 @@ class PickPlaceHandler:
                     f'cluster_id={int(getattr(pickability, "cluster_id", 0))} '
                     f'magnitude={float(getattr(pickability, "correction_magnitude", 0.0)):.3f}'
                 )
+
+                # Keep arm->tag mapping stable only while robot is in the pick window.
+                self.node.get_logger().info('Step 5: enabling sticky arm-tag assignment')
+                self._set_sticky_assignment(True)
+
+                if not self.wait_for_sticky_active():
+                    self.node.get_logger().warn('Step 5: sticky confirmation timeout, proceeding anyway')
+
 
                 cluster_id = int(getattr(pickability, 'cluster_id', 0))
                 self.node.get_logger().info(f'Step 7: calling align_to_cluster for cluster_id={cluster_id}')
@@ -213,12 +219,26 @@ class PickPlaceHandler:
             'target_drop_id': target_drop_id,
         }
 
-    def wait_for_pickability(self) -> Optional[ClusterPickability]:
+    def wait_for_sticky_active(self) -> bool:
+        timeout = float(self.node.get_parameter('sticky_confirm_wait_sec').value)
+        deadline = self.node.get_clock().now() + Duration(seconds=timeout)
+
+        while self.node.get_clock().now() < deadline and not self.node.stop_requested:
+            if self.latest_pickability is not None and bool(getattr(self.latest_pickability, 'sticky_active', False)):
+                return True
+            time.sleep(0.02)
+
+        return False
+
+    def wait_for_pickability(self, require_sticky: bool = False) -> Optional[ClusterPickability]:
         timeout = float(self.node.get_parameter('pickability_wait_sec').value)
         deadline = self.node.get_clock().now() + Duration(seconds=timeout)
 
         while self.node.get_clock().now() < deadline and not self.node.stop_requested:
             if self.latest_pickability is not None:
+                if require_sticky and not bool(getattr(self.latest_pickability, 'sticky_active', False)):
+                    time.sleep(0.02)
+                    continue
                 return self.latest_pickability
             time.sleep(0.05)
 

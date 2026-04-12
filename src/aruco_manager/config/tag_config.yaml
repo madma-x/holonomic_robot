@@ -14,6 +14,10 @@ tag_manager_node:
     consistency_threshold: 0.03
     # Pick handler enables this only during the pick window
     sticky_assignment: false
+    # Mark locked cluster as lost only after this many consecutive missing frames
+    sticky_loss_confirm_frames: 10
+    # Number of consistent pickable frames used to smooth frozen correction
+    sticky_stable_window_frames: 5
     # Require this many consecutive frames before switching to a new assignment
     assignment_switch_confirm_frames: 3
     # Systematic x offset to subtract so correction.x reads 0 when aligned
