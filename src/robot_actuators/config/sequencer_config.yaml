@@ -1,0 +1,7 @@
+actuator_sequencer:
+  ros__parameters:
+    move_servo_action: "move_servo"
+    control_pump_action: "control_pump"
+    pwm_servo_topic: "/pwm_servo_cmd"
+    step_timeout_sec: 15.0
+    safety_timeout_sec: 0.5

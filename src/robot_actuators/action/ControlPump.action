@@ -1,0 +1,12 @@
+# Goal: turn pump on or off, optionally for a fixed duration
+uint8   pump_id        # pump ID (maps to GPIO pin index)
+bool    enable         # true = ON, false = OFF
+float32 duty_cycle     # reserved (0.0–1.0); pumps run at full, kept for API compat
+float32 duration_sec   # seconds to run before auto-off (0 = hold until next command)
+---
+# Result
+bool   success
+string message
+---
+# Feedback
+float32 elapsed_sec    # seconds elapsed since pump turned on

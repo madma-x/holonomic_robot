@@ -14,12 +14,14 @@ import threading
 from enum import Enum
 
 try:
-    from robot_actuators.action import MoveServo, ControlPump, ControlGripper
+    from robot_actuators.action import MoveServo, ControlPump, ExecuteSequence
+    from robot_actuators.msg import ActuatorStep
     HAS_ROBOT_ACTUATORS = True
 except ImportError:
     MoveServo = None
     ControlPump = None
-    ControlGripper = None
+    ExecuteSequence = None
+    ActuatorStep = None
     HAS_ROBOT_ACTUATORS = False
 
 
@@ -69,11 +71,11 @@ class MissionBase(Node):
         if HAS_ROBOT_ACTUATORS and not self.mock_actuators:
             self.servo_client = ActionClient(self, MoveServo, 'move_servo')
             self.pump_client = ActionClient(self, ControlPump, 'control_pump')
-            self.gripper_client = ActionClient(self, ControlGripper, 'control_gripper')
+            self.sequence_client = ActionClient(self, ExecuteSequence, 'execute_sequence')
         else:
             self.servo_client = None
             self.pump_client = None
-            self.gripper_client = None
+            self.sequence_client = None
             if self.mock_actuators:
                 self.get_logger().warn('MissionBase running with mock actuators enabled')
             else:
@@ -265,8 +267,8 @@ class MissionBase(Node):
         
         goal_msg = MoveServo.Goal()
         goal_msg.servo_id = servo_id
-        goal_msg.angle_deg = angle
-        goal_msg.max_speed_deg_per_sec = speed
+        goal_msg.target_deg = angle
+        goal_msg.speed_deg_s = speed
         
         self.get_logger().info(f'Moving servo {servo_id} to {angle}°')
         
@@ -340,6 +342,58 @@ class MissionBase(Node):
         
         return True
     
+    def execute_sequence(self, steps: list) -> bool:
+        """Execute an ordered list of ActuatorStep via the actuator_sequencer."""
+        if self.mock_actuators:
+            for i, step in enumerate(steps):
+                if step.step_type == ActuatorStep.MOVE_SERVO:
+                    self.get_logger().info(
+                        f'[MOCK] Step {i}: MOVE_SERVO servo={step.servo_id} → {step.target_deg:.1f}°'
+                    )
+                else:
+                    action = 'ON' if step.pump_enable else 'OFF'
+                    self.get_logger().info(
+                        f'[MOCK] Step {i}: CONTROL_PUMP pump={step.pump_id} {action}'
+                    )
+            return True
+
+        if self.sequence_client is None:
+            self.get_logger().error('Sequence action client unavailable')
+            return False
+
+        if not self.sequence_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error('execute_sequence action server not available')
+            return False
+
+        goal_msg = ExecuteSequence.Goal()
+        goal_msg.steps = steps
+
+        send_goal_future = self.sequence_client.send_goal_async(goal_msg)
+        if not self._wait_for_future(send_goal_future, timeout_sec=5.0):
+            self.get_logger().error('Sequence goal request timed out')
+            return False
+
+        goal_handle = send_goal_future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error('Sequence goal rejected')
+            return False
+
+        total_timeout = self.servo_timeout * len(steps) + self.pump_timeout
+        result_future = goal_handle.get_result_async()
+        if not self._wait_for_future(result_future, timeout_sec=total_timeout):
+            self.get_logger().error('Sequence action timed out')
+            return False
+
+        res = result_future.result()
+        if res is None:
+            self.get_logger().error('Sequence action returned no result')
+            return False
+        if not res.result.success:
+            self.get_logger().error(
+                f'Sequence failed at step {res.result.failed_step}: {res.result.message}'
+            )
+        return bool(res.result.success)
+
     def call_service_async(self, service_name: str, srv_type):
         """Helper to call a service asynchronously."""
         client = self.create_client(srv_type, service_name)

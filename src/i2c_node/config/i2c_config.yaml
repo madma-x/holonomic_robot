@@ -1,0 +1,62 @@
+i2c_node:
+  ros__parameters:
+    # I2C hardware
+    i2c_bus: 1
+    pca9685_address: 64    # 0x40 — PWM board for servos
+    mcp23017_address: 32   # 0x20 — GPIO expander for pumps
+    servo_freq_hz: 50.0
+
+    # Publish rate and safety watchdog
+    pump_state_hz: 5.0
+    safety_timeout_sec: 0.5
+
+    # Pump assignments: pump_N_id → MCP23017 port (0=A, 1=B) + pin (0-7)
+    # Set pump_N_id: -1 to disable slot N.
+    pump_0_id: 0
+    pump_0_port: 0    # port A
+    pump_0_pin: 0     # pin 0
+    pump_1_id: 1
+    pump_1_port: 0    # port A
+    pump_1_pin: 1     # pin 1
+    pump_2_id: -1
+    pump_2_port: -1
+    pump_2_pin: -1
+    pump_3_id: -1
+    pump_3_port: -1
+    pump_3_pin: -1
+    pump_4_id: -1
+    pump_4_port: -1
+    pump_4_pin: -1
+    pump_5_id: -1
+    pump_5_port: -1
+    pump_5_pin: -1
+    pump_6_id: -1
+    pump_6_port: -1
+    pump_6_pin: -1
+    pump_7_id: -1
+    pump_7_port: -1
+    pump_7_pin: -1
+
+    # PWM servo channel assignments (PCA9685, 6 servos)
+    # pwm_servo_N_channel: PCA9685 channel (0-15)
+    # pwm_servo_N_min_pulse_us: pulse width for 0°  (default 500 µs)
+    # pwm_servo_N_max_pulse_us: pulse width for 180° (default 2500 µs)
+    # Set pwm_servo_N_channel: -1 to disable slot N.
+    pwm_servo_0_channel: 0
+    pwm_servo_0_min_pulse_us: 500.0
+    pwm_servo_0_max_pulse_us: 2500.0
+    pwm_servo_1_channel: 1
+    pwm_servo_1_min_pulse_us: 500.0
+    pwm_servo_1_max_pulse_us: 2500.0
+    pwm_servo_2_channel: 2
+    pwm_servo_2_min_pulse_us: 500.0
+    pwm_servo_2_max_pulse_us: 2500.0
+    pwm_servo_3_channel: 3
+    pwm_servo_3_min_pulse_us: 500.0
+    pwm_servo_3_max_pulse_us: 2500.0
+    pwm_servo_4_channel: 4
+    pwm_servo_4_min_pulse_us: 500.0
+    pwm_servo_4_max_pulse_us: 2500.0
+    pwm_servo_5_channel: 5
+    pwm_servo_5_min_pulse_us: 500.0
+    pwm_servo_5_max_pulse_us: 2500.0

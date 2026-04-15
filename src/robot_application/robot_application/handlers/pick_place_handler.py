@@ -8,8 +8,10 @@ from rclpy.duration import Duration
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
 
+from aruco_interfaces.msg import ArmAssignment
 from aruco_interfaces.msg import ClusterPickability
 from aruco_interfaces.srv import AlignToCluster as AlignToClusterSrv
+from robot_application.arm_sequences import ArmSequenceBuilder
 
 
 class PickPlaceHandler:
@@ -31,6 +33,8 @@ class PickPlaceHandler:
         align_service_name = self.node.get_parameter('align_service_name').value
         tag_manager_node_name = self.node.get_parameter('tag_manager_node_name').value
 
+        self.sequence_builder = ArmSequenceBuilder()
+
         self.align_client = self.node.create_client(AlignToClusterSrv, align_service_name)
         self.tag_manager_params = AsyncParameterClient(self.node, str(tag_manager_node_name))
         self.pickability_sub = self.node.create_subscription(
@@ -50,6 +54,7 @@ class PickPlaceHandler:
     def execute(self, task: dict) -> Dict[str, Any]:
         carry_object = bool(task.get('carry_object', False))
         source_pick_id = str(task.get('source_pick_id', ''))
+        active_arm_indices = self._task_arm_indices(task)
         pick_ref: Optional[dict] = None
 
         self.node.get_logger().info(
@@ -96,12 +101,43 @@ class PickPlaceHandler:
                 if pickability is None or not bool(pickability.is_pickable):
                     self.node.get_logger().warn('Step 6: pickability check failed or timed out')
                     self.lower_pick_priority(task, pick_ref, 'not pickable')
-                    return self._build_outcome(task, 'FAILED', 'PICK_EMPTY', False, source_pick_id=source_pick_id)
+                    return self._build_outcome(
+                        task,
+                        'FAILED',
+                        'PICK_EMPTY',
+                        False,
+                        source_pick_id=source_pick_id,
+                        active_arm_indices=active_arm_indices,
+                    )
 
                 self.node.get_logger().info(
                     'Step 6: pickability confirmed '
                     f'cluster_id={int(getattr(pickability, "cluster_id", 0))} '
                     f'magnitude={float(getattr(pickability, "correction_magnitude", 0.0)):.3f}'
+                )
+
+                active_arm_indices = self.select_pick_arm_indices(pickability)
+                if not active_arm_indices:
+                    self.node.get_logger().warn('Step 6: no arm is assigned to a pickable object')
+                    self.lower_pick_priority(task, pick_ref, 'no assigned arm')
+                    return self._build_outcome(
+                        task,
+                        'FAILED',
+                        'PICK_EMPTY',
+                        False,
+                        source_pick_id=source_pick_id,
+                        active_arm_indices=active_arm_indices,
+                    )
+
+                task['active_arm_indices'] = list(active_arm_indices)
+                task['active_arm_index'] = active_arm_indices[0]
+                assigned_arms = self.get_selected_arm_assignments(pickability, active_arm_indices)
+                selected_tag_ids = [
+                    int(getattr(arm, 'tag_id', 0))
+                    for arm in assigned_arms
+                ]
+                self.node.get_logger().info(
+                    f'Step 6: selected arm_indices={active_arm_indices} tag_ids={selected_tag_ids}'
                 )
 
                 # Keep arm->tag mapping stable only while robot is in the pick window.
@@ -121,13 +157,38 @@ class PickPlaceHandler:
 
                 self.node.get_logger().info('Step 7: alignment succeeded')
 
-                self.node.get_logger().info('Step 8: lowering arm and enabling pump')
-                if not self.lower_arm_and_enable_pump(task):
-                    self.node.get_logger().error('Step 8: actuator sequence failed')
+                self.node.get_logger().info(
+                    f'Step 8: executing pick sequence for arm_indices={active_arm_indices}'
+                )
+                if not self.execute_pick_sequence(active_arm_indices):
+                    self.node.get_logger().error('Step 8: pick sequence failed')
                     self.lower_pick_priority(task, pick_ref, 'actuation failed')
-                    return self._build_outcome(task, 'FAILED', 'ACTUATION_FAIL', False, source_pick_id=source_pick_id)
+                    return self._build_outcome(
+                        task,
+                        'FAILED',
+                        'ACTUATION_FAIL',
+                        False,
+                        source_pick_id=source_pick_id,
+                        active_arm_indices=active_arm_indices,
+                    )
 
-                self.node.get_logger().info('Step 8: pickup actuation succeeded')
+                swap_arm_indices = self.swap_arm_indices(task, active_arm_indices)
+                if swap_arm_indices:
+                    self.node.get_logger().info(
+                        f'Step 8b: executing swap sequence for arm_indices={swap_arm_indices}'
+                    )
+                    if not self.execute_swap_sequence(swap_arm_indices):
+                        self.node.get_logger().error('Step 8b: swap sequence failed')
+                        return self._build_outcome(
+                            task,
+                            'FAILED',
+                            'ACTUATION_FAIL',
+                            False,
+                            source_pick_id=source_pick_id,
+                            active_arm_indices=active_arm_indices,
+                        )
+
+                self.node.get_logger().info('Step 8: pick sequence succeeded')
                 carry_object = True
             finally:
                 self.node.get_logger().info('Step 9: disabling sticky arm-tag assignment')
@@ -148,6 +209,7 @@ class PickPlaceHandler:
                 'DROP_FULL',
                 carry_object,
                 source_pick_id=source_pick_id,
+                active_arm_indices=active_arm_indices,
             )
 
         drop_location, drop_ref = drop_info
@@ -168,7 +230,8 @@ class PickPlaceHandler:
                 'DROP_FULL',
                 carry_object,
                 source_pick_id=source_pick_id,
-                target_drop_id=drop_id
+                target_drop_id=drop_id,
+                active_arm_indices=active_arm_indices,
             )
 
         self.node.get_logger().info(f'Step 12: navigating to drop {drop_id}')
@@ -186,17 +249,45 @@ class PickPlaceHandler:
                 'NAV_FAIL',
                 carry_object,
                 source_pick_id=source_pick_id,
-                target_drop_id=drop_id
+                target_drop_id=drop_id,
+                active_arm_indices=active_arm_indices,
             )
 
-        self.node.get_logger().info(f'Step 13: task completed successfully, placed at drop {drop_id}')
+        if not active_arm_indices:
+            self.node.get_logger().error('Step 13: no active arms available for drop sequence')
+            return self._build_outcome(
+                task,
+                'FAILED',
+                'ACTUATION_FAIL',
+                carry_object,
+                source_pick_id=source_pick_id,
+                target_drop_id=drop_id,
+                active_arm_indices=active_arm_indices,
+            )
+
+        turned_arm_indices = self.turned_arm_indices(task, active_arm_indices)
+        push_arm_indices = self.drop_push_arm_indices(
+            task,
+            active_arm_indices,
+            turned_arm_indices,
+        )
+        self.node.get_logger().info(
+            f'Step 13: executing drop sequence for arm_indices={active_arm_indices} '
+            f'turned_arm_indices={turned_arm_indices} '
+            f'push_arm_indices={push_arm_indices}'
+        )
+        if not self.execute_place_sequence(active_arm_indices, push_arm_indices=push_arm_indices):
+            self.node.get_logger().warn('Step 13: place sequence failed — object may not be released')
+
+        self.node.get_logger().info(f'Step 14: task completed successfully, placed at drop {drop_id}')
         return self._build_outcome(
             task,
             'COMPLETED',
             'PLACED',
             False,
             source_pick_id=source_pick_id,
-            target_drop_id=drop_id
+            target_drop_id=drop_id,
+            active_arm_indices=active_arm_indices,
         )
 
 
@@ -208,7 +299,9 @@ class PickPlaceHandler:
         carry_object: bool,
         source_pick_id: str = '',
         target_drop_id: str = '',
+        active_arm_indices: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
+        arm_indices = list(active_arm_indices or [])
         return {
             'task_id': str(task.get('task_id', 'unknown')),
             'task_type': str(task.get('task_type', 'unknown')),
@@ -217,6 +310,8 @@ class PickPlaceHandler:
             'carry_object': bool(carry_object),
             'source_pick_id': source_pick_id,
             'target_drop_id': target_drop_id,
+            'active_arm_index': arm_indices[0] if arm_indices else None,
+            'active_arm_indices': arm_indices,
         }
 
     def wait_for_sticky_active(self) -> bool:
@@ -272,19 +367,118 @@ class PickPlaceHandler:
         self.node.get_logger().info(f'Alignment successful: {response.status_message}')
         return bool(response.success)
 
-    def lower_arm_and_enable_pump(self, task: dict) -> bool:
-        servo_id = int(self.node.get_parameter('arm_lower_servo_id').value)
-        angle = float(self.node.get_parameter('arm_lower_angle_deg').value)
-        speed = float(self.node.get_parameter('arm_lower_speed_deg_s').value)
-        pump_id = int(self.node.get_parameter('pump_id').value)
-        duty_cycle = float(self.node.get_parameter('pump_pick_duty_cycle').value)
-        default_duration = float(self.node.get_parameter('pump_pick_duration_sec').value)
-        duration = float(task.get('pickup_duration', default_duration))
-
-        if not self.node.move_servo(servo_id, angle=angle, speed=speed):
+    def execute_pick_sequence(self, arm_indices: List[int]) -> bool:
+        """Execute the configured pick sequence for the selected arms."""
+        try:
+            steps = self.sequence_builder.build_pick_sequence(arm_indices)
+        except RuntimeError as exc:
+            self.node.get_logger().error(str(exc))
             return False
+        return self.node.execute_sequence(steps)
 
-        return self.node.control_pump(pump_id, enable=True, duty_cycle=duty_cycle, duration=duration)
+    def execute_swap_sequence(self, arm_indices: List[int]) -> bool:
+        """Execute the configured swap sequence for selected arms."""
+        try:
+            steps = self.sequence_builder.build_swap_sequence(arm_indices)
+        except RuntimeError as exc:
+            self.node.get_logger().error(str(exc))
+            return False
+        if not steps:
+            return True
+        return self.node.execute_sequence(steps)
+
+    def execute_place_sequence(
+        self,
+        arm_indices: List[int],
+        push_arm_indices: Optional[List[int]] = None,
+    ) -> bool:
+        """Execute the configured drop sequence for the selected arms."""
+        try:
+            steps = self.sequence_builder.build_place_sequence(
+                arm_indices,
+                push_arm_indices=push_arm_indices,
+            )
+        except RuntimeError as exc:
+            self.node.get_logger().error(str(exc))
+            return False
+        return self.node.execute_sequence(steps)
+
+    def select_pick_arm_indices(self, pickability: ClusterPickability) -> List[int]:
+        return self.sequence_builder.select_arm_indices(pickability)
+
+    def select_pick_arm_index(self, pickability: ClusterPickability) -> Optional[int]:
+        return self.sequence_builder.select_arm_index(pickability)
+
+    def get_selected_arm_assignment(
+        self, pickability: ClusterPickability, arm_index: int
+    ) -> Optional[ArmAssignment]:
+        return self.sequence_builder.get_assigned_arm(pickability, arm_index)
+
+    def get_selected_arm_assignments(
+        self, pickability: ClusterPickability, arm_indices: List[int]
+    ) -> List[ArmAssignment]:
+        assigned = []
+        for arm_index in arm_indices:
+            arm = self.get_selected_arm_assignment(pickability, arm_index)
+            if arm is not None:
+                assigned.append(arm)
+        return assigned
+
+    def swap_arm_indices(self, task: dict, active_arm_indices: List[int]) -> List[int]:
+        raw_indices = task.get('swap_arm_indices', task.get('turn_arm_indices', []))
+        if isinstance(raw_indices, list):
+            return [
+                arm_index for arm_index in self._normalize_arm_index_list(raw_indices)
+                if arm_index in active_arm_indices
+            ]
+        if bool(task.get('swap_all_active_arms', False)):
+            return list(active_arm_indices)
+        return []
+
+    def turned_arm_indices(self, task: dict, active_arm_indices: List[int]) -> List[int]:
+        return self.swap_arm_indices(task, active_arm_indices)
+
+    def drop_push_arm_indices(
+        self,
+        task: dict,
+        active_arm_indices: List[int],
+        turned_arm_indices: List[int],
+    ) -> Optional[List[int]]:
+        raw_indices = task.get('drop_push_arm_indices')
+        if isinstance(raw_indices, list):
+            return [
+                arm_index
+                for arm_index in self._normalize_arm_index_list(raw_indices)
+                if arm_index in active_arm_indices
+            ]
+        return list(turned_arm_indices)
+
+    def _task_arm_index(self, task: dict) -> Optional[int]:
+        raw_value = task.get('active_arm_index')
+        if raw_value is None or raw_value == '':
+            return None
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+    def _task_arm_indices(self, task: dict) -> List[int]:
+        raw_indices = task.get('active_arm_indices')
+        if isinstance(raw_indices, list):
+            return self._normalize_arm_index_list(raw_indices)
+        single_arm_index = self._task_arm_index(task)
+        return [] if single_arm_index is None else [single_arm_index]
+
+    def _normalize_arm_index_list(self, values: List[Any]) -> List[int]:
+        arm_indices = []
+        for value in values:
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError):
+                continue
+            if normalized not in arm_indices:
+                arm_indices.append(normalized)
+        return arm_indices
 
     def lower_pick_priority(self, task: dict, pick_ref: Optional[dict], reason: str):
         penalty = int(self.node.get_parameter('priority_penalty').value)
