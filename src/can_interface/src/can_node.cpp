@@ -365,7 +365,7 @@ private:
         double rpm1 = (v1 / (2*M_PI*wheel_radius)) * 60.0;
         double rpm2 = (v2 / (2*M_PI*wheel_radius)) * 60.0;
 
-        const uint8_t acc = 2;  // acceleration
+        const uint8_t acc = 220;  // acceleration
         send_motor_command(0x1, rpm0, acc);
         send_motor_command(0x2, rpm1, acc);
         send_motor_command(0x3, rpm2, acc);
