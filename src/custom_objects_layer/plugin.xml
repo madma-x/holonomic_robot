@@ -1,0 +1,8 @@
+<library path="custom_objects_layer_plugin">
+  <class
+    name="custom_objects_layer::CustomObjectsLayer"
+    type="custom_objects_layer::CustomObjectsLayer"
+    base_class_type="nav2_costmap_2d::Layer">
+    <description>Runtime add/remove custom obstacle objects.</description>
+  </class>
+</library>

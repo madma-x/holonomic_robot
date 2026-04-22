@@ -222,6 +222,16 @@ private:
         int flags = fcntl(can_socket_, F_GETFL, 0);
         fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);
 
+        // Drain any stale frames left in the kernel RX buffer from a previous
+        // run so the node starts with a clean slate.
+        {
+            struct can_frame stale{};
+            int drained = 0;
+            while (read(can_socket_, &stale, sizeof(stale)) > 0) { ++drained; }
+            if (drained > 0)
+                RCLCPP_WARN(get_logger(), "Drained %d stale CAN frame(s) from RX buffer at startup", drained);
+        }
+
         RCLCPP_INFO(get_logger(), "CAN interface initialized successfully");
     }
 
@@ -346,9 +356,9 @@ private:
         const double angle2 = M_PI/2.0;
 
         // Inverse kinematics for holonomic drive
-        double v0 = -cos(angle0)*v_x - sin(angle0)*v_y + robot_radius*w_z;
-        double v1 = -cos(angle1)*v_x - sin(angle1)*v_y + robot_radius*w_z;
-        double v2 = -cos(angle2)*v_x - sin(angle2)*v_y + robot_radius*w_z;
+        double v0 = cos(angle0)*v_x - sin(angle0)*v_y + robot_radius*w_z;
+        double v1 = cos(angle1)*v_x - sin(angle1)*v_y + robot_radius*w_z;
+        double v2 = cos(angle2)*v_x - sin(angle2)*v_y + robot_radius*w_z;
 
         // Convert to RPM
         double rpm0 = (v0 / (2*M_PI*wheel_radius)) * 60.0;

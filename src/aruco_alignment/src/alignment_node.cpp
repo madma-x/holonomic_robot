@@ -1,4 +1,5 @@
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/executors/multi_threaded_executor.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "aruco_interfaces/msg/cluster_pickability.hpp"
@@ -19,12 +20,13 @@ public:
         this->declare_parameter<double>("pid_xy.ki", 0.05);
         this->declare_parameter<double>("pid_xy.kd", 0.1);
         this->declare_parameter<double>("pid_xy.max_integral_error", 0.5);
-        this->declare_parameter<double>("pid_xy.max_velocity", 0.5);
+        this->declare_parameter<double>("pid_xy.max_velocity", 0.1);
         this->declare_parameter<double>("pid_theta.kp", 0.3);
         this->declare_parameter<double>("pid_theta.ki", 0.02);
         this->declare_parameter<double>("pid_theta.kd", 0.05);
         this->declare_parameter<double>("pid_theta.max_integral_error", 0.3);
         this->declare_parameter<double>("pid_theta.max_angular_velocity", 1.0);
+        this->declare_parameter<int>("final_stop_hold_ms", 1000);
         this->declare_parameter<double>("pos_tolerance", 0.02);
         this->declare_parameter<double>("ang_tolerance", 0.05);
         this->declare_parameter<std::string>("cluster_topic", "/aruco_manager/cluster_pickability");
@@ -36,21 +38,37 @@ public:
         cluster_timeout_ms_ = this->get_parameter("cluster_timeout_ms").as_int();
         pos_tolerance_ = this->get_parameter("pos_tolerance").as_double();
         ang_tolerance_ = this->get_parameter("ang_tolerance").as_double();
+        final_stop_hold_ms_ = this->get_parameter("final_stop_hold_ms").as_int();
+        if (final_stop_hold_ms_ < 0) {
+            final_stop_hold_ms_ = 0;
+        }
+        stop_hold_until_ = this->now();
 
         // Create subscriptions
         std::string cluster_topic = this->get_parameter("cluster_topic").as_string();
         std::string odom_topic = this->get_parameter("odometry_topic").as_string();
+
+        service_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        timer_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        subs_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+        rclcpp::SubscriptionOptions cluster_sub_options;
+        cluster_sub_options.callback_group = subs_cb_group_;
         cluster_sub_ = this->create_subscription<aruco_interfaces::msg::ClusterPickability>(
             cluster_topic, 10,
             [this](const aruco_interfaces::msg::ClusterPickability::SharedPtr msg) {
                 this->cluster_callback(msg);
-            });
+            },
+            cluster_sub_options);
 
+        rclcpp::SubscriptionOptions odom_sub_options;
+        odom_sub_options.callback_group = subs_cb_group_;
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic, 10,
             [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
                 this->odom_callback(msg);
-            });
+            },
+            odom_sub_options);
 
         // Create publisher and service
         std::string cmd_vel_topic = this->get_parameter("cmd_vel_topic").as_string();
@@ -61,7 +79,9 @@ public:
             [this](const std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Request> request,
                    std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Response> response) {
                 this->service_callback(request, response);
-            });
+            },
+            rmw_qos_profile_services_default,
+            service_cb_group_);
 
         // Initialize PID controllers
         init_pid_controllers();
@@ -70,7 +90,8 @@ public:
         auto period = std::chrono::duration<double>(1.0 / control_rate);
         timer_ = this->create_wall_timer(
             period,
-            [this]() { this->control_loop(); });
+            [this]() { this->control_loop(); },
+            timer_cb_group_);
 
         RCLCPP_INFO(this->get_logger(), "Alignment node initialized");
     }
@@ -82,6 +103,9 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Service<aruco_interfaces::srv::AlignToCluster>::SharedPtr service_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::CallbackGroup::SharedPtr service_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr subs_cb_group_;
 
     // Cluster state
     struct ClusterState {
@@ -115,17 +139,20 @@ private:
 
     // Configuration
     int cluster_timeout_ms_;
+    int final_stop_hold_ms_;
     double pos_tolerance_, ang_tolerance_;
+    rclcpp::Time stop_hold_until_;
 
-    // Single-loop PID controllers (one per axis)
-    std::unique_ptr<PIDController> pid_xy_;   // XY position error → velocity command
+    // Independent PID controllers per axis
+    std::unique_ptr<PIDController> pid_x_;     // X position error → vx command
+    std::unique_ptr<PIDController> pid_y_;     // Y position error → vy command
     std::unique_ptr<PIDController> pid_theta_; // angle error → angular velocity command
 
     // Synchronization
     std::mutex state_mutex_;
 
     void init_pid_controllers() {
-        // XY position loop: position error → velocity output
+        // X and Y use the same gains/limits but are independent instances.
         PIDController::Gains gains_xy = {
             this->get_parameter("pid_xy.kp").as_double(),
             this->get_parameter("pid_xy.ki").as_double(),
@@ -135,7 +162,8 @@ private:
             this->get_parameter("pid_xy.max_integral_error").as_double(),
             this->get_parameter("pid_xy.max_velocity").as_double()
         };
-        pid_xy_ = std::make_unique<PIDController>(gains_xy, limits_xy);
+        pid_x_ = std::make_unique<PIDController>(gains_xy, limits_xy);
+        pid_y_ = std::make_unique<PIDController>(gains_xy, limits_xy);
 
         // Theta angle loop: angle error → angular velocity output
         PIDController::Gains gains_theta = {
@@ -164,8 +192,9 @@ private:
 
         if (msg->sticky_active && msg->cluster_lost) {
             if (!frozen_loss_mode_) {
-                frozen_loss_target_.x = msg->correction.x;
-                frozen_loss_target_.y = msg->correction.y;
+                // Pickability axes are swapped w.r.t. robot state axes.
+                frozen_loss_target_.x = msg->correction.y;
+                frozen_loss_target_.y = msg->correction.x;
                 frozen_loss_target_.theta = msg->correction.z;
 
                 // Freeze a world-frame target once: current odom + last error.
@@ -193,14 +222,15 @@ private:
 
         // Update last confident pose when cluster is seen and is pickable
         if (msg->is_pickable) {
-            last_confident_pose_.x = msg->correction.x;
-            last_confident_pose_.y = msg->correction.y;
+            // Pickability axes are swapped w.r.t. robot state axes.
+            last_confident_pose_.x = msg->correction.y;
+            last_confident_pose_.y = msg->correction.x;
             last_confident_pose_.theta = msg->correction.z;
             have_confident_pose_ = true;
 
-            RCLCPP_DEBUG(this->get_logger(),
+            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "Cluster %d received: correction=(%.3f, %.3f), magnitude=%.3f",
-                msg->cluster_id, msg->correction.x, msg->correction.y, msg->correction_magnitude);
+                msg->cluster_id, last_confident_pose_.x, last_confident_pose_.y, msg->correction_magnitude);
         }
     }
 
@@ -222,18 +252,24 @@ private:
         const std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Request> request,
         std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Response> response) {
 
-        std::lock_guard<std::mutex> lock(state_mutex_);
+        std::unique_lock<std::mutex> lock(state_mutex_);
 
         target_cluster_id_ = request->cluster_id;
         alignment_active_ = true;
         alignment_complete_ = false;
-        latest_cluster_.received = false;
+        stop_hold_until_ = this->now();
+        // Keep a recent matching cluster sample if available; only clear if it is
+        // unrelated to the requested cluster.
+        if (latest_cluster_.received && latest_cluster_.msg.cluster_id != request->cluster_id) {
+            latest_cluster_.received = false;
+        }
         frozen_loss_mode_ = false;
         last_cluster_lost_state_ = false;
         alignment_start_time_ = this->now();
 
         // Reset PID controllers
-        pid_xy_->reset();
+        pid_x_->reset();
+        pid_y_->reset();
         pid_theta_->reset();
 
         RCLCPP_INFO(this->get_logger(),
@@ -251,11 +287,14 @@ private:
                 alignment_complete_ = true;
                 alignment_success_ = false;
                 alignment_message_ = "Timeout waiting for alignment";
+                RCLCPP_ERROR(this->get_logger(),
+                    "Alignment timed out after %.2fs (cluster_id=%d)",
+                    request->max_wait_time, request->cluster_id);
                 break;
             }
-            state_mutex_.unlock();
+            lock.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            state_mutex_.lock();
+            lock.lock();
         }
 
         // Populate response
@@ -267,6 +306,13 @@ private:
         response->status_message = alignment_message_;
 
         alignment_active_ = false;
+        stop_hold_until_ = this->now() + rclcpp::Duration::from_nanoseconds(
+            static_cast<int64_t>(final_stop_hold_ms_) * 1000000LL);
+
+        // Always send a final stop command when alignment request finishes,
+        // regardless of success or failure.
+        auto stop_cmd = geometry_msgs::msg::Twist();
+        cmd_vel_pub_->publish(stop_cmd);
 
         RCLCPP_INFO(this->get_logger(),
             "Alignment complete: success=%d, message=%s",
@@ -277,9 +323,14 @@ private:
         std::lock_guard<std::mutex> lock(state_mutex_);
 
         if (!alignment_active_) {
-            // Publish zero velocity when not aligning
-            auto cmd_msg = geometry_msgs::msg::Twist();
-            cmd_vel_pub_->publish(cmd_msg);
+            if (this->now() < stop_hold_until_) {
+                auto stop_cmd = geometry_msgs::msg::Twist();
+                cmd_vel_pub_->publish(stop_cmd);
+                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "Publishing stop cmd_vel during final hold window");
+            }
+            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Alignment inactive: not publishing cmd_vel (Nav2 remains in control)");
             return;
         }
 
@@ -295,15 +346,35 @@ private:
             while (error_pose.theta > M_PI) error_pose.theta -= 2.0 * M_PI;
             while (error_pose.theta < -M_PI) error_pose.theta += 2.0 * M_PI;
             cluster_available = true;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Control loop using frozen loss target while sticky cluster is lost");
         } else if (latest_cluster_.received) {
             auto age_ms = (this->now() - latest_cluster_.timestamp).nanoseconds() / 1e6;
             if (age_ms < cluster_timeout_ms_) {
-                // Correction is already the robot-frame error.
+                // Correction is robot-frame error with swapped X/Y axes from pickability.
                 cluster_available = true;
-                error_pose.x = latest_cluster_.msg.correction.x;
-                error_pose.y = latest_cluster_.msg.correction.y;
+                error_pose.x = latest_cluster_.msg.correction.y;
+                error_pose.y = latest_cluster_.msg.correction.x;
                 error_pose.theta = latest_cluster_.msg.correction.z;
+                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Control loop using live cluster correction (age=%.1f ms)", age_ms);
+            } else {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Latest cluster stale (age=%.1f ms, timeout=%d ms)", age_ms, cluster_timeout_ms_);
             }
+        } else {
+            // Grace period at alignment startup: wait briefly for first target
+            // sample before declaring loss/falling back.
+            auto startup_ms = (this->now() - alignment_start_time_).nanoseconds() / 1e6;
+            if (startup_ms < cluster_timeout_ms_) {
+                auto stop_cmd = geometry_msgs::msg::Twist();
+                cmd_vel_pub_->publish(stop_cmd);
+                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "Waiting for first cluster sample after service start (%.1f ms)", startup_ms);
+                return;
+            }
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "No cluster message received yet while alignment is active");
         }
 
         // If cluster not available, use last confident pose
@@ -316,6 +387,8 @@ private:
             alignment_complete_ = true;
             alignment_success_ = false;
             alignment_message_ = "No cluster available and no last confident pose";
+            RCLCPP_ERROR(this->get_logger(),
+                "Alignment failed: no cluster available and no last confident pose");
             return;
         }
 
@@ -330,12 +403,15 @@ private:
 
         // Check convergence
         double pos_error = std::hypot(error_x, error_y);
-        if (pos_error < pos_tolerance_ && std::abs(error_theta) < ang_tolerance_) {
+        if (pos_error < pos_tolerance_) {
             auto cmd_msg = geometry_msgs::msg::Twist();
             cmd_vel_pub_->publish(cmd_msg);
             alignment_complete_ = true;
             alignment_success_ = true;
             alignment_message_ = "Alignment successful";
+            RCLCPP_INFO(this->get_logger(),
+                "Alignment converged: pos_err=%.4f (tol=%.4f)",
+                pos_error, pos_tolerance_);
             return;
         }
 
@@ -345,10 +421,11 @@ private:
         last_loop_time = this->now();
         if (dt <= 0.0) dt = 0.02; // Fallback
 
-        // Single PID loop per axis: position error → velocity command
-        double cmd_vx = pid_xy_->update(error_x, dt);
-        double cmd_vy = pid_xy_->update(error_y, dt);
-        double cmd_omega = pid_theta_->update(error_theta, dt);
+        // Invert XY command direction so positive correction error commands
+        // motion that reduces the observed robot-frame offset.
+        double cmd_vx = pid_x_->update(-error_x, dt);
+        double cmd_vy = pid_y_->update(-error_y, dt);
+        double cmd_omega = 0.0; // yaw control disabled
 
         // Publish command
         auto cmd_msg = geometry_msgs::msg::Twist();
@@ -357,7 +434,7 @@ private:
         cmd_msg.angular.z = cmd_omega;
         cmd_vel_pub_->publish(cmd_msg);
 
-        RCLCPP_DEBUG(this->get_logger(),
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
             "Control: pos_err=(%.4f, %.4f), ang_err=%.4f, cmd_vel=(%.3f, %.3f, %.3f)",
             error_x, error_y, error_theta, cmd_vx, cmd_vy, cmd_omega);
     }
@@ -366,7 +443,9 @@ private:
 int main(int argc, char* argv[]) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<AlignmentNode>();
-    rclcpp::spin(node);
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+    executor.add_node(node);
+    executor.spin();
     rclcpp::shutdown();
     return 0;
 }

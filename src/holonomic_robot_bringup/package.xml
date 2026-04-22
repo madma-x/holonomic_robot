@@ -21,6 +21,9 @@
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>teleop_twist_keyboard</exec_depend>
+  <exec_depend>can_interface</exec_depend>
+  <exec_depend>aruco_manager</exec_depend>
+  <exec_depend>aruco_alignment</exec_depend>
   
   <!-- Nav2 dependencies -->
   <exec_depend>nav2_bringup</exec_depend>

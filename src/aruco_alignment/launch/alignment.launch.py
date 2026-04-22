@@ -19,6 +19,11 @@ def generate_launch_description():
         name='alignment_node',
         parameters=[config_file],
         output='screen',
+        arguments=[
+            '--ros-args',
+            '--log-level',
+            ['alignment_node:=', LaunchConfiguration('log_level')],
+        ],
         remappings=[
             ('/odom', LaunchConfiguration('odom_topic')),
         ]
@@ -29,6 +34,11 @@ def generate_launch_description():
             'odom_topic',
             default_value='/odom',
             description='Odometry topic'
+        ),
+        DeclareLaunchArgument(
+            'log_level',
+            default_value='debug',
+            description='ROS log level for alignment_node (debug, info, warn, error)'
         ),
         alignment_node
     ])

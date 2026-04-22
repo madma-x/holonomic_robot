@@ -15,7 +15,7 @@ alignment_node:
       
       # Limits
       max_integral_error: 0.5      # max m/s from integral term (anti-windup)
-      max_velocity: 0.5            # max linear velocity output (m/s)
+      max_velocity: 0.3          # max linear velocity output (m/s)
     
     # Single-loop PID gains for rotation (theta)
     # Input: angle error (radians) → Output: angular velocity command (rad/s)

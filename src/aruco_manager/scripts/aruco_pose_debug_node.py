@@ -39,6 +39,8 @@ FONT_MED   = 0.55
 LINE       = cv2.LINE_AA
 WHITE      = (255, 255, 255)
 DARK       = (30,  30,  30)
+STATUS_BG  = (18,  18,  18)
+STATUS_BORDER = (90, 90, 90)
 
 
 def _conf_color(conf: float):
@@ -99,7 +101,6 @@ class ArucoPosgDebugNode(Node):
         self._arm_y_origin = float(self.get_parameter("arm_y_origin").value)
         self._arm_spacing = float(self.get_parameter("arm_spacing").value)
         self._load_camera_config()
-        print(self._arm_x_origin,self._cam_mat,self._dist_coeffs)
         self._bridge      = CvBridge()
         self._latest_tags = None   # type: DetectedTagArray | None
         self._latest_pick = None   # type: ClusterPickability | None
@@ -191,77 +192,87 @@ class ArucoPosgDebugNode(Node):
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw_overlays(self, frame: np.ndarray) -> np.ndarray:
-        out  = frame.copy()
-        h, w = out.shape[:2]
+        feed = frame.copy()
+        h, w = feed.shape[:2]
+        status_h = 128
         center_u = w // 2
         center_v = h // 2
 
-        cv2.circle(out, (center_u, center_v), 5, (255, 255, 255), -1, LINE)
-        cv2.circle(out, (center_u, center_v), 3, (0, 0, 255), -1, LINE)
+        cv2.circle(feed, (center_u, center_v), 5, (255, 255, 255), -1, LINE)
+        cv2.circle(feed, (center_u, center_v), 3, (0, 0, 255), -1, LINE)
 
         tags = self._latest_tags
-        self._draw_status_panel(out)
-        if tags is None or not tags.tags:
-            _shadow_text(out, "No tags detected", (10, 30), FONT, FONT_MED,
-                         (0, 60, 255), thickness=1)
-            self._draw_assignment_overlays(out)
-            return out
+        if tags is not None and tags.tags:
+            for tag in tags.tags:
+                p    = tag.tag_pose.position
+                x, y, z = float(p.x), float(p.y), float(p.z)
+                conf = float(tag.confidence)
+                color = _conf_color(conf)
+                track_id = self._find_track_id_for_tag_pose(x, y, z)
 
-        for tag in tags.tags:
-            p    = tag.tag_pose.position
-            x, y, z = float(p.x), float(p.y), float(p.z)
-            conf = float(tag.confidence)
-            color = _conf_color(conf)
-            track_id = self._find_track_id_for_tag(int(tag.tag_id))
+                uv = self._project_point(x, y, z)
+                if uv is None:
+                    continue
+                u, v = uv
 
-            uv = self._project_point(x, y, z)
-            if uv is None:
-                continue
-            u, v = uv
+                # Clamp to image bounds for drawing (can still be off-screen)
+                u_clamp = max(0, min(w - 1, u))
+                v_clamp = max(0, min(h - 1, v))
 
-            # Clamp to image bounds for drawing (can still be off-screen)
-            u_clamp = max(0, min(w - 1, u))
-            v_clamp = max(0, min(h - 1, v))
+                # ── Crosshair + circle ─────────────────────────────────────────────
+                R = 16
+                cv2.circle(feed, (u, v), R, color, 2, LINE)
+                cv2.line(feed, (u - R, v), (u + R, v), color, 1, LINE)
+                cv2.line(feed, (u, v - R), (u, v + R), color, 1, LINE)
 
-            # ── Crosshair + circle ─────────────────────────────────────────────
-            R = 16
-            cv2.circle(out, (u, v), R, color, 2, LINE)
-            cv2.line(out, (u - R, v), (u + R, v), color, 1, LINE)
-            cv2.line(out, (u, v - R), (u, v + R), color, 1, LINE)
+                # Keep only tracker id label on tag overlays.
+                label = f"T:{track_id}" if track_id >= 0 else "T:-"
+                text_x = max(6, min(w - 50, u_clamp - 20))
+                text_y = max(18, v_clamp - R - 8)
+                _shadow_text(feed, label, (text_x, text_y), FONT, FONT_SMALL, color)
 
-            # Keep only tracker id label on tag overlays.
-            label = f"T:{track_id}" if track_id >= 0 else "T:-"
-            _shadow_text(out, label, (u - 20, v - R - 8), FONT, FONT_SMALL, color)
+                # Keep confidence bar visualization.
+                bar_w  = 64
+                bar_h  = 8
+                bx     = max(0, min(w - bar_w, u_clamp - bar_w // 2))
+                by     = max(0, min(h - bar_h - 1, v_clamp + R + 6))
+                cv2.rectangle(feed, (bx, by), (bx + bar_w, by + bar_h), (50, 50, 50), -1)
+                filled = max(1, int(bar_w * conf))
+                cv2.rectangle(feed, (bx, by), (bx + filled, by + bar_h), color, -1)
+                cv2.rectangle(feed, (bx, by), (bx + bar_w, by + bar_h), (150, 150, 150), 1)
 
-            # Keep confidence bar visualization.
-            bar_w  = 64
-            bar_h  = 8
-            bx     = u - bar_w // 2
-            by     = v + R + 6
-            cv2.rectangle(out, (bx, by), (bx + bar_w, by + bar_h), (50, 50, 50), -1)
-            filled = max(1, int(bar_w * conf))
-            cv2.rectangle(out, (bx, by), (bx + filled, by + bar_h), color, -1)
-            cv2.rectangle(out, (bx, by), (bx + bar_w, by + bar_h), (150, 150, 150), 1)
+        self._draw_assignment_overlays(feed)
 
-        self._draw_assignment_overlays(out)
+        out = np.full((h + status_h, w, 3), STATUS_BG, dtype=np.uint8)
+        out[status_h:status_h + h, :w] = feed
+        cv2.line(out, (0, status_h - 1), (w - 1, status_h - 1), STATUS_BORDER, 1, LINE)
+        self._draw_status_panel(out, status_h)
 
         return out
 
-    def _find_track_id_for_tag(self, tag_id: int) -> int:
+    def _find_track_id_for_tag_pose(self, x: float, y: float, z: float) -> int:
         pick = self._latest_pick
         if pick is None:
             return -1
+        best_track_id = -1
+        best_dist_sq = float("inf")
         for aa in pick.arms:
-            if aa.assigned and int(aa.tag_id) == tag_id:
-                return int(aa.track_id)
-        return -1
+            if not aa.assigned:
+                continue
+            p = aa.tag_pose.position
+            dx = float(p.x) - x
+            dy = float(p.y) - y
+            dz = float(p.z) - z
+            dist_sq = dx * dx + dy * dy + dz * dz
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_track_id = int(aa.track_id)
+        return best_track_id
 
-    def _draw_assignment_overlays(self, out: np.ndarray):
+    def _draw_assignment_overlays(self, feed: np.ndarray):
         pick = self._latest_pick
         if pick is None:
             return
-
-        err_cm = float(pick.correction_magnitude) * 100.0
 
         for aa in pick.arms:
             if not aa.assigned:
@@ -287,55 +298,81 @@ class ArucoPosgDebugNode(Node):
             u1, v1 = goal_uv
 
             color = (255, 220, 0)
-            cv2.circle(out, (u0, v0), 5, (0, 200, 255), -1, LINE)
+            cv2.circle(feed, (u0, v0), 5, (0, 200, 255), -1, LINE)
             square_half = 6
             cv2.rectangle(
-                out,
+                feed,
                 (u1 - square_half, v1 - square_half),
                 (u1 + square_half, v1 + square_half),
                 (80, 255, 80),
                 2,
                 LINE,
             )
-            cv2.line(out, (u0, v0), (u1, v1), color, 2, LINE)
+            cv2.line(feed, (u0, v0), (u1, v1), color, 2, LINE)
+
+    def _draw_status_panel(self, out: np.ndarray, status_h: int):
+        pick = self._latest_pick
+        tags = self._latest_tags
+        tag_count = len(tags.tags) if tags is not None else 0
+
+        panel_x, panel_y = 8, 8
+        panel_w = out.shape[1] - 16
+        panel_h = status_h - 16
+        cv2.rectangle(out, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), STATUS_BG, -1)
+        cv2.rectangle(out, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), STATUS_BORDER, 1)
+
+        if pick is None:
             _shadow_text(
                 out,
-                f"A{int(aa.arm_index)} T:{int(aa.track_id)} err:{err_cm:.1f}cm",
-                (u0 - 70, v0 + 34),
+                f"Pickability: waiting...  visible_tags:{tag_count}",
+                (panel_x + 10, panel_y + 20),
                 FONT,
                 FONT_SMALL,
-                color,
+                WHITE,
             )
-
-    def _draw_status_panel(self, out: np.ndarray):
-        pick = self._latest_pick
-        if pick is None:
-            _shadow_text(out, "Pickability: waiting...", (10, 22), FONT, FONT_SMALL, WHITE)
+            _shadow_text(
+                out,
+                "Top banner=status, lower area=camera feed with tracking IDs, confidence bars, and arm geometry.",
+                (panel_x + 10, panel_y + 42),
+                FONT,
+                FONT_SMALL - 0.03,
+                (190, 190, 190),
+            )
             return
 
         corr_x = float(pick.correction.x)
         corr_y = float(pick.correction.y)
         corr_theta = float(pick.correction.z)
         corr_theta_deg = math.degrees(corr_theta)
-
-        panel_x, panel_y = 10, 8
-        panel_w, panel_h = 700, 170
-        cv2.rectangle(out, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (20, 20, 20), -1)
-        cv2.rectangle(out, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (90, 90, 90), 1)
-
         state_color = (30, 220, 30) if pick.is_pickable else (0, 120, 255)
+        sticky_color = (0, 90, 255) if pick.cluster_lost else ((30, 220, 30) if pick.sticky_active else (180, 180, 180))
+
         _shadow_text(
             out,
-            f"Pickable:{pick.is_pickable}  assigned:{int(pick.assigned_count)}/{int(pick.total_tags)}",
-            (panel_x + 8, panel_y + 20),
+            (
+                f"Pickable:{pick.is_pickable}  cluster:{int(pick.cluster_id)}  "
+                f"assigned:{int(pick.assigned_count)}/{int(pick.total_tags)}  visible:{tag_count}"
+            ),
+            (panel_x + 10, panel_y + 20),
             FONT,
             FONT_SMALL,
             state_color,
         )
         _shadow_text(
             out,
+            (
+                f"Sticky:{pick.sticky_active}  cluster_lost:{pick.cluster_lost}  "
+                f"lost_frames:{int(pick.lost_tracking_frames)}"
+            ),
+            (panel_x + 10, panel_y + 40),
+            FONT,
+            FONT_SMALL,
+            sticky_color,
+        )
+        _shadow_text(
+            out,
             f"Error |corr|: {pick.correction_magnitude:.3f} m ({pick.correction_magnitude*100.0:.1f} cm)",
-            (panel_x + 8, panel_y + 40),
+            (panel_x + 10, panel_y + 60),
             FONT,
             FONT_SMALL,
             WHITE,
@@ -343,7 +380,7 @@ class ArucoPosgDebugNode(Node):
         _shadow_text(
             out,
             f"Correction x:{corr_x:+.3f} m  y:{corr_y:+.3f} m  theta:{corr_theta:+.3f} rad ({corr_theta_deg:+.1f} deg)",
-            (panel_x + 8, panel_y + 58),
+            (panel_x + 10, panel_y + 80),
             FONT,
             FONT_SMALL,
             WHITE,
@@ -358,18 +395,10 @@ class ArucoPosgDebugNode(Node):
         _shadow_text(
             out,
             "  ".join(arm_chunks),
-            (panel_x + 8, panel_y + 78),
+            (panel_x + 10, panel_y + 100),
             FONT,
             FONT_SMALL,
             (220, 220, 220),
-        )
-        _shadow_text(
-            out,
-            "Cyan=start  Green square=desired pose from arm origin  Yellow=line(start->goal)",
-            (panel_x + 8, panel_y + 98),
-            FONT,
-            FONT_SMALL - 0.05,
-            (180, 180, 180),
         )
 
 
