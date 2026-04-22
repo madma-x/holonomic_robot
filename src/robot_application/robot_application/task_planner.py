@@ -673,6 +673,14 @@ class TaskPlanner(Node):
         continuation_payload['carry_object'] = True
         continuation_payload['source_pick_id'] = str(outcome.get('source_pick_id', continuation_payload.get('source_pick_id', '')))
         continuation_payload['target_drop_id'] = str(next_drop.get('id', ''))
+        continuation_payload['active_arm_index'] = outcome.get(
+            'active_arm_index',
+            continuation_payload.get('active_arm_index')
+        )
+        continuation_payload['active_arm_indices'] = outcome.get(
+            'active_arm_indices',
+            continuation_payload.get('active_arm_indices', [])
+        )
         continuation_payload['excluded_drop_ids'] = sorted(list(excluded_ids))
         continuation_payload['full_drop_ids'] = [drop_id for drop_id in self.drop_state if not self.is_drop_available(drop_id)]
         continuation_payload['drop_positions'] = [next_drop] + [

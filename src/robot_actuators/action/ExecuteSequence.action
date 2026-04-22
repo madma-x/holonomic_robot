@@ -1,0 +1,14 @@
+# Execute an ordered sequence of servo moves and pump commands.
+
+# Goal
+robot_actuators/ActuatorStep[] steps
+---
+# Result
+bool   success
+uint8  failed_step   # index of the step that failed (0 if success)
+string message
+---
+# Feedback
+uint8  current_step
+uint8  total_steps
+string step_description

@@ -133,6 +133,8 @@ class MissionExecutor(MissionBase):
         outcome.setdefault('carry_object', False)
         outcome.setdefault('source_pick_id', str(task.get('source_pick_id', '')))
         outcome.setdefault('target_drop_id', str(task.get('target_drop_id', '')))
+        outcome.setdefault('active_arm_index', task.get('active_arm_index'))
+        outcome.setdefault('active_arm_indices', task.get('active_arm_indices', []))
         outcome.setdefault('object_color_before', str(task.get('object_color_before', 'unknown')))
         outcome.setdefault('object_color_after', str(task.get('object_color_after', 'unknown')))
         normalized_status = str(outcome.get('status', 'FAILED')).upper()

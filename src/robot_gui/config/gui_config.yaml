@@ -1,0 +1,27 @@
+robot_gui:
+  ros__parameters:
+    window_title: "Holonomic Robot Match GUI"
+    fullscreen: false
+    min_width: 720
+    min_height: 1080
+
+    poll_interval_ms: 100
+
+    game_start_service: "/game/start_match"
+    game_stop_service: "/game/stop_match"
+    planner_start_service: "/planner/start"
+    planner_stop_service: "/planner/stop"
+    planner_replan_service: "/planner/replan"
+
+    topic_time_remaining: "/game/time_remaining"
+    topic_score: "/game/score"
+    topic_phase: "/game/phase"
+    topic_match_active: "/game/match_active"
+    topic_current_task: "/planner/current_task"
+    topic_queue_size: "/planner/queue_size"
+    topic_mission_status: "/mission_executor/mission_status"
+    topic_safety_state: "/safety_state"
+    topic_servo_state: "/servo_state"
+    topic_pump_state: "/pump_state"
+
+    stale_timeout_sec: 1.5

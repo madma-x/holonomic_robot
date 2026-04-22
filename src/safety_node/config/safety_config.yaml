@@ -1,0 +1,8 @@
+safety_node:
+  ros__parameters:
+    gpio_chip: "/dev/gpiochip0"
+    gpio_line: 18
+    active_low: false
+    debounce_ms: 50
+    publish_rate_hz: 20.0
+    recovery_timeout_sec: 2.0

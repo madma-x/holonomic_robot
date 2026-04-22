@@ -1,0 +1,12 @@
+# Goal: move gripper (Feetech or PWM servo) to target angle
+uint8   servo_id       # servo ID; 0 = use default gripper servo
+float32 target_deg     # target angle in degrees
+float32 speed_deg_s    # movement speed (deg/s), 0 = max speed
+---
+# Result
+bool    success
+float32 final_deg
+string  message
+---
+# Feedback
+float32 current_deg

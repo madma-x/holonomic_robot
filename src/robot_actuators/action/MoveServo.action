@@ -1,0 +1,12 @@
+# Goal: move a Feetech servo to target position
+uint8  servo_id        # servo ID on the bus
+float32 target_deg     # target angle in degrees
+float32 speed_deg_s    # movement speed (deg/s), 0 = max speed
+---
+# Result
+bool    success
+float32 final_deg      # actual position reached (deg)
+string  message
+---
+# Feedback
+float32 current_deg    # current position during movement

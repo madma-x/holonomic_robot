@@ -1,0 +1,31 @@
+feetech_node:
+  ros__parameters:
+    # Serial port
+    port: "/dev/ttyUSB0"
+    baud_rate: 1000000
+
+    # Timing
+    servo_state_hz: 20.0
+    safety_timeout_sec: 0.5
+    discovery_delay_ms: 500      # wait after SAFE_ON before scanning starts
+    per_servo_delay_ms: 150      # stagger between each servo's init ping
+
+    # Servo IDs to manage (set servo_id_N: -1 to disable that slot)
+    servo_id_0: 1
+    servo_id_1: 2
+    servo_id_2: 3
+    servo_id_3: 4
+    servo_id_4: -1
+    servo_id_5: -1
+    servo_id_6: -1
+    servo_id_7: -1
+
+    # Gripper → servo mapping (gripper_G_servo_id: S)
+    gripper_0_servo_id: 1
+    gripper_1_servo_id: 2
+    gripper_2_servo_id: 3
+    gripper_3_servo_id: 4
+    gripper_4_servo_id: -1
+    gripper_5_servo_id: -1
+    gripper_6_servo_id: -1
+    gripper_7_servo_id: -1
