@@ -59,4 +59,12 @@ else
 fi
 
 echo "Launching nav2_odom_only..."
-exec ros2 launch holonomic_robot_bringup nav2_odom_only.launch.py "$@"
+ros2 launch robot_gui robot_gui.launch.py "$@"
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo
+  echo "Launch failed with exit code $status"
+  read -r -p "Press Enter to close..."
+fi
+
+exit "$status"
