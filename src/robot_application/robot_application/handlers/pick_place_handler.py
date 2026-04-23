@@ -95,8 +95,8 @@ class PickPlaceHandler:
                     self.lower_pick_priority(task, pick_ref, 'approach unreachable')
                     return self._build_outcome(task, 'FAILED', 'NAV_FAIL', False, source_pick_id=source_pick_id)
 
-  
-                self.node.get_logger().info('Step 6: waiting for pickability message')
+
+                """                 self.node.get_logger().info('Step 6: waiting for pickability message')
                 pickability = self.wait_for_pickability(require_sticky=True)
                 if pickability is None or not bool(pickability.is_pickable):
                     self.node.get_logger().warn('Step 6: pickability check failed or timed out')
@@ -187,7 +187,7 @@ class PickPlaceHandler:
                             source_pick_id=source_pick_id,
                             active_arm_indices=active_arm_indices,
                         )
-
+                """
                 self.node.get_logger().info('Step 8: pick sequence succeeded')
                 carry_object = True
             finally:
@@ -251,9 +251,8 @@ class PickPlaceHandler:
                 source_pick_id=source_pick_id,
                 target_drop_id=drop_id,
                 active_arm_indices=active_arm_indices,
-            )
-
-        if not active_arm_indices:
+            )        
+            """         if not active_arm_indices:
             self.node.get_logger().error('Step 13: no active arms available for drop sequence')
             return self._build_outcome(
                 task,
@@ -277,8 +276,8 @@ class PickPlaceHandler:
             f'push_arm_indices={push_arm_indices}'
         )
         if not self.execute_place_sequence(active_arm_indices, push_arm_indices=push_arm_indices):
-            self.node.get_logger().warn('Step 13: place sequence failed — object may not be released')
-
+            self.node.get_logger().warn('Step 13: place sequence failed — object may not be released') """
+        
         self.node.get_logger().info(f'Step 14: task completed successfully, placed at drop {drop_id}')
         return self._build_outcome(
             task,

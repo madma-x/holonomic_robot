@@ -6,11 +6,11 @@ task_planner:
     min_utility_threshold: 0.5      # Minimum utility to consider task
     
     # Base locations by team color
-    blue_base_location_x: 0.0
-    blue_base_location_y: 0.0
+    blue_base_location_x: 0.2
+    blue_base_location_y: 0.2
     blue_base_location_theta: 0.0
-    yellow_base_location_x: 0.0
-    yellow_base_location_y: 0.0
+    yellow_base_location_x: 0.2
+    yellow_base_location_y: 3.8
     yellow_base_location_theta: 0.0
 
     # Team color selected by GUI / runtime parameter update

@@ -9,11 +9,11 @@ game_state_manager:
     team_color: blue
 
     # Initial pose by team color, published by /game/reset_pose
-    blue_initial_pose_x: 0.0
-    blue_initial_pose_y: 0.0
+    blue_initial_pose_x: 0.2
+    blue_initial_pose_y: 0.2
     blue_initial_pose_theta: 0.0
-    yellow_initial_pose_x: 0.0
-    yellow_initial_pose_y: 0.0
+    yellow_initial_pose_x: 0.2
+    yellow_initial_pose_y: 3.8
     yellow_initial_pose_theta: 0.0
     
     # Phase thresholds (seconds remaining)
