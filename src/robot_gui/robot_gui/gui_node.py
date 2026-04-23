@@ -17,16 +17,17 @@ def main(args=None):
     ros_node = RobotGuiRosInterface()
     executor, spin_thread = start_executor_thread(ros_node)
 
-    app = QApplication.instance() or QApplication(sys.argv)
-    window = MainWindow(ros_node)
-
-    fullscreen = bool(ros_node.get_parameter('fullscreen').value) if ros_node.has_parameter('fullscreen') else False
     title = str(ros_node.get_parameter('window_title').value) if ros_node.has_parameter('window_title') else 'Robot GUI'
-    min_width = int(ros_node.get_parameter('min_width').value) if ros_node.has_parameter('min_width') else 720
-    min_height = int(ros_node.get_parameter('min_height').value) if ros_node.has_parameter('min_height') else 1080
+    fullscreen = bool(ros_node.get_parameter('fullscreen').value) if ros_node.has_parameter('fullscreen') else False
+    min_width = int(ros_node.get_parameter('min_width').value) if ros_node.has_parameter('min_width') else 480
+    min_height = int(ros_node.get_parameter('min_height').value) if ros_node.has_parameter('min_height') else 800
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MainWindow(ros_node, target_width=min_width, target_height=min_height)
 
     window.setWindowTitle(title)
     window.setMinimumSize(min_width, min_height)
+    window.resize(min_width, min_height)
 
     if fullscreen:
         window.showFullScreen()

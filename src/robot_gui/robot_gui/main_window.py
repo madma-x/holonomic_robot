@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -37,10 +38,13 @@ class LocalState:
 class MainWindow(QMainWindow):
     """Portrait-oriented match control GUI."""
 
-    def __init__(self, ros: RobotGuiRosInterface):
+    def __init__(self, ros: RobotGuiRosInterface, target_width: int = 480, target_height: int = 800):
         super().__init__()
         self.ros = ros
         self.local = LocalState()
+        self.target_width = max(320, target_width)
+        self.target_height = max(480, target_height)
+        self.compact_mode = self.target_width <= 480 or self.target_height <= 800
 
         self._build_ui()
         self._apply_styles()
@@ -51,13 +55,30 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle('Holonomic Match Control')
-        self.setMinimumSize(720, 1080)
 
         root = QWidget(self)
         self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.pages = QTabWidget(self)
+        self.pages.setTabPosition(QTabWidget.North)
+        root_layout.addWidget(self.pages)
+
+        controls_page = QWidget(self)
+        diagnostics_page = QWidget(self)
+        self.pages.addTab(controls_page, 'Controls')
+        self.pages.addTab(diagnostics_page, 'Diagnostics')
+
+        margin = 10 if self.compact_mode else 18
+        spacing = 8 if self.compact_mode else 12
+        controls_page_layout = QVBoxLayout(controls_page)
+        controls_page_layout.setContentsMargins(margin, margin, margin, margin)
+        controls_page_layout.setSpacing(spacing)
+
+        diagnostics_layout = QVBoxLayout(diagnostics_page)
+        diagnostics_layout.setContentsMargins(margin, margin, margin, margin)
+        diagnostics_layout.setSpacing(spacing)
 
         self.header_time = QLabel('00:00')
         self.header_time.setObjectName('TimeValue')
@@ -66,24 +87,33 @@ class MainWindow(QMainWindow):
 
         header_box = QGroupBox('Match')
         header_layout = QHBoxLayout(header_box)
+        header_layout.setContentsMargins(10, 14, 10, 10)
+        header_layout.setSpacing(8 if self.compact_mode else 12)
         header_layout.addWidget(self.header_time, 2)
         header_layout.addWidget(self.header_phase, 1)
         header_layout.addWidget(self.header_score, 1)
-        layout.addWidget(header_box)
+        controls_page_layout.addWidget(header_box)
 
         self.safety_value = QLabel('UNKNOWN')
         self.safety_value.setObjectName('SafetyValue')
         safety_box = QGroupBox('Safety State (hardware authoritative)')
         safety_layout = QVBoxLayout(safety_box)
+        safety_layout.setContentsMargins(10, 14, 10, 10)
         safety_layout.addWidget(self.safety_value)
-        layout.addWidget(safety_box)
+        controls_page_layout.addWidget(safety_box)
 
         setup_box = QGroupBox('Pre-Match Setup (local app state)')
         setup_layout = QGridLayout(setup_box)
+        setup_layout.setHorizontalSpacing(8 if self.compact_mode else 12)
+        setup_layout.setVerticalSpacing(6 if self.compact_mode else 10)
 
-        self.team_combo = QComboBox()
-        self.team_combo.addItems(['Blue', 'Yellow'])
-        self.team_combo.currentTextChanged.connect(self._set_team)
+        self.team_blue_button = QPushButton('Blue')
+        self.team_blue_button.setCheckable(True)
+        self.team_blue_button.clicked.connect(lambda: self._set_team('Blue'))
+
+        self.team_yellow_button = QPushButton('Yellow')
+        self.team_yellow_button.setCheckable(True)
+        self.team_yellow_button.clicked.connect(lambda: self._set_team('Yellow'))
 
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(['Aggressive', 'Balanced', 'Defensive'])
@@ -95,41 +125,48 @@ class MainWindow(QMainWindow):
         self.reset_ui_button = QPushButton('Reset UI State')
         self.reset_ui_button.clicked.connect(self._reset_local_state)
 
+        self.reset_pose_button = QPushButton('Reset Position')
+        self.reset_pose_button.clicked.connect(self.ros.reset_to_initial_position)
+
         self.latch_state_label = QLabel('Latch: Idle')
 
         setup_layout.addWidget(QLabel('Team'), 0, 0)
-        setup_layout.addWidget(self.team_combo, 0, 1)
+        team_button_row = QWidget(self)
+        team_button_layout = QHBoxLayout(team_button_row)
+        team_button_layout.setContentsMargins(0, 0, 0, 0)
+        team_button_layout.setSpacing(8 if self.compact_mode else 10)
+        team_button_layout.addWidget(self.team_blue_button)
+        team_button_layout.addWidget(self.team_yellow_button)
+        setup_layout.addWidget(team_button_row, 0, 1)
         setup_layout.addWidget(QLabel('Strategy'), 1, 0)
         setup_layout.addWidget(self.strategy_combo, 1, 1)
         setup_layout.addWidget(self.ready_button, 2, 0, 1, 2)
         setup_layout.addWidget(self.reset_ui_button, 3, 0, 1, 2)
-        setup_layout.addWidget(self.latch_state_label, 4, 0, 1, 2)
-        layout.addWidget(setup_box)
+        setup_layout.addWidget(self.reset_pose_button, 4, 0, 1, 2)
+        setup_layout.addWidget(self.latch_state_label, 5, 0, 1, 2)
+        controls_page_layout.addWidget(setup_box)
+
+        self._apply_team_selection_state()
 
         controls_box = QGroupBox('Match Controls')
-        controls_layout = QGridLayout(controls_box)
+        match_controls_layout = QGridLayout(controls_box)
+        match_controls_layout.setHorizontalSpacing(8 if self.compact_mode else 12)
+        match_controls_layout.setVerticalSpacing(6 if self.compact_mode else 10)
 
         self.start_btn = QPushButton('Start Match')
         self.stop_btn = QPushButton('Stop Match')
-        self.plan_start_btn = QPushButton('Planner Start')
-        self.plan_stop_btn = QPushButton('Planner Stop')
-        self.plan_replan_btn = QPushButton('Planner Replan')
 
         self.start_btn.clicked.connect(lambda: self.ros.call_named_service('start_match'))
         self.stop_btn.clicked.connect(self._confirm_stop_match)
-        self.plan_start_btn.clicked.connect(lambda: self.ros.call_named_service('planner_start'))
-        self.plan_stop_btn.clicked.connect(lambda: self.ros.call_named_service('planner_stop'))
-        self.plan_replan_btn.clicked.connect(lambda: self.ros.call_named_service('planner_replan'))
 
-        controls_layout.addWidget(self.start_btn, 0, 0)
-        controls_layout.addWidget(self.stop_btn, 0, 1)
-        controls_layout.addWidget(self.plan_start_btn, 1, 0)
-        controls_layout.addWidget(self.plan_stop_btn, 1, 1)
-        controls_layout.addWidget(self.plan_replan_btn, 2, 0, 1, 2)
-        layout.addWidget(controls_box)
+        match_controls_layout.addWidget(self.start_btn, 0, 0)
+        match_controls_layout.addWidget(self.stop_btn, 0, 1)
+        controls_page_layout.addWidget(controls_box)
 
         diag_box = QGroupBox('Diagnostics')
         diag_layout = QGridLayout(diag_box)
+        diag_layout.setHorizontalSpacing(8 if self.compact_mode else 12)
+        diag_layout.setVerticalSpacing(6 if self.compact_mode else 10)
 
         self.match_active_value = QLabel('False')
         self.current_task_value = QLabel('-')
@@ -150,75 +187,117 @@ class MainWindow(QMainWindow):
         diag_layout.addWidget(self.servo_value, 4, 1)
         diag_layout.addWidget(QLabel('Pump State'), 5, 0)
         diag_layout.addWidget(self.pump_value, 5, 1)
-        layout.addWidget(diag_box)
+        diagnostics_layout.addWidget(diag_box)
 
         footer_frame = QFrame()
         footer_layout = QHBoxLayout(footer_frame)
         footer_layout.setContentsMargins(8, 8, 8, 8)
+        footer_layout.setSpacing(8)
         self.feedback_label = QLabel('Ready')
         self.feedback_label.setWordWrap(True)
-        self.local_notice_label = QLabel('Local setup state is not applied to robot backend yet.')
-        self.local_notice_label.setWordWrap(True)
         footer_layout.addWidget(self.feedback_label, 1)
-        footer_layout.addWidget(self.local_notice_label, 1)
-        layout.addWidget(footer_frame)
+        controls_page_layout.addWidget(footer_frame)
+
+        diagnostics_footer = QFrame()
+        diagnostics_footer_layout = QVBoxLayout(diagnostics_footer)
+        diagnostics_footer_layout.setContentsMargins(8, 8, 8, 8)
+        diagnostics_footer_layout.setSpacing(6)
+        self.diagnostics_feedback_label = QLabel('Ready')
+        self.diagnostics_feedback_label.setWordWrap(True)
+        diagnostics_footer_layout.addWidget(self.diagnostics_feedback_label)
+        diagnostics_layout.addWidget(diagnostics_footer)
 
     def _apply_styles(self):
+        base_font_size = 16 if self.compact_mode else 20
+        label_font_size = 17 if self.compact_mode else 21
+        time_font_size = 32 if self.compact_mode else 42
+        safety_font_size = 20 if self.compact_mode else 28
+        button_min_height = 46 if self.compact_mode else 58
+        combo_min_height = 40 if self.compact_mode else 48
+        border_radius = 8 if self.compact_mode else 10
+
         self.setStyleSheet(
-            """
-            QWidget {
+            f"""
+            QWidget {{
                 background-color: #f5f4ef;
                 color: #132335;
-                font-size: 20px;
-            }
-            QGroupBox {
+                font-size: {base_font_size}px;
+            }}
+            QGroupBox {{
                 border: 2px solid #d3c9b7;
-                border-radius: 10px;
-                margin-top: 12px;
-                padding-top: 16px;
+                border-radius: {border_radius}px;
+                margin-top: 10px;
+                padding-top: 14px;
                 font-weight: 600;
                 background-color: #fffdf8;
-            }
-            QLabel {
-                font-size: 21px;
-            }
-            QLabel#TimeValue {
-                font-size: 42px;
+            }}
+            QLabel {{
+                font-size: {label_font_size}px;
+            }}
+            QLabel#TimeValue {{
+                font-size: {time_font_size}px;
                 font-weight: 700;
-            }
-            QLabel#SafetyValue {
-                font-size: 34px;
+            }}
+            QLabel#SafetyValue {{
+                font-size: {safety_font_size}px;
                 font-weight: 700;
-            }
-            QPushButton {
-                min-height: 58px;
-                border-radius: 10px;
+            }}
+            QPushButton {{
+                min-height: {button_min_height}px;
+                border-radius: {border_radius}px;
                 border: 2px solid #af9b7a;
                 background-color: #f0e3cd;
-                font-size: 22px;
+                font-size: {label_font_size}px;
                 font-weight: 600;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background-color: #e4cfac;
-            }
-            QComboBox {
-                min-height: 48px;
+            }}
+            QPushButton:checked {{
+                background-color: #d6e9ff;
+                border-color: #6b8fb6;
+            }}
+            QComboBox {{
+                min-height: {combo_min_height}px;
                 border: 2px solid #af9b7a;
-                border-radius: 8px;
+                border-radius: {border_radius}px;
                 padding-left: 8px;
                 background-color: #fffaf0;
-            }
+            }}
+            QTabWidget::pane {{
+                border: 0;
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: #efe4d0;
+                border: 2px solid #d3c9b7;
+                border-bottom: 0;
+                padding: 8px 14px;
+                margin-right: 4px;
+                min-width: 120px;
+                font-weight: 600;
+            }}
+            QTabBar::tab:selected {{
+                background: #fffdf8;
+                color: #132335;
+            }}
             """
         )
-        self.setFont(QFont('DejaVu Sans', 14))
+        self.setFont(QFont('DejaVu Sans', 11 if self.compact_mode else 14))
 
     def _set_team(self, value: str):
         self.local.team_color = value
-        self.local_notice_label.setText(f'Local state: team color set to {value}.')
+        self._apply_team_selection_state()
+        self.feedback_label.setText(f'Team set to {value}.')
+
+    def _apply_team_selection_state(self):
+        is_blue = self.local.team_color == 'Blue'
+        self.team_blue_button.setChecked(is_blue)
+        self.team_yellow_button.setChecked(not is_blue)
 
     def _set_strategy(self, value: str):
         self.local.strategy = value
-        self.local_notice_label.setText(f'Local state: strategy set to {value}.')
+        self.feedback_label.setText(f'Strategy set to {value}.')
 
     def _toggle_ready(self):
         self.local.match_ready = not self.local.match_ready
@@ -226,33 +305,33 @@ class MainWindow(QMainWindow):
             self.local.latch_armed = True
             self.local.latch_status = 'Armed (waiting latch removal)'
             self.ready_button.setText('Match Ready: ON')
-            self.local_notice_label.setText('Ready armed: latch removal will start match in future GPIO mode.')
+            self.feedback_label.setText('Ready armed: latch removal will start match in future GPIO mode.')
         else:
             self.local.latch_armed = False
             self.local.latch_status = 'Idle'
             self.ready_button.setText('Match Ready: OFF')
-            self.local_notice_label.setText('Ready disarmed: latch removal ignored.')
+            self.feedback_label.setText('Ready disarmed: latch removal ignored.')
         self._refresh_local_labels()
 
     def on_latch_removed_event(self):
         """Future GPIO hook: only start match when ready latch is armed."""
         if not self.local.match_ready:
             self.local.latch_status = 'Latch removed while not ready (ignored)'
-            self.local_notice_label.setText('Latch removal ignored because Match Ready is OFF.')
+            self.feedback_label.setText('Latch removal ignored because Match Ready is OFF.')
             self._refresh_local_labels()
             return
 
         self.local.latch_status = 'Latch removed -> starting match'
-        self.local_notice_label.setText('Latch removed while armed: sending match start.')
+        self.feedback_label.setText('Latch removed while armed: sending match start.')
         self._refresh_local_labels()
         self.ros.call_named_service('start_match')
 
     def _reset_local_state(self):
         self.local = LocalState()
-        self.team_combo.setCurrentText(self.local.team_color)
+        self._apply_team_selection_state()
         self.strategy_combo.setCurrentText(self.local.strategy)
         self.ready_button.setText('Match Ready: OFF')
-        self.local_notice_label.setText('Local UI state reset.')
+        self.feedback_label.setText('Local UI state reset.')
         self._refresh_local_labels()
 
     def _confirm_stop_match(self):
@@ -295,3 +374,4 @@ class MainWindow(QMainWindow):
         self.servo_value.setText(snap.servo_summary)
         self.pump_value.setText(snap.pump_summary)
         self.feedback_label.setText(snap.service_feedback)
+        self.diagnostics_feedback_label.setText(snap.service_feedback)

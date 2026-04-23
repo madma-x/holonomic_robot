@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
+import math
 from dataclasses import dataclass, field
 from typing import Dict
 
 import rclpy
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, Int32, String
@@ -45,8 +47,8 @@ class RobotGuiRosInterface(Node):
 
         self.declare_parameter('window_title', 'Holonomic Robot Match GUI')
         self.declare_parameter('fullscreen', False)
-        self.declare_parameter('min_width', 720)
-        self.declare_parameter('min_height', 1080)
+        self.declare_parameter('min_width', 480)
+        self.declare_parameter('min_height', 800)
         self.declare_parameter('poll_interval_ms', 100)
 
         self.declare_parameter('game_start_service', '/game/start_match')
@@ -54,6 +56,11 @@ class RobotGuiRosInterface(Node):
         self.declare_parameter('planner_start_service', '/planner/start')
         self.declare_parameter('planner_stop_service', '/planner/stop')
         self.declare_parameter('planner_replan_service', '/planner/replan')
+        self.declare_parameter('initial_pose_topic', '/initialpose')
+        self.declare_parameter('initial_pose_frame', 'map')
+        self.declare_parameter('initial_pose_x', 0.2)
+        self.declare_parameter('initial_pose_y', 0.2)
+        self.declare_parameter('initial_pose_yaw', 0.0)
 
         self.declare_parameter('topic_time_remaining', '/game/time_remaining')
         self.declare_parameter('topic_score', '/game/score')
@@ -86,6 +93,11 @@ class RobotGuiRosInterface(Node):
             'planner_stop': self.create_client(Trigger, str(self.get_parameter('planner_stop_service').value)),
             'planner_replan': self.create_client(Trigger, str(self.get_parameter('planner_replan_service').value)),
         }
+        self._initial_pose_pub = self.create_publisher(
+            PoseWithCovarianceStamped,
+            str(self.get_parameter('initial_pose_topic').value),
+            10,
+        )
 
         self.create_subscription(
             Float32,
@@ -182,6 +194,35 @@ class RobotGuiRosInterface(Node):
         future = client.call_async(Trigger.Request())
         future.add_done_callback(lambda f: self._on_service_result(service_key, f))
         self._set_feedback(f'Calling {service_key}...')
+
+    def reset_to_initial_position(self):
+        """Publish initial pose so odometry/localization returns to configured start."""
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = str(self.get_parameter('initial_pose_frame').value)
+
+        x = float(self.get_parameter('initial_pose_x').value)
+        y = float(self.get_parameter('initial_pose_y').value)
+        yaw = float(self.get_parameter('initial_pose_yaw').value)
+
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.position.z = 0.0
+
+        half_yaw = yaw * 0.5
+        msg.pose.pose.orientation.x = 0.0
+        msg.pose.pose.orientation.y = 0.0
+        msg.pose.pose.orientation.z = math.sin(half_yaw)
+        msg.pose.pose.orientation.w = math.cos(half_yaw)
+
+        msg.pose.covariance[0] = 0.25
+        msg.pose.covariance[7] = 0.25
+        msg.pose.covariance[35] = 0.09
+
+        self._initial_pose_pub.publish(msg)
+        self._set_feedback(
+            f'Initial pose published: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad'
+        )
 
     @property
     def poll_interval_ms(self) -> int:
