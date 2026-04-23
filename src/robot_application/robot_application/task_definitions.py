@@ -11,6 +11,7 @@ class TaskType(Enum):
     FLIP_OBJECT = "flip_object"
     MOVE_OBJECT = "move_object"
     RETURN_BASE = "return_base"
+    MOVE_THERMOMETER = "move_thermometer"
 
 
 class TaskStatus(Enum):
@@ -177,8 +178,7 @@ def create_return_base_task(base_location: Dict[str, float]) -> Task:
         base_priority=10,  # Highest priority in endgame
         priority_function=endgame_priority,
         parameters={
-            'target_location': base_location,
-            'is_final_return': True,
+            'target_location': base_location
         }
     )
 
@@ -198,3 +198,4 @@ def create_pick_place_task(task_id: str, pick_location: Dict[str, Any], drop_loc
                     'drop_location': drop_location
             }
     )
+

@@ -3,6 +3,18 @@ game_state_manager:
     # Match configuration
     match_duration_sec: 180.0       # 3 minutes
     auto_start: false               # Manually start match
+    planner_start_service: '/planner/start'
+    planner_stop_service: '/planner/stop'
+    planner_reset_service: '/planner/reset'
+    team_color: blue
+
+    # Initial pose by team color, published by /game/reset_pose
+    blue_initial_pose_x: 0.0
+    blue_initial_pose_y: 0.0
+    blue_initial_pose_theta: 0.0
+    yellow_initial_pose_x: 0.0
+    yellow_initial_pose_y: 0.0
+    yellow_initial_pose_theta: 0.0
     
     # Phase thresholds (seconds remaining)
     early_phase_threshold: 60.0     # >60s = EARLY

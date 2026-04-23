@@ -10,6 +10,7 @@ Simplified architecture:
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import String, Float32, Int32
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import Point, PoseStamped
@@ -53,24 +54,23 @@ class TaskPlanner(Node):
         self.declare_parameter('replan_interval_sec', 5.0)
         self.declare_parameter('enable_task_interruption', True)
         self.declare_parameter('min_utility_threshold', 0.5)
-        self.declare_parameter('base_location_x', 0.0)
-        self.declare_parameter('base_location_y', 0.0)
+        self.declare_parameter('blue_base_location_x', 0.0)
+        self.declare_parameter('blue_base_location_y', 0.0)
+        self.declare_parameter('blue_base_location_theta', 0.0)
+        self.declare_parameter('yellow_base_location_x', 0.0)
+        self.declare_parameter('yellow_base_location_y', 0.0)
+        self.declare_parameter('yellow_base_location_theta', 0.0)
         self.declare_parameter('mission_executor_assignment_topic', '/planner/task_assignment')
         self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
         self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
         self.declare_parameter('team_color', 'blue')
-        self.declare_parameter('drop_full_cooldown_sec', 20.0)
         
         # Get parameters
         self.replan_interval = self.get_parameter('replan_interval_sec').value
         self.enable_interruption = self.get_parameter('enable_task_interruption').value
         self.min_utility_threshold = self.get_parameter('min_utility_threshold').value
-        self.team_color = str(self.get_parameter('team_color').value)
-        self.drop_full_cooldown_sec = float(self.get_parameter('drop_full_cooldown_sec').value)
-        
-        base_x = self.get_parameter('base_location_x').value
-        base_y = self.get_parameter('base_location_y').value
-        self.base_location = {'x': base_x, 'y': base_y, 'theta': 0.0}
+        self.team_color = self._normalize_team_color(self.get_parameter('team_color').value)
+        self.base_location = self._get_base_location_for_team(self.team_color)
         
         # Task management
         self.task_queue: List[Task] = []
@@ -127,6 +127,8 @@ class TaskPlanner(Node):
             Trigger, '/planner/start', self.start_planning_callback)
         self.stop_planning_srv = self.create_service(
             Trigger, '/planner/stop', self.stop_planning_callback)
+        self.reset_planning_srv = self.create_service(
+            Trigger, '/planner/reset', self.reset_planning_callback)
         self.replan_srv = self.create_service(
             Trigger, '/planner/replan', self.replan_callback)
         
@@ -134,15 +136,83 @@ class TaskPlanner(Node):
         self.planning_active = False
         self.planning_thread = None
         self.stop_requested = False
+        self._team_refresh_timer = None
         
         # Timers
         #self.replan_timer = self.create_timer(self.replan_interval, self.replan_tasks)
         self.status_timer = self.create_timer(1.0, self.publish_status)
+        self.add_on_set_parameters_callback(self._on_parameters_changed)
         
         # Initialize default tasks
         self.initialize_default_tasks()
         
         self.get_logger().info('Task planner initialized (simplified, Nav2-integrated)')
+
+    def _normalize_team_color(self, value: Any) -> str:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in ('blue', 'yellow') else 'blue'
+
+    def _get_base_location_for_team(self, team_color: str) -> Dict[str, float]:
+        color = self._normalize_team_color(team_color)
+        return {
+            'x': float(self.get_parameter(f'{color}_base_location_x').value),
+            'y': float(self.get_parameter(f'{color}_base_location_y').value),
+            'theta': float(self.get_parameter(f'{color}_base_location_theta').value)
+        }
+
+    def _update_return_base_task(self):
+        for task in self.task_queue:
+            if task.task_type == TaskType.RETURN_BASE:
+                task.parameters['target_location'] = dict(self.base_location)
+                return
+        if self.current_task and self.current_task.task_type == TaskType.RETURN_BASE:
+            self.current_task.parameters['target_location'] = dict(self.base_location)
+
+    def _refresh_team_dependent_state(self, team_color: str, publish_initial_pose: bool = False):
+        self.team_color = self._normalize_team_color(team_color)
+        self.base_location = self._get_base_location_for_team(self.team_color)
+        self._update_return_base_task()
+        self.get_logger().info(
+            f'Team color set to {self.team_color}; base=({self.base_location["x"]:.3f}, '
+            f'{self.base_location["y"]:.3f}, {self.base_location["theta"]:.3f})'
+        )
+
+    def _on_parameters_changed(self, params):
+        relevant = {
+            'team_color',
+            'blue_base_location_x', 'blue_base_location_y', 'blue_base_location_theta',
+            'yellow_base_location_x', 'yellow_base_location_y', 'yellow_base_location_theta',
+        }
+        changed = {param.name for param in params}
+        if not (changed & relevant):
+            return SetParametersResult(successful=True)
+
+        next_team_color = self.team_color
+        if 'team_color' in changed:
+            if self.planning_active:
+                return SetParametersResult(
+                    successful=False,
+                    reason='team_color cannot change while match/planning is active'
+                )
+            team_param = next(param for param in params if param.name == 'team_color')
+            next_team_color = self._normalize_team_color(team_param.value)
+
+        # Callback runs before node parameter values are updated; defer state refresh briefly.
+        if self._team_refresh_timer is not None:
+            self._team_refresh_timer.cancel()
+            self._team_refresh_timer = None
+        self._team_refresh_timer = self.create_timer(
+            0.01,
+            lambda: self._deferred_parameter_refresh(next_team_color)
+        )
+        return SetParametersResult(successful=True)
+
+    def _deferred_parameter_refresh(self, team_color: str):
+        # One-shot timer callback after parameter commit.
+        if self._team_refresh_timer is not None:
+            self._team_refresh_timer.cancel()
+            self._team_refresh_timer = None
+        self._refresh_team_dependent_state(team_color)
     
     
     def initialize_default_tasks(self):
@@ -264,7 +334,7 @@ class TaskPlanner(Node):
             str(drop['id']): {
                 'occupancy': 0,
                 'capacity': int(drop.get('capacity', 1)),
-                'blocked_until': 0.0,
+                'is_full': False,
                 'last_known_color': 'unknown',
                 'color_confidence': 0.0,
                 'last_update': time.time()
@@ -276,7 +346,7 @@ class TaskPlanner(Node):
         drop = self.drop_state.get(drop_id)
         if drop is None:
             return False
-        return int(drop.get('occupancy', 0)) < int(drop.get('capacity', 1))
+        return not bool(drop.get('is_full', False))
 
     def mark_pick_empty(self, pick_id: str):
         if pick_id not in self.pick_state:
@@ -285,13 +355,43 @@ class TaskPlanner(Node):
         self.pick_state[pick_id]['last_update'] = time.time()
         self.empty_pick_locations.add(pick_id)
 
-    def mark_drop_full_temporarily(self, drop_id: str):
+    def mark_drop_full(self, drop_id: str):
         drop = self.drop_state.get(drop_id)
         if drop is None:
             return
-        drop['blocked_until'] = time.time() + self.drop_full_cooldown_sec
+        drop['occupancy'] = int(drop.get('capacity', 1))
+        drop['is_full'] = True
         drop['last_update'] = time.time()
         self.occupied_drop_locations.add(drop_id)
+
+    def mark_drop_occupied(self, drop_id: str):
+        """Increment drop occupancy after a successful place and track full/empty state."""
+        drop = self.drop_state.get(drop_id)
+        if drop is None:
+            return
+
+        capacity = max(1, int(drop.get('capacity', 1)))
+        occupancy = min(capacity, int(drop.get('occupancy', 0)) + 1)
+        drop['occupancy'] = occupancy
+        drop['is_full'] = occupancy >= capacity
+        drop['last_update'] = time.time()
+
+        if drop['is_full']:
+            self.occupied_drop_locations.add(drop_id)
+        else:
+            self.occupied_drop_locations.discard(drop_id)
+
+    def _task_pick_id(self, task: Task) -> str:
+        pick_location = task.parameters.get('pick_location', {})
+        if isinstance(pick_location, dict):
+            return str(pick_location.get('id', ''))
+        return ''
+
+    def _task_drop_candidates(self, task: Task) -> List[Dict[str, Any]]:
+        primary_drop = task.parameters.get('drop_location')
+        if isinstance(primary_drop, dict) and primary_drop:
+            return [primary_drop]
+        return []
 
     def _distance_between_locations(self, from_location: Dict[str, float], to_location: Dict[str, float]) -> float:
         """Compute planar distance between two {x, y, theta} dict locations."""
@@ -419,6 +519,37 @@ class TaskPlanner(Node):
         response.message = 'Strategic planning stopped'
         self.get_logger().info(response.message)
         return response
+
+    def reset_planning_callback(self, request, response):
+        """Reset planner state and reinitialize default tasks."""
+        self._reset_to_default_state()
+        response.success = True
+        response.message = f'Planner reset. Queue size: {len(self.task_queue)}'
+        self.get_logger().info(response.message)
+        return response
+
+    def _reset_to_default_state(self):
+        """Reset planner internals and load default tasks for a fresh match."""
+        self.planning_active = False
+        self.stop_requested = True
+        self.current_task = None
+
+        self.task_queue = []
+        self.completed_tasks = []
+        self.failed_tasks = []
+        self.empty_pick_locations = set()
+        self.occupied_drop_locations = set()
+        self.pick_locations_catalog = {}
+        self.drop_locations_catalog = {}
+        self.pick_state = {}
+        self.drop_state = {}
+        self.recent_outcomes = set()
+        self.last_mission_outcome = None
+        self.task_context_by_id = {}
+        self.mission_executor_status = 'IDLE'
+
+        self.base_location = self._get_base_location_for_team(self.team_color)
+        self.initialize_default_tasks()
     
     def replan_callback(self, request, response):
         """Force immediate replanning."""
@@ -503,6 +634,9 @@ class TaskPlanner(Node):
     def _execute_move_object_task(self, task: Task) -> bool:
         """Send task to mission executor and wait for outcome."""
         full_drop_ids = [drop_id for drop_id in self.drop_state if not self.is_drop_available(drop_id)]
+        pick_id = self._task_pick_id(task)
+        drop_candidates = self._task_drop_candidates(task)
+        initial_drop_id = str(drop_candidates[0].get('id', '')) if drop_candidates else ''
 
         payload = {
             'name': task.name,
@@ -510,6 +644,11 @@ class TaskPlanner(Node):
             'task_type': task.task_type.value,
             'pick_location': task.parameters.get('pick_location', []),
             'drop_location': task.parameters.get('drop_location', []),
+            'drop_positions': drop_candidates,
+            'source_pick_id': pick_id,
+            'target_drop_id': initial_drop_id,
+            'excluded_drop_ids': [],
+            'full_drop_ids': full_drop_ids,
             'priority': task.base_priority,
             'carry_object': bool(task.parameters.get('carry_object', False)),
         }
@@ -621,20 +760,23 @@ class TaskPlanner(Node):
             self.mark_pick_empty(source_pick_id)
             self.task_queue = [
                 task for task in self.task_queue
-                if source_pick_id not in [str(pick.get('id', '')) for pick in task.parameters.get('pick_locations', [])]
+                if self._task_pick_id(task) != source_pick_id
             ]
+            task_id = str(outcome.get('task_id', ''))
+            if task_id and task_id in self.task_context_by_id:
+                del self.task_context_by_id[task_id]
             self.replan_tasks()
             return
 
         if status == 'REPLAN_REQUIRED' and reason == 'DROP_FULL' and target_drop_id:
-            self.mark_drop_full_temporarily(target_drop_id)
+            self.mark_drop_full(target_drop_id)
             return
 
         if status == 'COMPLETED':
             if source_pick_id:
                 self.mark_pick_empty(source_pick_id)
             if target_drop_id:
-                self.commit_drop_color(target_drop_id, str(outcome.get('object_color_after', 'unknown')))
+                self.mark_drop_occupied(target_drop_id)
             task_id = str(outcome.get('task_id', ''))
             if task_id and task_id in self.task_context_by_id:
                 del self.task_context_by_id[task_id]
@@ -651,10 +793,10 @@ class TaskPlanner(Node):
         if not original_payload:
             return False
 
-        blocked_drop_id = str(outcome.get('target_drop_id', ''))
+        failed_drop_id = str(outcome.get('target_drop_id', ''))
         excluded_ids = set(original_payload.get('excluded_drop_ids', []))
-        if blocked_drop_id:
-            excluded_ids.add(blocked_drop_id)
+        if failed_drop_id:
+            excluded_ids.add(failed_drop_id)
 
         candidate_drops = list(original_payload.get('drop_positions', []))
         next_drop = None
@@ -694,7 +836,7 @@ class TaskPlanner(Node):
         assignment_msg.data = json.dumps(continuation_payload)
         self.mission_assignment_pub.publish(assignment_msg)
         self.get_logger().info(
-            f'Replanned drop for {task_id}: blocked={blocked_drop_id}, next={continuation_payload["target_drop_id"]}'
+            f'Replanned drop for {task_id}: previous={failed_drop_id}, next={continuation_payload["target_drop_id"]}'
         )
         return True
     

@@ -5,10 +5,16 @@ task_planner:
     enable_task_interruption: true  # Allow interrupting current task
     min_utility_threshold: 0.5      # Minimum utility to consider task
     
-    # Base location (return point)
-    base_location_x: 0.0
-    base_location_y: 0.0
-    base_location_theta: 0.0
+    # Base locations by team color
+    blue_base_location_x: 0.0
+    blue_base_location_y: 0.0
+    blue_base_location_theta: 0.0
+    yellow_base_location_x: 0.0
+    yellow_base_location_y: 0.0
+    yellow_base_location_theta: 0.0
+
+    # Team color selected by GUI / runtime parameter update
+    team_color: blue
     
     # Task execution limits
     max_task_attempts: 3            # Retry failed tasks up to 3 times
