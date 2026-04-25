@@ -67,9 +67,54 @@ class WorldStateManager:
 
     def task_drop_candidates(self, task_parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         primary_drop = task_parameters.get('drop_location')
+        configured_candidates = task_parameters.get('drop_candidates', [])
+
+        candidate_map: Dict[str, Dict[str, Any]] = {}
+
+        for drop in configured_candidates if isinstance(configured_candidates, list) else []:
+            drop_id = str(drop.get('id', '')) if isinstance(drop, dict) else ''
+            if not drop_id:
+                continue
+            candidate_map[drop_id] = self._merge_drop_with_catalog(drop)
+
         if isinstance(primary_drop, dict) and primary_drop:
-            return [primary_drop]
-        return []
+            drop_id = str(primary_drop.get('id', ''))
+            if drop_id:
+                candidate_map.setdefault(drop_id, self._merge_drop_with_catalog(primary_drop))
+
+        if not candidate_map:
+            for drop_id, drop in self.drop_locations_catalog.items():
+                candidate_map[drop_id] = dict(drop)
+
+        pick_anchor = self._location_anchor(task_parameters.get('pick_location', {}))
+        return sorted(
+            candidate_map.values(),
+            key=lambda drop: (
+                0 if self.is_drop_available(str(drop.get('id', ''))) else 1,
+                self.distance_between_locations(pick_anchor, self._location_anchor(drop)),
+                int(drop.get('priority', 999)),
+                str(drop.get('id', '')),
+            ),
+        )
+
+    def _merge_drop_with_catalog(self, drop: Dict[str, Any]) -> Dict[str, Any]:
+        drop_id = str(drop.get('id', ''))
+        merged = dict(self.drop_locations_catalog.get(drop_id, {}))
+        merged.update(drop)
+        return merged
+
+    def _location_anchor(self, location: Dict[str, Any]) -> Dict[str, float]:
+        pose = location.get('location')
+        if isinstance(pose, dict) and pose:
+            return pose
+
+        approach_positions = location.get('approach_positions', [])
+        if isinstance(approach_positions, list) and approach_positions:
+            first_approach = approach_positions[0]
+            if isinstance(first_approach, dict):
+                return first_approach
+
+        return {}
 
     def is_drop_available(self, drop_id: str) -> bool:
         drop = self.drop_state.get(drop_id)

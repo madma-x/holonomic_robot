@@ -29,6 +29,7 @@ public:
         this->declare_parameter<int>("final_stop_hold_ms", 1000);
         this->declare_parameter<double>("pos_tolerance", 0.02);
         this->declare_parameter<double>("ang_tolerance", 0.05);
+        this->declare_parameter<bool>("verbose_logging", false);
         this->declare_parameter<std::string>("cluster_topic", "/aruco_manager/cluster_pickability");
         this->declare_parameter<std::string>("odometry_topic", "/odom");
         this->declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
@@ -38,6 +39,7 @@ public:
         cluster_timeout_ms_ = this->get_parameter("cluster_timeout_ms").as_int();
         pos_tolerance_ = this->get_parameter("pos_tolerance").as_double();
         ang_tolerance_ = this->get_parameter("ang_tolerance").as_double();
+        verbose_logging_ = this->get_parameter("verbose_logging").as_bool();
         final_stop_hold_ms_ = this->get_parameter("final_stop_hold_ms").as_int();
         if (final_stop_hold_ms_ < 0) {
             final_stop_hold_ms_ = 0;
@@ -122,7 +124,6 @@ private:
     PoseXY frozen_loss_target_{0.0, 0.0, 0.0};
     PoseXY frozen_loss_target_world_{0.0, 0.0, 0.0};
     bool frozen_loss_mode_ = false;
-    bool last_cluster_lost_state_ = false;
 
     // Robot state (from odometry)
     struct RobotState {
@@ -141,6 +142,7 @@ private:
     int cluster_timeout_ms_;
     int final_stop_hold_ms_;
     double pos_tolerance_, ang_tolerance_;
+    bool verbose_logging_ = false;
     rclcpp::Time stop_hold_until_;
 
     // Independent PID controllers per axis
@@ -206,18 +208,15 @@ private:
                 frozen_loss_mode_ = true;
                 last_confident_pose_ = frozen_loss_target_;
                 have_confident_pose_ = true;
-                RCLCPP_WARN(this->get_logger(),
-                    "Sticky cluster lost (%u frames), freezing correction target",
-                    static_cast<unsigned int>(msg->lost_tracking_frames));
+                if (verbose_logging_) {
+                    RCLCPP_WARN(this->get_logger(),
+                        "Sticky cluster lost (%u frames), freezing correction target",
+                        static_cast<unsigned int>(msg->lost_tracking_frames));
+                }
             }
-            last_cluster_lost_state_ = true;
             return;
         }
 
-        if (last_cluster_lost_state_) {
-            RCLCPP_INFO(this->get_logger(), "Cluster tracking recovered, returning to live correction");
-        }
-        last_cluster_lost_state_ = false;
         frozen_loss_mode_ = false;
 
         // Update last confident pose when cluster is seen and is pickable
@@ -227,10 +226,11 @@ private:
             last_confident_pose_.y = msg->correction.x;
             last_confident_pose_.theta = msg->correction.z;
             have_confident_pose_ = true;
-
-            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Cluster %d received: correction=(%.3f, %.3f), magnitude=%.3f",
-                msg->cluster_id, last_confident_pose_.x, last_confident_pose_.y, msg->correction_magnitude);
+            if (verbose_logging_) {
+                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Cluster %d received: correction=(%.3f, %.3f), magnitude=%.3f",
+                    msg->cluster_id, last_confident_pose_.x, last_confident_pose_.y, msg->correction_magnitude);
+            }
         }
     }
 
@@ -264,7 +264,6 @@ private:
             latest_cluster_.received = false;
         }
         frozen_loss_mode_ = false;
-        last_cluster_lost_state_ = false;
         alignment_start_time_ = this->now();
 
         // Reset PID controllers
@@ -326,11 +325,11 @@ private:
             if (this->now() < stop_hold_until_) {
                 auto stop_cmd = geometry_msgs::msg::Twist();
                 cmd_vel_pub_->publish(stop_cmd);
-                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                    "Publishing stop cmd_vel during final hold window");
+                if (verbose_logging_) {
+                    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                        "Publishing stop cmd_vel during final hold window");
+                }
             }
-            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Alignment inactive: not publishing cmd_vel (Nav2 remains in control)");
             return;
         }
 
@@ -346,8 +345,10 @@ private:
             while (error_pose.theta > M_PI) error_pose.theta -= 2.0 * M_PI;
             while (error_pose.theta < -M_PI) error_pose.theta += 2.0 * M_PI;
             cluster_available = true;
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "Control loop using frozen loss target while sticky cluster is lost");
+            if (verbose_logging_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Control loop using frozen loss target while sticky cluster is lost");
+            }
         } else if (latest_cluster_.received) {
             auto age_ms = (this->now() - latest_cluster_.timestamp).nanoseconds() / 1e6;
             if (age_ms < cluster_timeout_ms_) {
@@ -356,9 +357,11 @@ private:
                 error_pose.x = latest_cluster_.msg.correction.y;
                 error_pose.y = latest_cluster_.msg.correction.x;
                 error_pose.theta = latest_cluster_.msg.correction.z;
-                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "Control loop using live cluster correction (age=%.1f ms)", age_ms);
-            } else {
+                if (verbose_logging_) {
+                    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                        "Control loop using live cluster correction (age=%.1f ms)", age_ms);
+                }
+            } else if (verbose_logging_) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                     "Latest cluster stale (age=%.1f ms, timeout=%d ms)", age_ms, cluster_timeout_ms_);
             }
@@ -369,19 +372,24 @@ private:
             if (startup_ms < cluster_timeout_ms_) {
                 auto stop_cmd = geometry_msgs::msg::Twist();
                 cmd_vel_pub_->publish(stop_cmd);
-                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                    "Waiting for first cluster sample after service start (%.1f ms)", startup_ms);
+                if (verbose_logging_) {
+                    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                        "Waiting for first cluster sample after service start (%.1f ms)", startup_ms);
+                }
                 return;
+            } else if (verbose_logging_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "No cluster message received yet while alignment is active");
             }
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "No cluster message received yet while alignment is active");
         }
 
         // If cluster not available, use last confident pose
         if (!cluster_available && have_confident_pose_) {
             error_pose = last_confident_pose_;
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "Cluster lost, aligning with last confident error");
+            if (verbose_logging_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Cluster lost, aligning with last confident error");
+            }
         } else if (!cluster_available && !have_confident_pose_) {
             // No target available
             alignment_complete_ = true;
@@ -395,11 +403,6 @@ private:
         // Use correction directly as robot-frame error.
         const double error_x = error_pose.x;
         const double error_y = error_pose.y;
-        double error_theta = error_pose.theta;
-
-        // Normalize angle error to [-pi, pi]
-        while (error_theta > M_PI) error_theta -= 2.0 * M_PI;
-        while (error_theta < -M_PI) error_theta += 2.0 * M_PI;
 
         // Check convergence
         double pos_error = std::hypot(error_x, error_y);
@@ -409,9 +412,11 @@ private:
             alignment_complete_ = true;
             alignment_success_ = true;
             alignment_message_ = "Alignment successful";
-            RCLCPP_INFO(this->get_logger(),
-                "Alignment converged: pos_err=%.4f (tol=%.4f)",
-                pos_error, pos_tolerance_);
+            if (verbose_logging_) {
+                RCLCPP_INFO(this->get_logger(),
+                    "Alignment converged: pos_err=%.4f (tol=%.4f)",
+                    pos_error, pos_tolerance_);
+            }
             return;
         }
 
@@ -434,9 +439,11 @@ private:
         cmd_msg.angular.z = cmd_omega;
         cmd_vel_pub_->publish(cmd_msg);
 
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-            "Control: pos_err=(%.4f, %.4f), ang_err=%.4f, cmd_vel=(%.3f, %.3f, %.3f)",
-            error_x, error_y, error_theta, cmd_vx, cmd_vy, cmd_omega);
+        if (verbose_logging_) {
+            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                "Control: pos_err=(%.4f, %.4f), cmd_vel=(%.3f, %.3f, %.3f)",
+                error_x, error_y, cmd_vx, cmd_vy, cmd_omega);
+        }
     }
 };
 

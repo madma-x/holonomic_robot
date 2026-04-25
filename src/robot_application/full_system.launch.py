@@ -8,12 +8,8 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -21,12 +17,10 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory('holonomic_robot_bringup')
     description_dir = get_package_share_directory('holonomic_robot_description')
     app_dir = get_package_share_directory('robot_application')
-    gui_dir = get_package_share_directory('robot_gui')
 
     # File paths
     urdf_file = os.path.join(description_dir, 'urdf', 'holonomic_robot.urdf')
-    rviz_config = os.path.join(description_dir, 'rviz', 'robot_view.rviz')
-    gui_config = os.path.join(gui_dir, 'config', 'gui_config.yaml')
+    rviz_config = os.path.join(app_dir, 'config', 'robot.rviz')
     nav2_params = os.path.join(bringup_dir, 'config', 'nav2_params_odom_only.yaml')
     map_file = os.path.join(bringup_dir, 'maps', 'rectangle_2x3_map.yaml')
 
@@ -34,16 +28,6 @@ def generate_launch_description():
         robot_description = f.read()
 
     use_sim_time = LaunchConfiguration('use_sim_time')
-
-    aruco_alignment_stack_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('holonomic_robot_bringup'),
-                'launch',
-                'aruco_alignment_stack.launch.py',
-            ])
-        )
-    )
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
@@ -184,30 +168,35 @@ def generate_launch_description():
                     'bt_navigator',
                     'waypoint_follower',
                     'velocity_smoother',
-                    #'collision_monitor',
+                    'collision_monitor',
                 ]
             }]
         ),
 
         # ── SL Lidar C1 ──────────────────────────────────────────────────────
-        # Node(
-        #     package='sllidar_ros2',
-        #     executable='sllidar_node',
-        #     name='sllidar_node',
-        #     parameters=[{
-        #         'channel_type': 'serial',
-        #         'serial_port': '/dev/ttyUSB0',
-        #         'serial_baudrate': 460800,
-        #         'frame_id': 'base_scan',
-        #         'inverted': False,
-        #         'angle_compensate': True,
-        #         'scan_mode': 'Standard',
-        #     }],
-        #     output='screen'
-        # ),
+        Node(
+            package='sllidar_ros2',
+            executable='sllidar_node',
+            name='sllidar_node',
+            parameters=[{
+                'channel_type': 'serial',
+                'serial_port': '/dev/ttyUSB0',
+                'serial_baudrate': 460800,
+                'frame_id': 'base_scan',
+                'inverted': False,
+                'angle_compensate': True,
+                'scan_mode': 'Standard',
+            }],
+            output='screen'
+        ),
 
-        # ── ArUco alignment stack (CAN bridge + manager + alignment + debug) ─
-        aruco_alignment_stack_launch,
+        # ── CAN bridge (real robot) ───────────────────────────────────────────
+        Node(
+            package='can_interface',
+            executable='can_node',
+            name='can_node',
+            output='screen'
+        ),
 
         # ── Robot Application Nodes ──────────────────────────────────────────
 
@@ -245,21 +234,11 @@ def generate_launch_description():
         ),
 
         # ── RViz ─────────────────────────────────────────────────────────────
-        # Node(
-        #     package='rviz2',
-        #     executable='rviz2',
-        #     name='rviz2',
-        #     arguments=['-d', rviz_config],
-        #     output='screen'
-        # ),
-
         Node(
-            package='robot_gui',
-            executable='robot_gui',
-            name='robot_gui',
-            parameters=[gui_config],
-            output='screen',
-            emulate_tty=True,
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', rviz_config],
+            output='screen'
         ),
-        
     ])

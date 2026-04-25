@@ -42,27 +42,27 @@ controller_server:
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.1
+      xy_goal_tolerance: 0.06
       yaw_goal_tolerance: 0.15
       stateful: True
 
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 50
+      time_steps: 56
       model_dt: 0.05
       batch_size: 2000
-      vx_std: 0.25
-      vy_std: 0.25
-      wz_std: 0.35
+      vx_std: 0.3
+      vy_std: 0.3
+      wz_std: 0.4
       vx_max: 1.0
       vx_min: -1.0
       vy_min: -1.0
       vy_max: 1.0
       wz_max: 3.14
       iteration_count: 1
-      prune_distance: 1.0
+      prune_distance: 1.7
       transform_tolerance: 0.1
-      temperature: 0.45
+      temperature: 0.3
       gamma: 0.015
       motion_model: "Omni"
       visualize: false
@@ -82,12 +82,12 @@ controller_server:
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 13.0
-        threshold_to_consider: 100.0
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 13.0
+        cost_weight: 8.0
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
         threshold_to_consider: 0.5
@@ -102,13 +102,13 @@ controller_server:
       TwirlingCritic:
         enabled: true
         twirling_cost_power: 1
-        twirling_cost_weight: 1.0
+        twirling_cost_weight: 10.0
       ObstaclesCritic:
         enabled: true
         cost_power: 1
         repulsion_weight: 1.5
         critical_weight: 20.0
-        consider_footprint: true
+        consider_footprint: false
         collision_cost: 10000.0
         collision_margin_distance: 0.10
         near_goal_distance: 0.5
@@ -119,7 +119,7 @@ controller_server:
         cost_power: 1
         cost_weight: 3.81
         critical_cost: 300.0
-        consider_footprint: true
+        consider_footprint: false
         collision_cost: 1000000.0
         near_goal_distance: 1.0
 
@@ -139,8 +139,7 @@ local_costmap:
       width: 8
       height: 8
       resolution: 0.05
-      footprint: "[[0.15, 0.0], [0.138, 0.057], [0.106, 0.106], [0.057, 0.138], [0.0, 0.15], [-0.057, 0.138], [-0.106, 0.106], [-0.138, 0.057], [-0.15, 0.0], [-0.138, -0.057], [-0.106, -0.106], [-0.057, -0.138], [0.0, -0.15], [0.057, -0.138], [0.106, -0.106], [0.138, -0.057]]" 
-      footprint_padding: 0.02
+      robot_radius: 0.15
       transform_tolerance: 0.5
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
@@ -163,7 +162,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         cost_scaling_factor: 5.0
-        inflation_radius: 0.2
+        inflation_radius: 0.10
         inflate_unknown: false
         inflate_around_unknown: false
       always_send_full_costmap: True
@@ -182,8 +181,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       use_sim_time: False
-      footprint: "[[0.15, 0.0], [0.138, 0.057], [0.106, 0.106], [0.057, 0.138], [0.0, 0.15], [-0.057, 0.138], [-0.106, 0.106], [-0.138, 0.057], [-0.15, 0.0], [-0.138, -0.057], [-0.106, -0.106], [-0.057, -0.138], [0.0, -0.15], [0.057, -0.138], [0.106, -0.106], [0.138, -0.057]]" 
-      footprint_padding: 0.02
+      robot_radius: 0.15
       resolution: 0.05
       track_unknown_space: true
       transform_tolerance: 0.5
@@ -219,7 +217,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         cost_scaling_factor: 10.0
-        inflation_radius: 0.2
+        inflation_radius: 0.10
         inflate_unknown: false
         inflate_around_unknown: false
       always_send_full_costmap: True

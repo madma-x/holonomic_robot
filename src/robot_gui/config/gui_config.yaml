@@ -9,6 +9,8 @@ robot_gui:
 
     game_start_service: "/game/start_match"
     game_stop_service: "/game/stop_match"
+    game_reset_pose_service: "/game/reset_pose"
+    game_state_manager_node_name: "/game_state_manager"
     planner_start_service: "/planner/start"
     planner_stop_service: "/planner/stop"
     planner_replan_service: "/planner/replan"

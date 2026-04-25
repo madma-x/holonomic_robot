@@ -1,7 +1,9 @@
 """Game state management for competitive robotics."""
 
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from rcl_interfaces.msg import SetParametersResult
 from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import Float32, Int32, String, Bool
@@ -67,12 +69,25 @@ class GameStateManager(Node):
         self.match_active_pub = self.create_publisher(Bool, '/game/match_active', 10)
         self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
 
+        self.planner_client_cb_group = ReentrantCallbackGroup()
         planner_start_service = self.get_parameter('planner_start_service').value
         planner_stop_service = self.get_parameter('planner_stop_service').value
         planner_reset_service = self.get_parameter('planner_reset_service').value
-        self.planner_start_client = self.create_client(Trigger, str(planner_start_service))
-        self.planner_stop_client = self.create_client(Trigger, str(planner_stop_service))
-        self.planner_reset_client = self.create_client(Trigger, str(planner_reset_service))
+        self.planner_start_client = self.create_client(
+            Trigger,
+            str(planner_start_service),
+            callback_group=self.planner_client_cb_group,
+        )
+        self.planner_stop_client = self.create_client(
+            Trigger,
+            str(planner_stop_service),
+            callback_group=self.planner_client_cb_group,
+        )
+        self.planner_reset_client = self.create_client(
+            Trigger,
+            str(planner_reset_service),
+            callback_group=self.planner_client_cb_group,
+        )
         
         
         # Services
@@ -343,12 +358,15 @@ class GameStateManager(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GameStateManager()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

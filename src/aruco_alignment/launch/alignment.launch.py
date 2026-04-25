@@ -17,7 +17,12 @@ def generate_launch_description():
         package='aruco_alignment',
         executable='alignment_node',
         name='alignment_node',
-        parameters=[config_file],
+        parameters=[
+            config_file,
+            {
+                'verbose_logging': LaunchConfiguration('verbose_logging'),
+            },
+        ],
         output='screen',
         arguments=[
             '--ros-args',
@@ -37,8 +42,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'log_level',
-            default_value='debug',
+            default_value='info',
             description='ROS log level for alignment_node (debug, info, warn, error)'
+        ),
+        DeclareLaunchArgument(
+            'verbose_logging',
+            default_value='false',
+            description='Enable detailed alignment runtime logs'
         ),
         alignment_node
     ])

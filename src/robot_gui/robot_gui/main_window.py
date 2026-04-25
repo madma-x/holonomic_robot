@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         self.reset_ui_button.clicked.connect(self._reset_local_state)
 
         self.reset_pose_button = QPushButton('Reset Position')
-        self.reset_pose_button.clicked.connect(self.ros.reset_to_initial_position)
+        self.reset_pose_button.clicked.connect(lambda: self.ros.call_named_service('reset_pose'))
 
         self.latch_state_label = QLabel('Latch: Idle')
 
@@ -156,7 +156,7 @@ class MainWindow(QMainWindow):
         self.start_btn = QPushButton('Start Match')
         self.stop_btn = QPushButton('Stop Match')
 
-        self.start_btn.clicked.connect(lambda: self.ros.call_named_service('start_match'))
+        self.start_btn.clicked.connect(self._force_start_match)
         self.stop_btn.clicked.connect(self._confirm_stop_match)
 
         match_controls_layout.addWidget(self.start_btn, 0, 0)
@@ -288,6 +288,7 @@ class MainWindow(QMainWindow):
     def _set_team(self, value: str):
         self.local.team_color = value
         self._apply_team_selection_state()
+        self.ros.set_game_team_color(value)
         self.feedback_label.setText(f'Team set to {value}.')
 
     def _apply_team_selection_state(self):
@@ -305,7 +306,9 @@ class MainWindow(QMainWindow):
             self.local.latch_armed = True
             self.local.latch_status = 'Armed (waiting latch removal)'
             self.ready_button.setText('Match Ready: ON')
-            self.feedback_label.setText('Ready armed: latch removal will start match in future GPIO mode.')
+            self.ros.set_game_team_color(self.local.team_color)
+            self.ros.call_named_service('reset_pose')
+            self.feedback_label.setText('Ready armed: pose reset from game_state config; latch/manual start can begin match.')
         else:
             self.local.latch_armed = False
             self.local.latch_status = 'Idle'
@@ -317,12 +320,27 @@ class MainWindow(QMainWindow):
         """Future GPIO hook: only start match when ready latch is armed."""
         if not self.local.match_ready:
             self.local.latch_status = 'Latch removed while not ready (ignored)'
-            self.feedback_label.setText('Latch removal ignored because Match Ready is OFF.')
+            self.ros._set_feedback('Latch removal ignored because Match Ready is OFF.')
             self._refresh_local_labels()
             return
 
-        self.local.latch_status = 'Latch removed -> starting match'
-        self.feedback_label.setText('Latch removed while armed: sending match start.')
+        self._dispatch_match_start('Latch removed -> starting match', 'Latch removed while armed: sending match start.')
+
+    def _force_start_match(self):
+        if not self.local.match_ready:
+            self.local.latch_status = 'Manual start blocked (ready required)'
+            self.ros._set_feedback('Turn Match Ready ON before forcing match start.')
+            self._refresh_local_labels()
+            return
+
+        self._dispatch_match_start('Manual override -> starting match', 'Manual start override: sending match start without latch.')
+
+    def _dispatch_match_start(self, latch_status: str, feedback: str):
+        self.local.match_ready = False
+        self.local.latch_armed = False
+        self.local.latch_status = latch_status
+        self.ready_button.setText('Match Ready: OFF')
+        self.ros._set_feedback(feedback)
         self._refresh_local_labels()
         self.ros.call_named_service('start_match')
 

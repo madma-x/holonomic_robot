@@ -59,7 +59,7 @@ else
 fi
 
 echo "Launching nav2_odom_only..."
-ros2 launch robot_gui robot_gui.launch.py "$@"
+ros2 launch robot_application full_system.launch.py "$@"
 status=$?
 if [ "$status" -ne 0 ]; then
   echo

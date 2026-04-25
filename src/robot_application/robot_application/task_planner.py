@@ -236,8 +236,67 @@ class TaskPlanner(Node):
             base_location=self.base_location,
         ):
             self.add_task(task)
+
+        self._log_initial_task_list()
         
         self.get_logger().info(f'Initialized {len(self.task_queue)} default tasks')
+
+    def _log_initial_task_list(self):
+        """Log the initial task queue with pose details for debugging planner setup."""
+        if not self.task_queue:
+            self.get_logger().info('Initial task list is empty')
+            return
+
+        lines = ['Initial task list:']
+        for index, task in enumerate(self.task_queue, start=1):
+            lines.append(
+                f'  {index}. id={task.task_id} type={task.task_type.value} '
+                f'name={task.name} priority={task.base_priority}'
+            )
+
+            pick_location = task.parameters.get('pick_location')
+            if isinstance(pick_location, dict) and pick_location:
+                lines.append(
+                    f'     pick={self._format_location_summary(pick_location)} '
+                    f'approaches={self._format_approach_positions(pick_location)}'
+                )
+
+            drop_location = task.parameters.get('drop_location')
+            if isinstance(drop_location, dict) and drop_location:
+                lines.append(
+                    f'     drop={self._format_location_summary(drop_location)} '
+                    f'approaches={self._format_approach_positions(drop_location)}'
+                )
+
+            target_location = task.parameters.get('target_location')
+            if isinstance(target_location, dict) and target_location:
+                lines.append(f'     target_pose={self._format_pose(target_location)}')
+
+        self.get_logger().info('\n'.join(lines))
+
+    def _format_location_summary(self, location: Dict[str, Any]) -> str:
+        location_id = str(location.get('id', 'unknown'))
+        location_name = str(location.get('name', location_id))
+        return f'{location_name}({location_id})'
+
+    def _format_approach_positions(self, location: Dict[str, Any]) -> str:
+        approaches = location.get('approach_positions', [])
+        if not isinstance(approaches, list) or not approaches:
+            return '[]'
+
+        formatted = []
+        for approach in approaches:
+            if not isinstance(approach, dict):
+                continue
+            approach_id = str(approach.get('id', 'approach'))
+            formatted.append(f'{approach_id}:{self._format_pose(approach)}')
+        return '[' + ', '.join(formatted) + ']'
+
+    def _format_pose(self, pose: Dict[str, Any]) -> str:
+        x = float(pose.get('x', 0.0))
+        y = float(pose.get('y', 0.0))
+        theta = float(pose.get('theta', 0.0))
+        return f'(x={x:.3f}, y={y:.3f}, theta={theta:.3f})'
 
     def _task_pick_id(self, task: Task) -> str:
         return self.world_state.task_pick_id(task.parameters)
@@ -471,6 +530,8 @@ class TaskPlanner(Node):
 
     def _start_mission_executor(self) -> bool:
         """Call mission_executor start_mission service."""
+        self.mission_executor_status = 'STARTING'
+
         if not self.mission_executor_start_client.wait_for_service(timeout_sec=2.0):
             return False
 
@@ -496,31 +557,48 @@ class TaskPlanner(Node):
             time.sleep(poll_interval)
         return future.done()
 
-    def _wait_for_mission_executor_result(self, timeout_sec: float) -> bool:
-        """Wait for mission state transition to COMPLETED/FAILED."""
+    def _wait_for_mission_executor_result(self, expected_task_id: str, timeout_sec: float) -> bool:
+        """Wait for a terminal mission outcome for the dispatched task."""
         deadline = time.time() + timeout_sec
+        baseline_outcome_seq = self._mission_outcome_sequence(self.last_mission_outcome)
         saw_running = (self.mission_executor_status == 'RUNNING')
 
         while time.time() < deadline and not self.stop_requested:
             status = self.mission_executor_status
             if status == 'RUNNING':
                 saw_running = True
-            if status == 'REPLAN_REQUIRED':
-                outcome = self.last_mission_outcome or {}
+
+            outcome = self.last_mission_outcome or {}
+            outcome_task_id = str(outcome.get('task_id', ''))
+            outcome_seq = self._mission_outcome_sequence(outcome)
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id:
+                status = str(outcome.get('status', status)).upper()
+                self.mission_executor_status = status
+
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'REPLAN_REQUIRED':
                 adapter = self._adapter_for_outcome(outcome)
                 if adapter and adapter.handle_replan_required(outcome):
                     self.mission_executor_status = 'RUNNING'
+                    baseline_outcome_seq = outcome_seq
                     continue
                 return False
-            if status == 'COMPLETED':
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'COMPLETED':
                 return True
-            if status == 'FAILED':
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'FAILED':
                 return False
             time.sleep(0.1)
 
         if saw_running:
             self.get_logger().warn('Mission executor timed out waiting for terminal outcome')
         return False
+
+    def _mission_outcome_sequence(self, outcome: Optional[Dict[str, Any]]) -> int:
+        if not isinstance(outcome, dict):
+            return 0
+        try:
+            return int(outcome.get('outcome_seq', 0))
+        except (TypeError, ValueError):
+            return 0
 
     def mission_executor_status_callback(self, msg: String):
         """Track mission state from mission_executor node."""

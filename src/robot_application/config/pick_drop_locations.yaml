@@ -14,66 +14,63 @@ pick:
       - id: "pick_A_app_1"
         priority: 1
         pose:
-          x: 1.30
-          y: 0.50
-          theta: 0.00
-      - id: "pick_A_app_2"
-        priority: 2
-        pose:
-          x: 1.00
-          y: 0.80
-          theta: 1.57
-
+          x: 0.50
+          y: 0.40
+          theta: 3.14
   - id: 2
     name: "Pick B"
-    priority: 90
+    priority: 100
     approach_positions:
       - id: "pick_B_app_1"
         priority: 1
         pose:
-          x: 1.60
-          y: 0.50
-          theta: 0.00
-      - id: "pick_B_app_2"
-        priority: 2
-        pose:
-          x: 1.30
-          y: 0.80
-          theta: 1.57
-
+          x: 0.50
+          y: 1.20
+          theta: 3.14
   - id: 3
     name: "Pick C"
-    priority: 80
+    priority: 90
     approach_positions:
       - id: "pick_C_app_1"
         priority: 1
         pose:
-          x: 1.50
-          y: 0.70
-          theta: 1.57
+          x: 1.45
+          y: 0.60
+          theta: 0.00
       - id: "pick_C_app_2"
         priority: 2
         pose:
-          x: 1.80
-          y: 1.00
-          theta: 0.00
+          x: 1.45
+          y: 1.0
+          theta: 1.57
 
   - id: 4
     name: "Pick D"
-    priority: 70
+    priority: 80
     approach_positions:
       - id: "pick_D_app_1"
         priority: 1
         pose:
-          x: 1.50
-          y: 1.20
+          x: 1.85
+          y: 0.6
           theta: 1.57
       - id: "pick_D_app_2"
         priority: 2
         pose:
-          x: 1.80
-          y: 1.50
+          x: 1.85
+          y: 1.00
           theta: 0.00
+
+  - id: 5
+    name: "Pick E"
+    priority: 70
+    approach_positions:
+      - id: "pick_E_app_1"
+        priority: 1
+        pose:
+          x: 2.60
+          y: 0.40
+          theta: 1.57
 
 drop_locations:
   - id: 1
@@ -84,13 +81,13 @@ drop_locations:
         priority: 1
         pose:
           x: 2.20
-          y: 0.50
+          y: 0.60
           theta: 0.00
       - id: "drop_A_app_2"
         priority: 2
         pose:
-          x: 2.50
-          y: 0.80
+          x: 2.20
+          y: 1.0
           theta: 1.57
 
   - id: 2
@@ -100,14 +97,14 @@ drop_locations:
       - id: "drop_B_app_1"
         priority: 1
         pose:
-          x: 2.20
-          y: 0.90
+          x: 1.50
+          y: 0.60
           theta: 0.00
       - id: "drop_B_app_2"
         priority: 2
         pose:
-          x: 2.50
-          y: 1.20
+          x: 1.50
+          y: 1.0
           theta: 1.57
 
   - id: 3
@@ -118,13 +115,13 @@ drop_locations:
         priority: 1
         pose:
           x: 0.80
-          y: 1.50
+          y: 1.0
           theta: 3.14
       - id: "drop_C_app_2"
         priority: 2
         pose:
-          x: 0.50
-          y: 1.20
+          x: 0.80
+          y: 0.60
           theta: -1.57
 
   - id: 4
@@ -134,12 +131,18 @@ drop_locations:
       - id: "drop_D_app_1"
         priority: 1
         pose:
-          x: 0.80
-          y: 1.90
+          x: 0.30
+          y: 0.8
           theta: 3.14
-      - id: "drop_D_app_2"
-        priority: 2
+      
+  - id: 4
+    name: "Drop D"
+    priority: 4
+    approach_positions:
+      - id: "drop_D_app_1"
+        priority: 1
         pose:
-          x: 0.50
-          y: 1.60
-          theta: -1.57
+          x: 1.25
+          y: 1.2
+          theta: 1.57
+      

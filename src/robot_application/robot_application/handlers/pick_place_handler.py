@@ -26,6 +26,7 @@ class PickPlaceHandler:
         self.node.declare_parameter('align_timeout_sec', 12.0)
         self.node.declare_parameter('align_threshold', 0.02)
         self.node.declare_parameter('pickability_wait_sec', 2.0)
+        self.node.declare_parameter('priority_penalty', 1)
         self.node.declare_parameter('sticky_confirm_wait_sec', 0.4)
         self.node.declare_parameter('tag_manager_node_name', '/tag_manager_node')
 
@@ -96,8 +97,8 @@ class PickPlaceHandler:
                     return self._build_outcome(task, 'FAILED', 'NAV_FAIL', False, source_pick_id=source_pick_id)
 
 
-                """                 self.node.get_logger().info('Step 6: waiting for pickability message')
-                pickability = self.wait_for_pickability(require_sticky=True)
+                self.node.get_logger().info('Step 6: waiting for pickability message')
+                pickability = self.wait_for_pickability()
                 if pickability is None or not bool(pickability.is_pickable):
                     self.node.get_logger().warn('Step 6: pickability check failed or timed out')
                     self.lower_pick_priority(task, pick_ref, 'not pickable')
@@ -112,10 +113,8 @@ class PickPlaceHandler:
 
                 self.node.get_logger().info(
                     'Step 6: pickability confirmed '
-                    f'cluster_id={int(getattr(pickability, "cluster_id", 0))} '
-                    f'magnitude={float(getattr(pickability, "correction_magnitude", 0.0)):.3f}'
+                    f'Step 6: pickability message: {pickability}'
                 )
-
                 active_arm_indices = self.select_pick_arm_indices(pickability)
                 if not active_arm_indices:
                     self.node.get_logger().warn('Step 6: no arm is assigned to a pickable object')
@@ -156,7 +155,7 @@ class PickPlaceHandler:
                     return self._build_outcome(task, 'FAILED', 'ALIGN_FAIL', False, source_pick_id=source_pick_id)
 
                 self.node.get_logger().info('Step 7: alignment succeeded')
-
+                """
                 self.node.get_logger().info(
                     f'Step 8: executing pick sequence for arm_indices={active_arm_indices}'
                 )
@@ -324,15 +323,12 @@ class PickPlaceHandler:
 
         return False
 
-    def wait_for_pickability(self, require_sticky: bool = False) -> Optional[ClusterPickability]:
+    def wait_for_pickability(self) -> Optional[ClusterPickability]:
         timeout = float(self.node.get_parameter('pickability_wait_sec').value)
         deadline = self.node.get_clock().now() + Duration(seconds=timeout)
 
         while self.node.get_clock().now() < deadline and not self.node.stop_requested:
             if self.latest_pickability is not None:
-                if require_sticky and not bool(getattr(self.latest_pickability, 'sticky_active', False)):
-                    time.sleep(0.02)
-                    continue
                 return self.latest_pickability
             time.sleep(0.05)
 

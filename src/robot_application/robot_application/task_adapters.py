@@ -48,7 +48,7 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
         task_pick_id_getter: Callable[[Task], str],
         task_drop_candidates_getter: Callable[[Task], list],
         start_mission_executor: Callable[[], bool],
-        wait_for_mission_executor_result: Callable[[float], bool],
+        wait_for_mission_executor_result: Callable[[str, float], bool],
     ):
         self._logger = logger
         self._mission_assignment_pub = mission_assignment_pub
@@ -92,7 +92,7 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
             return False
 
         timeout = max(15.0, float(task.time_estimate) + 25.0)
-        return self._wait_for_mission_executor_result(timeout)
+        return self._wait_for_mission_executor_result(task.task_id, timeout)
 
     def process_outcome(self, outcome: Dict[str, Any]) -> Dict[str, Any]:
         return self._outcome_processor.process_outcome(

@@ -19,7 +19,7 @@ def generate_launch_description():
     urdf_file  = os.path.join(description_dir, 'urdf', 'holonomic_robot.urdf')
     rviz_config = os.path.join(description_dir, 'rviz', 'robot_view.rviz')
     nav2_params = os.path.join(bringup_dir, 'config', 'nav2_params_odom_only.yaml')
-    map_file    = os.path.join(bringup_dir, 'maps', 'rectangle_2x4_map.yaml')
+    map_file    = os.path.join(bringup_dir, 'maps', 'rectangle_2x3_map.yaml')
 
     with open(urdf_file, 'r') as f:
         robot_description = f.read()
@@ -172,21 +172,21 @@ def generate_launch_description():
         ),
 
         # ── SL Lidar C1 ──────────────────────────────────────────────────────
-        Node(
-            package='sllidar_ros2',
-            executable='sllidar_node',
-            name='sllidar_node',
-            parameters=[{
-                'channel_type': 'serial',
-                'serial_port': '/dev/ttyUSB0',
-                'serial_baudrate': 460800,
-                'frame_id': 'base_scan',
-                'inverted': False,
-                'angle_compensate': True,
-                'scan_mode': 'Standard',
-            }],
-            output='screen'
-        ),
+        # Node(
+        #     package='sllidar_ros2',
+        #     executable='sllidar_node',
+        #     name='sllidar_node',
+        #     parameters=[{
+        #         'channel_type': 'serial',
+        #         'serial_port': '/dev/ttyUSB0',
+        #         'serial_baudrate': 460800,
+        #         'frame_id': 'base_scan',
+        #         'inverted': False,
+        #         'angle_compensate': True,
+        #         'scan_mode': 'Standard',
+        #     }],
+        #     output='screen'
+        # ),
 
         # ── CAN bridge (real robot) ───────────────────────────────────────────
         Node(
@@ -197,11 +197,11 @@ def generate_launch_description():
         ),
 
         # ── RViz ─────────────────────────────────────────────────────────────
-        # Node(
-        #     package='rviz2',
-        #     executable='rviz2',
-        #     name='rviz2',
-        #     arguments=['-d', rviz_config],
-        #     output='screen'
-        # ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', rviz_config],
+            output='screen'
+        ),
     ])
