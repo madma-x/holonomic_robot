@@ -45,6 +45,16 @@ def generate_launch_description():
         )
     )
 
+    safety_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('safety_node'),
+                'launch',
+                'safety.launch.py',
+            ])
+        )
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
 
@@ -208,6 +218,9 @@ def generate_launch_description():
 
         # ── ArUco alignment stack (CAN bridge + manager + alignment + debug) ─
         aruco_alignment_stack_launch,
+
+        # ── Safety authority node (includes GPIO latch start trigger) ─────────
+        safety_launch,
 
         # ── Robot Application Nodes ──────────────────────────────────────────
 
