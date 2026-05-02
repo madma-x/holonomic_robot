@@ -48,7 +48,7 @@ public:
     declare_parameter<std::vector<long int>>("object_tag_ids",    std::vector<long int>{});
     declare_parameter<std::vector<long int>>("localization_tag_ids", std::vector<long int>{});
     declare_parameter<double>("arm_y_origin",           0.0);   // y of arm[0] in robot frame
-    declare_parameter<double>("arm_x_origin",           0.0);   // x approach distance
+    declare_parameter<double>("arm_x_origin",           0.08);   // x approach distance
     declare_parameter<double>("max_assignment_distance", 0.5); // m — ignore tag if farther
     declare_parameter<double>("consistency_threshold",   0.03); // m — max residual to be pickable
     declare_parameter<bool>("sticky_assignment",         false); // handler enables this only during pick window

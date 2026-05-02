@@ -37,8 +37,8 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
-            'verbose_logging': LaunchConfiguration('alignment_verbose_logging'),
-            'log_level': LaunchConfiguration('alignment_log_level'),
+            'verbose_logging': LaunchConfiguration('mc_verbose_logging'),
+            'log_level': LaunchConfiguration('mc_log_level'),
         }.items(),
     )
 
@@ -57,17 +57,17 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'alignment_verbose_logging',
+            'mc_verbose_logging',
             default_value='false',
             description='Enable detailed runtime logs for motion_controller_node'
         ),
         DeclareLaunchArgument(
-            'alignment_log_level',
+            'mc_log_level',
             default_value='info',
             description='ROS log level for motion_controller_node (debug, info, warn, error)'
         ),
         can_interface_launch,
         aruco_manager_launch,
-        aruco_alignment_launch,
+        motion_controller_launch,
         aruco_pose_debug_launch,
     ])

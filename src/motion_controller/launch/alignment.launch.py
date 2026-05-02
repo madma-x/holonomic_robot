@@ -8,15 +8,15 @@ import os
 
 def generate_launch_description():
     config_dir = os.path.join(
-        get_package_share_directory('aruco_alignment'),
+        get_package_share_directory('motion_controller'),
         'config'
     )
     config_file = os.path.join(config_dir, 'alignment_config.yaml')
 
-    alignment_node = Node(
-        package='aruco_alignment',
-        executable='alignment_node',
-        name='alignment_node',
+    motion_controller_node = Node(
+        package='motion_controller',
+        executable='motion_controller_node',
+        name='motion_controller_node',
         parameters=[
             config_file,
             {
@@ -27,7 +27,7 @@ def generate_launch_description():
         arguments=[
             '--ros-args',
             '--log-level',
-            ['alignment_node:=', LaunchConfiguration('log_level')],
+            ['motion_controller_node:=', LaunchConfiguration('log_level')],
         ],
         remappings=[
             ('/odom', LaunchConfiguration('odom_topic')),
@@ -43,12 +43,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'log_level',
             default_value='info',
-            description='ROS log level for alignment_node (debug, info, warn, error)'
+            description='ROS log level for motion_controller_node (debug, info, warn, error)'
         ),
         DeclareLaunchArgument(
             'verbose_logging',
             default_value='false',
             description='Enable detailed alignment runtime logs'
         ),
-        alignment_node
+        motion_controller_node
     ])

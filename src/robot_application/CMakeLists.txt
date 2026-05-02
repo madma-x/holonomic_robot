@@ -18,6 +18,7 @@ install(PROGRAMS
   scripts/game_state_manager.py
   scripts/mission_executor.py
   scripts/task_planner.py
+  scripts/run_arm_sequence.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,4 +1,4 @@
-alignment_node:
+motion_controller_node:
   ros__parameters:
     # Control loop frequency (Hz)
     control_loop_rate: 50.0
@@ -20,17 +20,23 @@ alignment_node:
     # Single-loop PID gains for rotation (theta)
     # Input: angle error (radians) → Output: angular velocity command (rad/s)
     pid_theta:
-      kp: 0.3          # proportional gain (rad/s per radian error)
-      ki: 0.02         # integral gain (rad/s per radian-second error)
-      kd: 0.05         # derivative gain (rad/s per radian/s error rate)
+      kp: 3.0          # proportional gain (rad/s per radian error)
+      ki: 0.0        # integral gain (rad/s per radian-second error)
+      kd: 0.0         # derivative gain (rad/s per radian/s error rate)
       
       # Limits
       max_integral_error: 0.3      # max rad/s from integral term (anti-windup)
-      max_angular_velocity: 1.0    # max angular velocity output (rad/s)
+      max_angular_velocity: 5.0    # max angular velocity output (rad/s)
     
     # Alignment convergence criteria
     pos_tolerance: 0.01      # meters, XY error must be below this
-    ang_tolerance: 0.05      # radians, theta error must be below this
+    ang_tolerance: 0.02      # radians, theta error must be below this
+
+    # Relative move default limits (can be overridden per request)
+    rel_move_max_linear_speed: 0.1      # m/s default max
+    rel_move_max_angular_speed: 0.5     # rad/s default max
+    rel_move_pos_tolerance: 0.01        # meters default
+    rel_move_yaw_tolerance: 0.02        # radians default
     
     # Topics
     cluster_topic: "/cluster_pickability"

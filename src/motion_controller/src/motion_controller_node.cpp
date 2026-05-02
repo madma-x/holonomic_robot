@@ -4,15 +4,25 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "aruco_interfaces/msg/cluster_pickability.hpp"
 #include "aruco_interfaces/srv/align_to_cluster.hpp"
+#include "aruco_interfaces/srv/move_relative.hpp"
 #include "pid_controller.hpp"
 #include <cmath>
 #include <mutex>
 #include <chrono>
 #include <thread>
 
+// Session state for unified motion controller
+enum class SessionState {
+    IDLE,           // No active motion request
+    ALIGN_ACTIVE,   // Visual servo alignment in progress
+    REL_MOVE_ACTIVE, // Relative move (odometry-based) in progress
+    STOPPING,       // Transitioning to stop
+    FAILED          // Session failed or aborted
+};
+
 class AlignmentNode : public rclcpp::Node {
 public:
-    AlignmentNode() : Node("alignment_node") {
+    AlignmentNode() : Node("motion_controller_node") {
         // Declare parameters
         this->declare_parameter<double>("control_loop_rate", 50.0);
         this->declare_parameter<int>("cluster_timeout_ms", 500);
@@ -21,11 +31,11 @@ public:
         this->declare_parameter<double>("pid_xy.kd", 0.1);
         this->declare_parameter<double>("pid_xy.max_integral_error", 0.5);
         this->declare_parameter<double>("pid_xy.max_velocity", 0.1);
-        this->declare_parameter<double>("pid_theta.kp", 0.3);
-        this->declare_parameter<double>("pid_theta.ki", 0.02);
-        this->declare_parameter<double>("pid_theta.kd", 0.05);
+        this->declare_parameter<double>("pid_theta.kp", 0.0);
+        this->declare_parameter<double>("pid_theta.ki", 0.0);
+        this->declare_parameter<double>("pid_theta.kd", 0.0);
         this->declare_parameter<double>("pid_theta.max_integral_error", 0.3);
-        this->declare_parameter<double>("pid_theta.max_angular_velocity", 1.0);
+        this->declare_parameter<double>("pid_theta.max_angular_velocity", 0.0);
         this->declare_parameter<int>("final_stop_hold_ms", 1000);
         this->declare_parameter<double>("pos_tolerance", 0.02);
         this->declare_parameter<double>("ang_tolerance", 0.05);
@@ -80,13 +90,31 @@ public:
             "align_to_cluster",
             [this](const std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Request> request,
                    std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Response> response) {
-                this->service_callback(request, response);
+                this->align_service_callback(request, response);
             },
-            rmw_qos_profile_services_default,
+            rclcpp::QoS(10),
+            service_cb_group_);
+
+        move_relative_service_ = this->create_service<aruco_interfaces::srv::MoveRelative>(
+            "move_relative",
+            [this](const std::shared_ptr<aruco_interfaces::srv::MoveRelative::Request> request,
+                   std::shared_ptr<aruco_interfaces::srv::MoveRelative::Response> response) {
+                this->move_relative_service_callback(request, response);
+            },
+            rclcpp::QoS(10),
             service_cb_group_);
 
         // Initialize PID controllers
         init_pid_controllers();
+
+        RCLCPP_INFO(this->get_logger(),
+            "Loaded PID params: pid_xy(kp=%.3f, ki=%.3f, kd=%.3f), pid_theta(kp=%.3f, ki=%.3f, kd=%.3f)",
+            this->get_parameter("pid_xy.kp").as_double(),
+            this->get_parameter("pid_xy.ki").as_double(),
+            this->get_parameter("pid_xy.kd").as_double(),
+            this->get_parameter("pid_theta.kp").as_double(),
+            this->get_parameter("pid_theta.ki").as_double(),
+            this->get_parameter("pid_theta.kd").as_double());
 
         // Create control loop timer
         auto period = std::chrono::duration<double>(1.0 / control_rate);
@@ -95,7 +123,7 @@ public:
             [this]() { this->control_loop(); },
             timer_cb_group_);
 
-        RCLCPP_INFO(this->get_logger(), "Alignment node initialized");
+        RCLCPP_INFO(this->get_logger(), "Motion controller node initialized with dual APIs");
     }
 
 private:
@@ -104,10 +132,34 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Service<aruco_interfaces::srv::AlignToCluster>::SharedPtr service_;
+    rclcpp::Service<aruco_interfaces::srv::MoveRelative>::SharedPtr move_relative_service_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::CallbackGroup::SharedPtr service_cb_group_;
     rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
     rclcpp::CallbackGroup::SharedPtr subs_cb_group_;
+
+    // Session state machine
+    SessionState session_state_ = SessionState::IDLE;
+    int32_t target_cluster_id_ = -1;
+    rclcpp::Time session_start_time_;
+    bool session_complete_ = false;
+    bool session_success_ = false;
+    std::string session_message_;
+
+    // Relative move state (used when session_state_ == REL_MOVE_ACTIVE)
+    struct RelativeMoveTarget {
+        double target_x_m = 0.0;
+        double target_y_m = 0.0;
+        double target_yaw_rad = 0.0;
+        double start_x_m = 0.0;
+        double start_y_m = 0.0;
+        double start_yaw_rad = 0.0;
+        double pos_tolerance_m = 0.01;
+        double yaw_tolerance_rad = 0.05;
+        float timeout_s = 5.0;
+        float max_linear_speed_mps = 0.1;
+        float max_angular_speed_rps = 1.0;
+    } rel_move_target_;
 
     // Cluster state
     struct ClusterState {
@@ -129,14 +181,6 @@ private:
     struct RobotState {
         double x, y, theta;
     } robot_state_{0.0, 0.0, 0.0};
-
-    // Alignment control state
-    int32_t target_cluster_id_ = -1;
-    bool alignment_active_ = false;
-    rclcpp::Time alignment_start_time_;
-    bool alignment_complete_ = false;
-    bool alignment_success_ = false;
-    std::string alignment_message_;
 
     // Configuration
     int cluster_timeout_ms_;
@@ -248,23 +292,34 @@ private:
                                          1.0 - 2.0 * (qy * qy + qz * qz));
     }
 
-    void service_callback(
+    void align_service_callback(
         const std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Request> request,
         std::shared_ptr<aruco_interfaces::srv::AlignToCluster::Response> response) {
 
         std::unique_lock<std::mutex> lock(state_mutex_);
 
+        // Reject if session already active
+        if (session_state_ != SessionState::IDLE) {
+            response->success = false;
+            response->status_message = "Motion controller busy with existing session";
+            RCLCPP_WARN(this->get_logger(),
+                "Align service called while session active (state=%d)", static_cast<int>(session_state_));
+            return;
+        }
+
+        // Start alignment session
         target_cluster_id_ = request->cluster_id;
-        alignment_active_ = true;
-        alignment_complete_ = false;
+        session_state_ = SessionState::ALIGN_ACTIVE;
+        session_complete_ = false;
+        session_success_ = false;
         stop_hold_until_ = this->now();
-        // Keep a recent matching cluster sample if available; only clear if it is
-        // unrelated to the requested cluster.
+        
+        // Keep a recent matching cluster sample if available
         if (latest_cluster_.received && latest_cluster_.msg.cluster_id != request->cluster_id) {
             latest_cluster_.received = false;
         }
         frozen_loss_mode_ = false;
-        alignment_start_time_ = this->now();
+        session_start_time_ = this->now();
 
         // Reset PID controllers
         pid_x_->reset();
@@ -272,7 +327,7 @@ private:
         pid_theta_->reset();
 
         RCLCPP_INFO(this->get_logger(),
-            "Alignment service called: cluster_id=%d, threshold=%.4f, max_wait=%.2fs",
+            "Alignment session started: cluster_id=%d, threshold=%.4f, max_wait=%.2fs",
             request->cluster_id, request->alignment_threshold, request->max_wait_time);
 
         // Wait for alignment to complete (blocking)
@@ -280,12 +335,12 @@ private:
             request->max_wait_time > 0 ? request->max_wait_time : 60.0);
         auto start_time = this->now();
 
-        while (!alignment_complete_) {
+        while (!session_complete_) {
             if (request->max_wait_time > 0 &&
                 (this->now() - start_time) > wait_timeout) {
-                alignment_complete_ = true;
-                alignment_success_ = false;
-                alignment_message_ = "Timeout waiting for alignment";
+                session_complete_ = true;
+                session_success_ = false;
+                session_message_ = "Timeout waiting for alignment";
                 RCLCPP_ERROR(this->get_logger(),
                     "Alignment timed out after %.2fs (cluster_id=%d)",
                     request->max_wait_time, request->cluster_id);
@@ -297,42 +352,167 @@ private:
         }
 
         // Populate response
-        response->success = alignment_success_;
+        response->success = session_success_;
         response->final_correction.x = last_confident_pose_.x;
         response->final_correction.y = last_confident_pose_.y;
         response->final_correction.z = last_confident_pose_.theta;
         response->final_magnitude = std::hypot(last_confident_pose_.x, last_confident_pose_.y);
-        response->status_message = alignment_message_;
+        response->status_message = session_message_;
 
-        alignment_active_ = false;
+        // Transition to stopping state
+        session_state_ = SessionState::STOPPING;
         stop_hold_until_ = this->now() + rclcpp::Duration::from_nanoseconds(
             static_cast<int64_t>(final_stop_hold_ms_) * 1000000LL);
 
-        // Always send a final stop command when alignment request finishes,
-        // regardless of success or failure.
+        // Always send a final stop command
         auto stop_cmd = geometry_msgs::msg::Twist();
         cmd_vel_pub_->publish(stop_cmd);
 
         RCLCPP_INFO(this->get_logger(),
-            "Alignment complete: success=%d, message=%s",
-            alignment_success_, alignment_message_.c_str());
+            "Alignment session complete: success=%d, message=%s",
+            session_success_, session_message_.c_str());
+
+        // Return to idle after response
+        session_state_ = SessionState::IDLE;
+    }
+
+    void move_relative_service_callback(
+        const std::shared_ptr<aruco_interfaces::srv::MoveRelative::Request> request,
+        std::shared_ptr<aruco_interfaces::srv::MoveRelative::Response> response) {
+
+        std::unique_lock<std::mutex> lock(state_mutex_);
+
+        // Reject if session already active
+        if (session_state_ != SessionState::IDLE) {
+            response->success = false;
+            response->residual_distance_m = 0.0f;
+            response->residual_yaw_rad = 0.0f;
+            response->status_message = "Motion controller busy with existing session";
+            RCLCPP_WARN(this->get_logger(),
+                "MoveRelative service called while session active (state=%d)", static_cast<int>(session_state_));
+            return;
+        }
+
+        // Start relative move session
+        session_state_ = SessionState::REL_MOVE_ACTIVE;
+        session_complete_ = false;
+        session_success_ = false;
+        session_start_time_ = this->now();
+
+        // Store relative move targets
+        rel_move_target_.target_x_m = request->target_x_m;
+        rel_move_target_.target_y_m = request->target_y_m;
+        rel_move_target_.target_yaw_rad = request->target_yaw_rad;
+        rel_move_target_.start_x_m = robot_state_.x;
+        rel_move_target_.start_y_m = robot_state_.y;
+        rel_move_target_.start_yaw_rad = robot_state_.theta;
+        rel_move_target_.pos_tolerance_m = request->pos_tolerance_m;
+        rel_move_target_.yaw_tolerance_rad = request->yaw_tolerance_rad;
+        rel_move_target_.timeout_s = request->timeout_s;
+        rel_move_target_.max_linear_speed_mps = request->max_linear_speed_mps;
+        rel_move_target_.max_angular_speed_rps = request->max_angular_speed_rps;
+
+        // Reset PID controllers
+        pid_x_->reset();
+        pid_y_->reset();
+        pid_theta_->reset();
+
+        RCLCPP_INFO(this->get_logger(),
+            "Relative move session started: target=(%.3f, %.3f, %.3f), timeout=%.2fs",
+            request->target_x_m, request->target_y_m, request->target_yaw_rad, request->timeout_s);
+
+        // Wait for move to complete (blocking)
+        auto wait_timeout = rclcpp::Duration::from_seconds(
+            request->timeout_s > 0 ? request->timeout_s : 60.0);
+        auto start_time = this->now();
+
+        while (!session_complete_) {
+            if (request->timeout_s > 0 &&
+                (this->now() - start_time) > wait_timeout) {
+                session_complete_ = true;
+                session_success_ = false;
+                session_message_ = "Timeout waiting for relative move";
+                RCLCPP_ERROR(this->get_logger(),
+                    "Relative move timed out after %.2fs", request->timeout_s);
+                break;
+            }
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            lock.lock();
+        }
+
+        // Populate response
+        double final_x = robot_state_.x - rel_move_target_.start_x_m;
+        double final_y = robot_state_.y - rel_move_target_.start_y_m;
+        double final_yaw = robot_state_.theta - rel_move_target_.start_yaw_rad;
+        while (final_yaw > M_PI) final_yaw -= 2.0 * M_PI;
+        while (final_yaw < -M_PI) final_yaw += 2.0 * M_PI;
+
+        response->success = session_success_;
+        response->final_x_m = final_x;
+        response->final_y_m = final_y;
+        response->final_yaw_rad = final_yaw;
+        response->residual_distance_m = std::hypot(
+            rel_move_target_.target_x_m - final_x,
+            rel_move_target_.target_y_m - final_y);
+        response->residual_yaw_rad = rel_move_target_.target_yaw_rad - final_yaw;
+        response->status_message = session_message_;
+
+        // Transition to stopping state
+        session_state_ = SessionState::STOPPING;
+        stop_hold_until_ = this->now() + rclcpp::Duration::from_nanoseconds(
+            static_cast<int64_t>(final_stop_hold_ms_) * 1000000LL);
+
+        // Always send a final stop command
+        auto stop_cmd = geometry_msgs::msg::Twist();
+        cmd_vel_pub_->publish(stop_cmd);
+
+        RCLCPP_INFO(this->get_logger(),
+            "Relative move session complete: success=%d, traveled=(%.3f, %.3f, %.3f), message=%s",
+            session_success_, final_x, final_y, final_yaw, session_message_.c_str());
+
+        // Return to idle after response
+        session_state_ = SessionState::IDLE;
     }
 
     void control_loop() {
         std::lock_guard<std::mutex> lock(state_mutex_);
 
-        if (!alignment_active_) {
-            if (this->now() < stop_hold_until_) {
-                auto stop_cmd = geometry_msgs::msg::Twist();
-                cmd_vel_pub_->publish(stop_cmd);
-                if (verbose_logging_) {
-                    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                        "Publishing stop cmd_vel during final hold window");
-                }
+        // Handle post-stop hold period
+        if (session_state_ == SessionState::STOPPING && this->now() < stop_hold_until_) {
+            auto stop_cmd = geometry_msgs::msg::Twist();
+            cmd_vel_pub_->publish(stop_cmd);
+            if (verbose_logging_) {
+                RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "Publishing stop cmd_vel during final hold window");
             }
             return;
         }
 
+        // If returning to idle after stop hold
+        if (session_state_ == SessionState::STOPPING && this->now() >= stop_hold_until_) {
+            session_state_ = SessionState::IDLE;
+        }
+
+        // No active goal: do not publish cmd_vel.
+        if (session_state_ == SessionState::IDLE) {
+            return;
+        }
+
+        // ========== Alignment Session (Visual Servo) ==========
+        if (session_state_ == SessionState::ALIGN_ACTIVE) {
+            control_loop_alignment();
+            return;
+        }
+
+        // ========== Relative Move Session (Odometry-based) ==========
+        if (session_state_ == SessionState::REL_MOVE_ACTIVE) {
+            control_loop_relative_move();
+            return;
+        }
+    }
+
+    void control_loop_alignment() {
         // Check cluster timeout
         bool cluster_available = false;
         PoseXY error_pose{0.0, 0.0, 0.0};
@@ -366,15 +546,14 @@ private:
                     "Latest cluster stale (age=%.1f ms, timeout=%d ms)", age_ms, cluster_timeout_ms_);
             }
         } else {
-            // Grace period at alignment startup: wait briefly for first target
-            // sample before declaring loss/falling back.
-            auto startup_ms = (this->now() - alignment_start_time_).nanoseconds() / 1e6;
+            // Grace period at session startup: wait briefly for first target
+            auto startup_ms = (this->now() - session_start_time_).nanoseconds() / 1e6;
             if (startup_ms < cluster_timeout_ms_) {
                 auto stop_cmd = geometry_msgs::msg::Twist();
                 cmd_vel_pub_->publish(stop_cmd);
                 if (verbose_logging_) {
                     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                        "Waiting for first cluster sample after service start (%.1f ms)", startup_ms);
+                        "Waiting for first cluster sample after session start (%.1f ms)", startup_ms);
                 }
                 return;
             } else if (verbose_logging_) {
@@ -392,9 +571,9 @@ private:
             }
         } else if (!cluster_available && !have_confident_pose_) {
             // No target available
-            alignment_complete_ = true;
-            alignment_success_ = false;
-            alignment_message_ = "No cluster available and no last confident pose";
+            session_complete_ = true;
+            session_success_ = false;
+            session_message_ = "No cluster available and no last confident pose";
             RCLCPP_ERROR(this->get_logger(),
                 "Alignment failed: no cluster available and no last confident pose");
             return;
@@ -409,9 +588,9 @@ private:
         if (pos_error < pos_tolerance_) {
             auto cmd_msg = geometry_msgs::msg::Twist();
             cmd_vel_pub_->publish(cmd_msg);
-            alignment_complete_ = true;
-            alignment_success_ = true;
-            alignment_message_ = "Alignment successful";
+            session_complete_ = true;
+            session_success_ = true;
+            session_message_ = "Alignment successful";
             if (verbose_logging_) {
                 RCLCPP_INFO(this->get_logger(),
                     "Alignment converged: pos_err=%.4f (tol=%.4f)",
@@ -441,8 +620,84 @@ private:
 
         if (verbose_logging_) {
             RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                "Control: pos_err=(%.4f, %.4f), cmd_vel=(%.3f, %.3f, %.3f)",
+                "Alignment control: pos_err=(%.4f, %.4f), cmd_vel=(%.3f, %.3f, %.3f)",
                 error_x, error_y, cmd_vx, cmd_vy, cmd_omega);
+        }
+    }
+
+    void control_loop_relative_move() {
+        // Compute current error relative to session start + target delta
+        double target_world_x = rel_move_target_.start_x_m + rel_move_target_.target_x_m;
+        double target_world_y = rel_move_target_.start_y_m + rel_move_target_.target_y_m;
+        double target_world_theta = rel_move_target_.start_yaw_rad + rel_move_target_.target_yaw_rad;
+        while (target_world_theta > M_PI) target_world_theta -= 2.0 * M_PI;
+        while (target_world_theta < -M_PI) target_world_theta += 2.0 * M_PI;
+
+        // Error in world frame
+        double error_x_world = target_world_x - robot_state_.x;
+        double error_y_world = target_world_y - robot_state_.y;
+        double error_theta_world = target_world_theta - robot_state_.theta;
+        while (error_theta_world > M_PI) error_theta_world -= 2.0 * M_PI;
+        while (error_theta_world < -M_PI) error_theta_world += 2.0 * M_PI;
+
+        // Check convergence
+        double pos_error = std::hypot(error_x_world, error_y_world);
+        double ang_error = std::abs(error_theta_world);
+        if (pos_error < rel_move_target_.pos_tolerance_m &&
+            ang_error < rel_move_target_.yaw_tolerance_rad) {
+            auto cmd_msg = geometry_msgs::msg::Twist();
+            cmd_vel_pub_->publish(cmd_msg);
+            session_complete_ = true;
+            session_success_ = true;
+            session_message_ = "Relative move successful";
+            if (verbose_logging_) {
+                RCLCPP_INFO(this->get_logger(),
+                    "Relative move converged: pos_err=%.4f, yaw_err=%.4f",
+                    pos_error, ang_error);
+            }
+            return;
+        }
+
+        // Control loop timing
+        static rclcpp::Time last_loop_time = this->now();
+        double dt = (this->now() - last_loop_time).nanoseconds() / 1e9;
+        last_loop_time = this->now();
+        if (dt <= 0.0) dt = 0.02; // Fallback
+
+        // Convert world-frame errors to robot frame for holonomic control
+        double cos_theta = std::cos(robot_state_.theta);
+        double sin_theta = std::sin(robot_state_.theta);
+        double error_x_robot = error_x_world * cos_theta + error_y_world * sin_theta;
+        double error_y_robot = -error_x_world * sin_theta + error_y_world * cos_theta;
+
+        // Compute velocity commands with velocity scaling
+        double cmd_vx = pid_x_->update(error_x_robot, dt);
+        double cmd_vy = pid_y_->update(error_y_robot, dt);
+        double cmd_omega = pid_theta_->update(error_theta_world, dt);
+
+        // Apply velocity limits from request
+        double linear_speed = std::hypot(cmd_vx, cmd_vy);
+        if (linear_speed > rel_move_target_.max_linear_speed_mps &&
+            linear_speed > 1e-6) {
+            double scale = rel_move_target_.max_linear_speed_mps / linear_speed;
+            cmd_vx *= scale;
+            cmd_vy *= scale;
+        }
+        cmd_omega = std::clamp(cmd_omega, 
+                               -static_cast<double>(rel_move_target_.max_angular_speed_rps),
+                               static_cast<double>(rel_move_target_.max_angular_speed_rps));
+
+        // Publish command
+        auto cmd_msg = geometry_msgs::msg::Twist();
+        cmd_msg.linear.x = cmd_vx;
+        cmd_msg.linear.y = cmd_vy;
+        cmd_msg.angular.z = cmd_omega;
+        cmd_vel_pub_->publish(cmd_msg);
+
+        if (verbose_logging_) {
+            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                "Relative move control: pos_err=%.4f, yaw_err=%.4f, cmd_vel=(%.3f, %.3f, %.3f)",
+                pos_error, ang_error, cmd_vx, cmd_vy, cmd_omega);
         }
     }
 };

@@ -34,7 +34,7 @@
   <exec_depend>nav2_costmap_2d</exec_depend>
   
   <!-- Additional packages for launch and nodes -->
-  <exec_depend>aruco_alignment</exec_depend>
+  <exec_depend>motion_controller</exec_depend>
   <exec_depend>can_interface</exec_depend>
   <exec_depend>holonomic_robot_bringup</exec_depend>
   <exec_depend>rviz2</exec_depend>

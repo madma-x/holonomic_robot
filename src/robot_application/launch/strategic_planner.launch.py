@@ -104,15 +104,15 @@ def generate_launch_description():
         ]
     )
 
-    alignment_node = Node(
+    motion_controller_node = Node(
         condition=IfCondition(LaunchConfiguration('launch_alignment')),
-        package='aruco_alignment',
-        executable='alignment_node',
-        name='alignment_node',
+        package='motion_controller',
+        executable='motion_controller_node',
+        name='motion_controller_node',
         output='screen',
         parameters=[
             PathJoinSubstitution([
-                FindPackageShare('aruco_alignment'),
+                FindPackageShare('motion_controller'),
                 'config',
                 'alignment_config.yaml'
             ]),
@@ -133,5 +133,5 @@ def generate_launch_description():
         game_state_node,
         task_planner_node,
         mission_executor_node,
-        alignment_node,
+        motion_controller_node,
     ])

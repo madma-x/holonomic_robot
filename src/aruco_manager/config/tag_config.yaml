@@ -7,7 +7,7 @@ tag_manager_node:
     # X position of arm[0] in robot frame (meters)
     arm_x_origin: -0.075
     # Y position of arm[0] in robot frame (meters)
-    arm_y_origin: 0.00
+    arm_y_origin: 0.07
     # Maximum distance for a tag to be assigned to an arm (meters)
     max_assignment_distance: 0.15
     # Maximum residual error after rigid fit to be considered pickable (meters)

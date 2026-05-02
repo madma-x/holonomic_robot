@@ -79,7 +79,8 @@ class ArucoPosgDebugNode(Node):
         self.declare_parameter("pickability_topic", "/cluster_pickability")
         self.declare_parameter("show_window",  False)
         self.declare_parameter("arm_x_origin", -0.075)
-        self.declare_parameter("arm_y_origin", 0.0)
+        self.declare_parameter("arm_y_origin", 0.07)
+        self.declare_parameter("arm_z_origin", 0.5)
         self.declare_parameter("arm_spacing", 0.05)
         default_picker_yaml = os.path.join(
             get_package_share_directory("aruco_manager"),
@@ -99,6 +100,7 @@ class ArucoPosgDebugNode(Node):
         self._show = self.get_parameter("show_window").value
         self._arm_x_origin = float(self.get_parameter("arm_x_origin").value)
         self._arm_y_origin = float(self.get_parameter("arm_y_origin").value)
+        self._arm_z_origin = float(self.get_parameter("arm_z_origin").value)
         self._arm_spacing = float(self.get_parameter("arm_spacing").value)
         self._load_camera_config()
         self._bridge      = CvBridge()
@@ -288,11 +290,11 @@ class ArucoPosgDebugNode(Node):
                 continue
             u0, v0 = start_uv
 
-            # Goal point from configured arm geometry (tag_config.yaml params).
+            # Goal point from configured arm geometry at a fixed depth in camera frame.
             arm_idx = int(aa.arm_index)
             gx = self._arm_x_origin + arm_idx * self._arm_spacing
             gy = self._arm_y_origin
-            goal_uv = self._project_point(gx, gy, z)
+            goal_uv = self._project_point(gx, gy, self._arm_z_origin)
             if goal_uv is None:
                 continue
             u1, v1 = goal_uv

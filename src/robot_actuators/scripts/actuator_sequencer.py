@@ -1,4 +1,4 @@
-from robot_actuators.runtime_actuators.actuator_sequencer import main
+from runtime_actuators.actuator_sequencer import main
 
 
 if __name__ == '__main__':

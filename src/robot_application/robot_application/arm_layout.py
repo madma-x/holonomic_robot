@@ -17,10 +17,6 @@ class LiftGroupConfig:
     down_angle_deg: float
     up_angle_deg: float
     speed_deg_s: float
-    pusher_pwm_channel: int
-    pusher_push_deg: float
-    pusher_stow_deg: float
-    pusher_settle_sec: float
 
 
 @dataclass(frozen=True)
@@ -48,10 +44,6 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         down_angle_deg=90.0,
         up_angle_deg=0.0,
         speed_deg_s=50.0,
-        pusher_pwm_channel=4,
-        pusher_push_deg=45.0,
-        pusher_stow_deg=0.0,
-        pusher_settle_sec=0.5,
     ),
     1: LiftGroupConfig(
         group_index=1,
@@ -60,10 +52,6 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         down_angle_deg=90.0,
         up_angle_deg=0.0,
         speed_deg_s=50.0,
-        pusher_pwm_channel=5,
-        pusher_push_deg=45.0,
-        pusher_stow_deg=0.0,
-        pusher_settle_sec=0.5,
     ),
 }
 

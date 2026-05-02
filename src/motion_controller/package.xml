@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>aruco_alignment</name>
+  <name>motion_controller</name>
   <version>0.0.0</version>
-  <description>ArUco cluster alignment service with dual nested PID control loops</description>
+  <description>Integrated motion controller for visual servo alignment and relative moves with dual PID control loops</description>
   <maintainer email="robot@example.com">Robot</maintainer>
   <license>MIT</license>
 

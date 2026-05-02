@@ -137,7 +137,7 @@ private:
         odom.twist.twist.linear.x = vx;
         odom.twist.twist.linear.y = vy;
         odom.twist.twist.angular.z = wz;
-        odom_pub_->publish(odom);
+        // odom_pub_->publish(odom);  // Disabled: odometry is now published by Raspberry Pi
 
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp = stamp;

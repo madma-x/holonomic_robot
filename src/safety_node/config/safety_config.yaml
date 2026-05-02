@@ -7,7 +7,11 @@ safety_node:
     publish_rate_hz: 20.0
     recovery_timeout_sec: 2.0
     start_latch_enabled: true
-    start_latch_gpio_line: 28
+    start_latch_port: "/dev/ttyACM0"
+    start_latch_baudrate: 115200
+    start_latch_pin: 28
+    start_latch_pullup: true
+    start_latch_trigger_value: 0
     start_latch_debounce_ms: 50
     start_match_service: "/game/start_match"
     match_active_topic: "/game/match_active"

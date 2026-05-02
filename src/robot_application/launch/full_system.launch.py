@@ -35,12 +35,12 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time')
 
-    aruco_alignment_stack_launch = IncludeLaunchDescription(
+    motion_controller_stack_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
                 FindPackageShare('holonomic_robot_bringup'),
                 'launch',
-                'aruco_alignment_stack.launch.py',
+                'motion_controller_stack.launch.py',
             ])
         )
     )
@@ -217,7 +217,7 @@ def generate_launch_description():
         # ),
 
         # ── ArUco alignment stack (CAN bridge + manager + alignment + debug) ─
-        aruco_alignment_stack_launch,
+        motion_controller_stack_launch,
 
         # ── Safety authority node (includes GPIO latch start trigger) ─────────
         safety_launch,

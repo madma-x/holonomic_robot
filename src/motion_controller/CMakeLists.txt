@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(aruco_alignment)
+project(motion_controller)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -11,16 +11,16 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(aruco_interfaces REQUIRED)
 
-# Alignment node executable
-add_executable(alignment_node src/alignment_node.cpp)
-ament_target_dependencies(alignment_node
+# Integrated motion controller executable
+add_executable(motion_controller_node src/motion_controller_node.cpp)
+ament_target_dependencies(motion_controller_node
   rclcpp
   geometry_msgs
   nav_msgs
   aruco_interfaces
 )
 
-install(TARGETS alignment_node
+install(TARGETS motion_controller_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
