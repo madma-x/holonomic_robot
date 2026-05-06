@@ -574,35 +574,48 @@ class PickPlaceHandler:
 
     def evaluate_drop_occupancy(self, team_color: str) -> str:
         max_age = float(self.node.get_parameter('detected_tags_max_age_sec').value)
-        if self.latest_detected_tags is None or (time.time() - self._latest_detected_tags_stamp) > max_age:
-            self.node.get_logger().warn('Detected tags stale/unavailable; skipping drop occupancy gate')
+        pickability = self.latest_pickability
+        if pickability is None:
+            self.node.get_logger().warn('Pickability unavailable; skipping drop occupancy gate')
             return 'unknown'
 
-        team_tag_id = 36 if team_color == 'blue' else 47
-        non_team_tag_id = 47 if team_tag_id == 36 else 36
-        tag_ids = [
-            int(tag.tag_id)
-            for tag in self.latest_detected_tags.tags
-            if int(tag.tag_id) in (36, 47)
-        ]
+        stamp = getattr(pickability, 'header', None).stamp if getattr(pickability, 'header', None) else None
+        if stamp is not None:
+            stamp_sec = float(getattr(stamp, 'sec', 0)) + float(getattr(stamp, 'nanosec', 0)) * 1e-9
+            if stamp_sec > 0.0 and (time.time() - stamp_sec) > max_age:
+                self.node.get_logger().warn('Pickability stale; skipping drop occupancy gate')
+                return 'unknown'
 
-        team_count = sum(1 for tag_id in tag_ids if tag_id == team_tag_id)
-        non_team_count = sum(1 for tag_id in tag_ids if tag_id == non_team_tag_id)
+        majority_color = str(getattr(pickability, 'majority_color', 'none')).strip().lower()
+        total_tags = int(getattr(pickability, 'total_tags', 0))
+        team_color = str(team_color).strip().lower()
 
-        if non_team_count > 0:
+        if total_tags <= 0:
             self.node.get_logger().info(
-                f'Drop occupancy: non-team tags detected (team={team_count}, non_team={non_team_count}), clear needed'
+                f'Drop occupancy: no occupancy evidence (majority={majority_color}, total_tags={total_tags}), proceed'
+            )
+            return 'proceed'
+
+        if majority_color == 'equal':
+            self.node.get_logger().info(
+                f'Drop occupancy: equal team/non-team occupancy (total_tags={total_tags}), clear needed'
             )
             return 'clear_needed'
 
-        if team_count > non_team_count and team_count > 0:
+        if majority_color == team_color:
             self.node.get_logger().info(
-                f'Drop occupancy: team-tag strict majority (team={team_count}, non_team={non_team_count}), drop full'
+                f'Drop occupancy: team majority={majority_color} (total_tags={total_tags}), drop full'
             )
             return 'drop_full'
 
+        if majority_color in ('blue', 'yellow'):
+            self.node.get_logger().info(
+                f'Drop occupancy: non-team majority={majority_color} (total_tags={total_tags}), clear needed'
+            )
+            return 'clear_needed'
+
         self.node.get_logger().info(
-            f'Drop occupancy: no strict team majority (team={team_count}, non_team={non_team_count}), proceed'
+            f'Drop occupancy: unrecognized majority={majority_color} (total_tags={total_tags}), proceed'
         )
         return 'proceed'
 

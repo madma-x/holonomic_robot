@@ -611,6 +611,26 @@ private:
     result.total_tags = object_tag_indices.size();
     result.header = msg->header;
     result.cluster_id = 0;
+    result.majority_color = "none";
+
+    int count_blue_36 = 0;
+    int count_yellow_47 = 0;
+    for (size_t tag_idx : object_tag_indices) {
+      const uint32_t id = msg->tags[tag_idx].tag_id;
+      if (id == 36) {
+        count_blue_36 += 1;
+      } else if (id == 47) {
+        count_yellow_47 += 1;
+      }
+    }
+
+    if (count_blue_36 > count_yellow_47) {
+      result.majority_color = "blue";
+    } else if (count_yellow_47 > count_blue_36) {
+      result.majority_color = "yellow";
+    } else if ((count_blue_36 > 0) || (count_yellow_47 > 0)) {
+      result.majority_color = "equal";
+    }
 
     for (int a = 0; a < NUM_ARMS; ++a) {
       aruco_interfaces::msg::ArmAssignment aa;
