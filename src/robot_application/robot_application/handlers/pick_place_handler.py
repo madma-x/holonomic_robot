@@ -10,6 +10,7 @@ from rclpy.parameter_client import AsyncParameterClient
 
 from aruco_interfaces.msg import ArmAssignment
 from aruco_interfaces.msg import ClusterPickability
+from aruco_interfaces.msg import DetectedTagArray
 from aruco_interfaces.srv import AlignToCluster as AlignToClusterSrv
 from robot_application.arm_sequences import ArmSequenceBuilder
 
@@ -20,6 +21,9 @@ class PickPlaceHandler:
     def __init__(self, executor_node):
         self.node = executor_node
         self.latest_pickability: Optional[ClusterPickability] = None
+        self.latest_detected_tags: Optional[DetectedTagArray] = None
+        self._latest_detected_tags_stamp = 0.0
+        self._cached_team_color: Optional[str] = None
 
         self.node.declare_parameter('pickability_topic', '/cluster_pickability')
         self.node.declare_parameter('align_service_name', '/align_to_cluster')
@@ -29,19 +33,32 @@ class PickPlaceHandler:
         self.node.declare_parameter('priority_penalty', 1)
         self.node.declare_parameter('sticky_confirm_wait_sec', 0.4)
         self.node.declare_parameter('tag_manager_node_name', '/tag_manager_node')
+        self.node.declare_parameter('game_state_manager_node_name', '/game_state_manager')
+        self.node.declare_parameter('detected_tags_topic', '/findeeznuts/detected_tags')
+        self.node.declare_parameter('detected_tags_max_age_sec', 0.75)
+        self.node.declare_parameter('drop_clear_wait_sec', 1.0)
 
         pickability_topic = self.node.get_parameter('pickability_topic').value
         align_service_name = self.node.get_parameter('align_service_name').value
         tag_manager_node_name = self.node.get_parameter('tag_manager_node_name').value
+        game_state_manager_node_name = self.node.get_parameter('game_state_manager_node_name').value
+        detected_tags_topic = self.node.get_parameter('detected_tags_topic').value
 
         self.sequence_builder = ArmSequenceBuilder()
 
         self.align_client = self.node.create_client(AlignToClusterSrv, align_service_name)
         self.tag_manager_params = AsyncParameterClient(self.node, str(tag_manager_node_name))
+        self.game_state_params = AsyncParameterClient(self.node, str(game_state_manager_node_name))
         self.pickability_sub = self.node.create_subscription(
             ClusterPickability,
             pickability_topic,
             self.pickability_callback,
+            10
+        )
+        self.detected_tags_sub = self.node.create_subscription(
+            DetectedTagArray,
+            detected_tags_topic,
+            self.detected_tags_callback,
             10
         )
 
@@ -51,12 +68,18 @@ class PickPlaceHandler:
 
     def pickability_callback(self, msg: ClusterPickability):
         self.latest_pickability = msg
+
+    def detected_tags_callback(self, msg: DetectedTagArray):
+        self.latest_detected_tags = msg
+        self._latest_detected_tags_stamp = time.time()
         
     def execute(self, task: dict) -> Dict[str, Any]:
         carry_object = bool(task.get('carry_object', False))
         source_pick_id = str(task.get('source_pick_id', ''))
         active_arm_indices = self._task_arm_indices(task)
+        selected_arm_tag_ids = self._task_selected_arm_tag_ids(task)
         pick_ref: Optional[dict] = None
+        team_color = self.get_team_color()
 
         self.node.get_logger().info(
             'PickPlace execute() start: '
@@ -135,6 +158,15 @@ class PickPlaceHandler:
                     int(getattr(arm, 'tag_id', 0))
                     for arm in assigned_arms
                 ]
+                selected_arm_tag_ids = {
+                    int(getattr(arm, 'arm_index', -1)): int(getattr(arm, 'tag_id', 0))
+                    for arm in assigned_arms
+                    if int(getattr(arm, 'arm_index', -1)) >= 0
+                }
+                task['selected_arm_tag_ids'] = {
+                    str(arm_index): int(tag_id)
+                    for arm_index, tag_id in selected_arm_tag_ids.items()
+                }
                 self.node.get_logger().info(
                     f'Step 6: selected arm_indices={active_arm_indices} tag_ids={selected_tag_ids}'
                 )
@@ -155,7 +187,6 @@ class PickPlaceHandler:
                     return self._build_outcome(task, 'FAILED', 'ALIGN_FAIL', False, source_pick_id=source_pick_id)
 
                 self.node.get_logger().info('Step 7: alignment succeeded')
-                """
                 self.node.get_logger().info(
                     f'Step 8: executing pick sequence for arm_indices={active_arm_indices}'
                 )
@@ -171,22 +202,6 @@ class PickPlaceHandler:
                         active_arm_indices=active_arm_indices,
                     )
 
-                swap_arm_indices = self.swap_arm_indices(task, active_arm_indices)
-                if swap_arm_indices:
-                    self.node.get_logger().info(
-                        f'Step 8b: executing swap sequence for arm_indices={swap_arm_indices}'
-                    )
-                    if not self.execute_swap_sequence(swap_arm_indices):
-                        self.node.get_logger().error('Step 8b: swap sequence failed')
-                        return self._build_outcome(
-                            task,
-                            'FAILED',
-                            'ACTUATION_FAIL',
-                            False,
-                            source_pick_id=source_pick_id,
-                            active_arm_indices=active_arm_indices,
-                        )
-                """
                 self.node.get_logger().info('Step 8: pick sequence succeeded')
                 carry_object = True
             finally:
@@ -231,6 +246,7 @@ class PickPlaceHandler:
                 source_pick_id=source_pick_id,
                 target_drop_id=drop_id,
                 active_arm_indices=active_arm_indices,
+                selected_arm_tag_ids=selected_arm_tag_ids,
             )
 
         self.node.get_logger().info(f'Step 12: navigating to drop {drop_id}')
@@ -251,7 +267,7 @@ class PickPlaceHandler:
                 target_drop_id=drop_id,
                 active_arm_indices=active_arm_indices,
             )        
-            """         if not active_arm_indices:
+        if not active_arm_indices:
             self.node.get_logger().error('Step 13: no active arms available for drop sequence')
             return self._build_outcome(
                 task,
@@ -263,19 +279,48 @@ class PickPlaceHandler:
                 active_arm_indices=active_arm_indices,
             )
 
-        turned_arm_indices = self.turned_arm_indices(task, active_arm_indices)
-        push_arm_indices = self.drop_push_arm_indices(
-            task,
+        occupancy_result = self.evaluate_drop_occupancy(team_color)
+        if occupancy_result == 'drop_full':
+            self.node.get_logger().warn(f'Step 13: drop {drop_id} appears full for team={team_color}, replanning')
+            excluded_ids.add(drop_id)
+            task['excluded_drop_ids'] = sorted(list(excluded_ids))
+            return self._build_outcome(
+                task,
+                'REPLAN_REQUIRED',
+                'DROP_FULL',
+                carry_object,
+                source_pick_id=source_pick_id,
+                target_drop_id=drop_id,
+                active_arm_indices=active_arm_indices,
+                selected_arm_tag_ids=selected_arm_tag_ids,
+            )
+
+        if occupancy_result == 'clear_needed' and not self.clear_drop_position_placeholder(drop_id):
+            return self._build_outcome(
+                task,
+                'FAILED',
+                'DROP_CLEAR_FAIL',
+                carry_object,
+                source_pick_id=source_pick_id,
+                target_drop_id=drop_id,
+                active_arm_indices=active_arm_indices,
+                selected_arm_tag_ids=selected_arm_tag_ids,
+            )
+
+        swap_arm_indices = self.swap_arm_indices_for_team(
             active_arm_indices,
-            turned_arm_indices,
+            selected_arm_tag_ids,
+            team_color,
         )
         self.node.get_logger().info(
             f'Step 13: executing drop sequence for arm_indices={active_arm_indices} '
-            f'turned_arm_indices={turned_arm_indices} '
-            f'push_arm_indices={push_arm_indices}'
+            f'swap_arm_indices={swap_arm_indices}'
         )
-        if not self.execute_place_sequence(active_arm_indices, push_arm_indices=push_arm_indices):
-            self.node.get_logger().warn('Step 13: place sequence failed — object may not be released') """
+        if not self.execute_place_sequence(active_arm_indices, swap_arm_indices=swap_arm_indices):
+            self.node.get_logger().warn('Step 13: place sequence failed — object may not be released')
+
+        if not self.node.move_relative(-0.08, 0.0, 0.0):
+            self.node.get_logger().warn('Step 13b: post-drop retreat move failed, continuing')
         
         self.node.get_logger().info(f'Step 14: task completed successfully, placed at drop {drop_id}')
         return self._build_outcome(
@@ -286,6 +331,7 @@ class PickPlaceHandler:
             source_pick_id=source_pick_id,
             target_drop_id=drop_id,
             active_arm_indices=active_arm_indices,
+            selected_arm_tag_ids=selected_arm_tag_ids,
         )
 
 
@@ -298,8 +344,10 @@ class PickPlaceHandler:
         source_pick_id: str = '',
         target_drop_id: str = '',
         active_arm_indices: Optional[List[int]] = None,
+        selected_arm_tag_ids: Optional[Dict[int, int]] = None,
     ) -> Dict[str, Any]:
         arm_indices = list(active_arm_indices or [])
+        selected_map = selected_arm_tag_ids or self._task_selected_arm_tag_ids(task)
         return {
             'task_id': str(task.get('task_id', 'unknown')),
             'task_type': str(task.get('task_type', 'unknown')),
@@ -310,6 +358,10 @@ class PickPlaceHandler:
             'target_drop_id': target_drop_id,
             'active_arm_index': arm_indices[0] if arm_indices else None,
             'active_arm_indices': arm_indices,
+            'selected_arm_tag_ids': {
+                str(arm_index): int(tag_id)
+                for arm_index, tag_id in selected_map.items()
+            },
         }
 
     def wait_for_sticky_active(self) -> bool:
@@ -385,13 +437,13 @@ class PickPlaceHandler:
     def execute_place_sequence(
         self,
         arm_indices: List[int],
-        push_arm_indices: Optional[List[int]] = None,
+        swap_arm_indices: Optional[List[int]] = None,
     ) -> bool:
         """Execute the configured drop sequence for the selected arms."""
         try:
             steps = self.sequence_builder.build_place_sequence(
                 arm_indices,
-                push_arm_indices=push_arm_indices,
+                swap_arm_indices=swap_arm_indices,
             )
         except RuntimeError as exc:
             self.node.get_logger().error(str(exc))
@@ -419,34 +471,18 @@ class PickPlaceHandler:
                 assigned.append(arm)
         return assigned
 
-    def swap_arm_indices(self, task: dict, active_arm_indices: List[int]) -> List[int]:
-        raw_indices = task.get('swap_arm_indices', task.get('turn_arm_indices', []))
-        if isinstance(raw_indices, list):
-            return [
-                arm_index for arm_index in self._normalize_arm_index_list(raw_indices)
-                if arm_index in active_arm_indices
-            ]
-        if bool(task.get('swap_all_active_arms', False)):
-            return list(active_arm_indices)
-        return []
-
-    def turned_arm_indices(self, task: dict, active_arm_indices: List[int]) -> List[int]:
-        return self.swap_arm_indices(task, active_arm_indices)
-
-    def drop_push_arm_indices(
+    def swap_arm_indices_for_team(
         self,
-        task: dict,
         active_arm_indices: List[int],
-        turned_arm_indices: List[int],
-    ) -> Optional[List[int]]:
-        raw_indices = task.get('drop_push_arm_indices')
-        if isinstance(raw_indices, list):
-            return [
-                arm_index
-                for arm_index in self._normalize_arm_index_list(raw_indices)
-                if arm_index in active_arm_indices
-            ]
-        return list(turned_arm_indices)
+        selected_arm_tag_ids: Dict[int, int],
+        team_color: str,
+    ) -> List[int]:
+        swap_tag_id = 47 if team_color == 'blue' else 36
+        return [
+            arm_index
+            for arm_index in active_arm_indices
+            if int(selected_arm_tag_ids.get(arm_index, -1)) == swap_tag_id
+        ]
 
     def _task_arm_index(self, task: dict) -> Optional[int]:
         raw_value = task.get('active_arm_index')
@@ -463,6 +499,21 @@ class PickPlaceHandler:
             return self._normalize_arm_index_list(raw_indices)
         single_arm_index = self._task_arm_index(task)
         return [] if single_arm_index is None else [single_arm_index]
+
+    def _task_selected_arm_tag_ids(self, task: dict) -> Dict[int, int]:
+        raw_map = task.get('selected_arm_tag_ids')
+        if not isinstance(raw_map, dict):
+            return {}
+
+        normalized: Dict[int, int] = {}
+        for raw_arm_index, raw_tag_id in raw_map.items():
+            try:
+                arm_index = int(raw_arm_index)
+                tag_id = int(raw_tag_id)
+            except (TypeError, ValueError):
+                continue
+            normalized[arm_index] = tag_id
+        return normalized
 
     def _normalize_arm_index_list(self, values: List[Any]) -> List[int]:
         arm_indices = []
@@ -491,6 +542,78 @@ class PickPlaceHandler:
         param = Parameter('sticky_assignment', Parameter.Type.BOOL, bool(enabled))
         future = self.tag_manager_params.set_parameters([param])
         self._wait_for_future(future, timeout_sec=0.5)
+
+    def get_team_color(self) -> str:
+        if self._cached_team_color:
+            return self._cached_team_color
+
+        if not self.game_state_params.wait_for_services(timeout_sec=0.3):
+            self.node.get_logger().warn('Game state parameter service unavailable, defaulting team_color=blue')
+            self._cached_team_color = 'blue'
+            return self._cached_team_color
+
+        future = self.game_state_params.get_parameters(['team_color'])
+        if not self._wait_for_future(future, timeout_sec=0.5):
+            self.node.get_logger().warn('team_color parameter request timed out, defaulting team_color=blue')
+            self._cached_team_color = 'blue'
+            return self._cached_team_color
+
+        result = future.result()
+        if not result or not getattr(result, 'values', None):
+            self.node.get_logger().warn('team_color parameter missing, defaulting team_color=blue')
+            self._cached_team_color = 'blue'
+            return self._cached_team_color
+
+        value = str(result.values[0].string_value)
+        if not value:
+            self.node.get_logger().warn('team_color empty, defaulting team_color=blue')
+            value = 'blue'
+        self._cached_team_color = value
+        self.node.get_logger().info(f'Using persistent team_color={self._cached_team_color}')
+        return self._cached_team_color
+
+    def evaluate_drop_occupancy(self, team_color: str) -> str:
+        max_age = float(self.node.get_parameter('detected_tags_max_age_sec').value)
+        if self.latest_detected_tags is None or (time.time() - self._latest_detected_tags_stamp) > max_age:
+            self.node.get_logger().warn('Detected tags stale/unavailable; skipping drop occupancy gate')
+            return 'unknown'
+
+        team_tag_id = 36 if team_color == 'blue' else 47
+        non_team_tag_id = 47 if team_tag_id == 36 else 36
+        tag_ids = [
+            int(tag.tag_id)
+            for tag in self.latest_detected_tags.tags
+            if int(tag.tag_id) in (36, 47)
+        ]
+
+        team_count = sum(1 for tag_id in tag_ids if tag_id == team_tag_id)
+        non_team_count = sum(1 for tag_id in tag_ids if tag_id == non_team_tag_id)
+
+        if non_team_count > 0:
+            self.node.get_logger().info(
+                f'Drop occupancy: non-team tags detected (team={team_count}, non_team={non_team_count}), clear needed'
+            )
+            return 'clear_needed'
+
+        if team_count > non_team_count and team_count > 0:
+            self.node.get_logger().info(
+                f'Drop occupancy: team-tag strict majority (team={team_count}, non_team={non_team_count}), drop full'
+            )
+            return 'drop_full'
+
+        self.node.get_logger().info(
+            f'Drop occupancy: no strict team majority (team={team_count}, non_team={non_team_count}), proceed'
+        )
+        return 'proceed'
+
+    def clear_drop_position_placeholder(self, drop_id: str) -> bool:
+        """Temporary drop-clear hook for future implementation."""
+        wait_sec = float(self.node.get_parameter('drop_clear_wait_sec').value)
+        self.node.get_logger().warn(
+            f'Drop {drop_id}: clear-drop placeholder invoked (TODO implementation), waiting {wait_sec:.2f}s'
+        )
+        time.sleep(max(0.0, wait_sec))
+        return True
 
     def extract_approach_positions(self, task: dict) -> List[dict]:
         """Return priority-ordered approach poses for the selected pick target."""

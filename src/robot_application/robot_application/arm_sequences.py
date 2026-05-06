@@ -88,14 +88,14 @@ class ArmSequenceBuilder:
     def build_place_sequence(
         self,
         arm_indices: Iterable[int],
-        push_arm_indices: Optional[Iterable[int]] = None,
+        swap_arm_indices: Optional[Iterable[int]] = None,
     ) -> list:
-        return self.build_drop_sequence(arm_indices, push_arm_indices=push_arm_indices)
+        return self.build_drop_sequence(arm_indices, swap_arm_indices=swap_arm_indices)
 
     def build_drop_sequence(
         self,
         arm_indices: Iterable[int],
-        push_arm_indices: Optional[Iterable[int]] = None,
+        swap_arm_indices: Optional[Iterable[int]] = None,
     ) -> list:
         if not _HAS_ACTUATOR_STEP:
             raise RuntimeError('ActuatorStep message unavailable')
@@ -104,14 +104,14 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
 
-        pusher_groups = self._resolve_pusher_groups(end_effectors, push_arm_indices)
+        swap_effectors = self._resolve_swap_end_effectors(end_effectors, swap_arm_indices)
 
         return [
-            *self._build_lower_steps(end_effectors, use_place_pose=True),
-            *self._build_pump_steps(end_effectors, enable=False, parallel_group=2),
-            *self._build_group_pusher_steps(pusher_groups, target='push', parallel_group=3),
-            *self._build_raise_steps(end_effectors, parallel_group=4),
-            *self._build_group_pusher_steps(pusher_groups, target='stow', parallel_group=4),
+            *self._build_lift_steps(end_effectors, to_down=True, parallel_group=1),
+            *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=2),
+            *self._build_lift_steps(end_effectors, to_down=True, parallel_group=3),
+            *self._build_pwm_steps(end_effectors, target='place', parallel_group=3),
+            *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
         ]
 
     def _resolve_end_effectors(self, arm_indices: Iterable[int]) -> list[EndEffectorConfig]:
@@ -124,22 +124,19 @@ class ArmSequenceBuilder:
                 seen.add(normalized_arm_index)
         return [self.get_end_effector(arm_index) for arm_index in unique_arm_indices]
 
-    def _resolve_pusher_groups(
+    def _resolve_swap_end_effectors(
         self,
         end_effectors: list[EndEffectorConfig],
-        push_arm_indices: Optional[Iterable[int]],
-    ) -> list[LiftGroupConfig]:
-        if push_arm_indices is None:
+        swap_arm_indices: Optional[Iterable[int]],
+    ) -> list[EndEffectorConfig]:
+        if swap_arm_indices is None:
             return []
 
-        requested_group_indices = {
-            self.get_end_effector(arm_index).group_index
-            for arm_index in push_arm_indices
-        }
-        active_group_indices = {eff.group_index for eff in end_effectors}
+        requested = {int(arm_index) for arm_index in swap_arm_indices}
         return [
-            get_lift_group_config(group_index)
-            for group_index in sorted(requested_group_indices & active_group_indices)
+            end_effector
+            for end_effector in end_effectors
+            if end_effector.arm_index in requested
         ]
 
     def _build_lower_steps(
@@ -147,16 +144,7 @@ class ArmSequenceBuilder:
         end_effectors: list[EndEffectorConfig],
         use_place_pose: bool,
     ) -> list:
-        steps = []
-        for lift_group in self._unique_groups(end_effectors):
-            steps.append(
-                self._make_move_step(
-                    lift_group.lift_servo_id,
-                    lift_group.down_angle_deg,
-                    lift_group.speed_deg_s,
-                    parallel_group=1,
-                )
-            )
+        steps = [*self._build_lift_steps(end_effectors, to_down=True, parallel_group=1)]
         target_name = 'place' if use_place_pose else 'pick'
         steps.extend(self._build_pwm_steps(end_effectors, target=target_name, parallel_group=1))
         return steps
@@ -167,16 +155,7 @@ class ArmSequenceBuilder:
         parallel_group: int,
         stow_end_effectors: Optional[list[EndEffectorConfig]] = None,
     ) -> list:
-        steps = []
-        for lift_group in self._unique_groups(end_effectors):
-            steps.append(
-                self._make_move_step(
-                    lift_group.lift_servo_id,
-                    lift_group.up_angle_deg,
-                    lift_group.speed_deg_s,
-                    parallel_group=parallel_group,
-                )
-            )
+        steps = [*self._build_lift_steps(end_effectors, to_down=False, parallel_group=parallel_group)]
         steps.extend(
             self._build_pwm_steps(
                 stow_end_effectors or end_effectors,
@@ -184,6 +163,25 @@ class ArmSequenceBuilder:
                 parallel_group=parallel_group,
             )
         )
+        return steps
+
+    def _build_lift_steps(
+        self,
+        end_effectors: list[EndEffectorConfig],
+        to_down: bool,
+        parallel_group: int,
+    ) -> list:
+        steps = []
+        for lift_group in self._unique_groups(end_effectors):
+            target_deg = lift_group.down_angle_deg if to_down else lift_group.up_angle_deg
+            steps.append(
+                self._make_move_step(
+                    lift_group.lift_servo_id,
+                    target_deg,
+                    lift_group.speed_deg_s,
+                    parallel_group=parallel_group,
+                )
+            )
         return steps
 
     def _build_pump_steps(
@@ -200,31 +198,6 @@ class ArmSequenceBuilder:
             )
             for end_effector in end_effectors
         ]
-
-    def _build_group_pusher_steps(
-        self,
-        lift_groups: list[LiftGroupConfig],
-        target: str,
-        parallel_group: int,
-    ) -> list:
-        steps = []
-        for lift_group in lift_groups:
-            if lift_group.pusher_pwm_channel < 0:
-                continue
-            pwm_target = (
-                lift_group.pusher_push_deg
-                if target == 'push'
-                else lift_group.pusher_stow_deg
-            )
-            steps.append(
-                self._make_pwm_servo_step(
-                    lift_group.pusher_pwm_channel,
-                    pwm_target,
-                    settle_sec=lift_group.pusher_settle_sec,
-                    parallel_group=parallel_group,
-                )
-            )
-        return steps
 
     def _build_pwm_steps(
         self,

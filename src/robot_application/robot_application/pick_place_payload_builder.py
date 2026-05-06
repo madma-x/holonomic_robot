@@ -60,6 +60,10 @@ class PickPlacePayloadBuilder:
             'active_arm_indices',
             continuation_payload.get('active_arm_indices', []),
         )
+        continuation_payload['selected_arm_tag_ids'] = outcome.get(
+            'selected_arm_tag_ids',
+            continuation_payload.get('selected_arm_tag_ids', {}),
+        )
         continuation_payload['excluded_drop_ids'] = list(excluded_ids)
         continuation_payload['full_drop_ids'] = list(full_drop_ids)
         continuation_payload['drop_positions'] = [next_drop] + [

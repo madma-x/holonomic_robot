@@ -14,6 +14,13 @@ import threading
 from enum import Enum
 
 try:
+    from aruco_interfaces.srv import MoveRelative
+    HAS_MOVE_RELATIVE = True
+except ImportError:
+    MoveRelative = None
+    HAS_MOVE_RELATIVE = False
+
+try:
     from robot_actuators.action import MoveServo, ControlPump, ExecuteSequence
     from robot_actuators.msg import ActuatorStep
     HAS_ROBOT_ACTUATORS = True
@@ -80,6 +87,11 @@ class MissionBase(Node):
                 self.get_logger().warn('MissionBase running with mock actuators enabled')
             else:
                 self.get_logger().warn('robot_actuators package unavailable; actuator actions disabled')
+
+        if HAS_MOVE_RELATIVE:
+            self.move_relative_client = self.create_client(MoveRelative, 'move_relative')
+        else:
+            self.move_relative_client = None
         
         # Services
         self.load_srv = self.create_service(
@@ -393,6 +405,58 @@ class MissionBase(Node):
                 f'Sequence failed at step {res.result.failed_step}: {res.result.message}'
             )
         return bool(res.result.success)
+
+    def move_relative(
+        self,
+        target_x_m: float,
+        target_y_m: float,
+        target_yaw_rad: float,
+        pos_tolerance_m: float = 0.02,
+        yaw_tolerance_rad: float = 0.05,
+        timeout_s: float = 6.0,
+        max_linear_speed_mps: float = 0.2,
+        max_angular_speed_rps: float = 0.5,
+    ) -> bool:
+        """Move robot relative to current frame using motion_controller service."""
+        if self.mock_navigation:
+            self.get_logger().info(
+                f'[MOCK] move_relative x={target_x_m:.3f} y={target_y_m:.3f} yaw={target_yaw_rad:.3f}'
+            )
+            return True
+
+        if self.move_relative_client is None:
+            self.get_logger().error('MoveRelative service client unavailable')
+            return False
+
+        if not self.move_relative_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error('MoveRelative service not available')
+            return False
+
+        request = MoveRelative.Request()
+        request.target_x_m = float(target_x_m)
+        request.target_y_m = float(target_y_m)
+        request.target_yaw_rad = float(target_yaw_rad)
+        request.pos_tolerance_m = float(pos_tolerance_m)
+        request.yaw_tolerance_rad = float(yaw_tolerance_rad)
+        request.timeout_s = float(timeout_s)
+        request.max_linear_speed_mps = float(max_linear_speed_mps)
+        request.max_angular_speed_rps = float(max_angular_speed_rps)
+
+        future = self.move_relative_client.call_async(request)
+        if not self._wait_for_future(future, timeout_sec=max(2.0, timeout_s + 1.0)):
+            self.get_logger().error('MoveRelative service call timed out')
+            return False
+
+        response = future.result()
+        if response is None:
+            self.get_logger().error('MoveRelative returned no response')
+            return False
+
+        if not response.success:
+            self.get_logger().warn(f'MoveRelative failed: {response.status_message}')
+        else:
+            self.get_logger().info(f'MoveRelative succeeded: {response.status_message}')
+        return bool(response.success)
 
     def call_service_async(self, service_name: str, srv_type):
         """Helper to call a service asynchronously."""
