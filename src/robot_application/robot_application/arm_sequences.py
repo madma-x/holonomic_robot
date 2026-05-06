@@ -67,9 +67,9 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
         return [
-            *self._build_lower_steps(end_effectors, use_place_pose=False),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=0.0, parallel_group=1),
             *self._build_pump_steps(end_effectors, enable=True, parallel_group=2),
-            *self._build_raise_steps(end_effectors, parallel_group=3),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=100.0, parallel_group=3),
         ]
 
     def build_swap_sequence(self, arm_indices: Iterable[int]) -> list:
@@ -107,10 +107,9 @@ class ArmSequenceBuilder:
         swap_effectors = self._resolve_swap_end_effectors(end_effectors, swap_arm_indices)
 
         return [
-            *self._build_lift_steps(end_effectors, to_down=True, parallel_group=1),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=45.0, parallel_group=1),
             *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=2),
-            *self._build_lift_steps(end_effectors, to_down=True, parallel_group=3),
-            *self._build_pwm_steps(end_effectors, target='place', parallel_group=3),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=0.0, parallel_group=3),
             *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
         ]
 
@@ -174,6 +173,24 @@ class ArmSequenceBuilder:
         steps = []
         for lift_group in self._unique_groups(end_effectors):
             target_deg = lift_group.down_angle_deg if to_down else lift_group.up_angle_deg
+            steps.append(
+                self._make_move_step(
+                    lift_group.lift_servo_id,
+                    target_deg,
+                    lift_group.speed_deg_s,
+                    parallel_group=parallel_group,
+                )
+            )
+        return steps
+
+    def _build_lift_steps_to_angle(
+        self,
+        end_effectors: list[EndEffectorConfig],
+        target_deg: float,
+        parallel_group: int,
+    ) -> list:
+        steps = []
+        for lift_group in self._unique_groups(end_effectors):
             steps.append(
                 self._make_move_step(
                     lift_group.lift_servo_id,
