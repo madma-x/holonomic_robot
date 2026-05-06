@@ -28,6 +28,16 @@ def generate_launch_description():
         )
     )
 
+    aruco_localization_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('aruco_localization'),
+                'launch',
+                'aruco_localization.launch.py',
+            ])
+        )
+    )
+
     motion_controller_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -68,6 +78,7 @@ def generate_launch_description():
         ),
         can_interface_launch,
         aruco_manager_launch,
+        aruco_localization_launch,
         motion_controller_launch,
         aruco_pose_debug_launch,
     ])

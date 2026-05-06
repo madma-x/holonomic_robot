@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_ros/transform_broadcaster.h>
@@ -46,12 +47,44 @@ public:
       "/localization_tags", 10,
       std::bind(&LocalizationNode::tags_callback, this, std::placeholders::_1));
 
+    initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/initialpose", 10,
+      std::bind(&LocalizationNode::initial_pose_callback, this, std::placeholders::_1));
+
     double rate = get_parameter("broadcast_rate_hz").as_double();
     broadcast_timer_ = create_wall_timer(
       std::chrono::milliseconds(static_cast<int>(1000.0 / rate)),
       std::bind(&LocalizationNode::broadcast_tf, this));
 
     RCLCPP_INFO(get_logger(), "aruco_localization_node started");
+  }
+
+  void initial_pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+  {
+    if (!msg->header.frame_id.empty() && msg->header.frame_id != "map") {
+      RCLCPP_WARN(
+        get_logger(),
+        "Ignoring /initialpose in frame '%s' (expected 'map')",
+        msg->header.frame_id.c_str());
+      return;
+    }
+
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = now();
+    tf.header.frame_id = "map";
+    tf.child_frame_id = "odom";
+    tf.transform.translation.x = msg->pose.pose.position.x;
+    tf.transform.translation.y = msg->pose.pose.position.y;
+    tf.transform.translation.z = 0.0;
+    tf.transform.rotation = msg->pose.pose.orientation;
+
+    last_tf_ = tf;
+    has_correction_ = true;
+    RCLCPP_INFO(
+      get_logger(),
+      "map->odom initialized from /initialpose: x=%.3f y=%.3f",
+      tf.transform.translation.x,
+      tf.transform.translation.y);
   }
 
 private:
@@ -128,6 +161,7 @@ private:
   std::map<uint32_t, TagWorldPose>                                   tag_world_poses_;
   std::unique_ptr<tf2_ros::TransformBroadcaster>                     tf_broadcaster_;
   rclcpp::Subscription<aruco_interfaces::msg::DetectedTagArray>::SharedPtr localization_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_;
   rclcpp::TimerBase::SharedPtr                                        broadcast_timer_;
   geometry_msgs::msg::TransformStamped                               last_tf_;
   bool has_correction_;

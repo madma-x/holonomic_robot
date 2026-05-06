@@ -1,11 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include "can_interface/msg/can_frame.hpp"
-#include <nav_msgs/msg/odometry.hpp>
-#include <tf2/LinearMath/Quaternion.h>
-#include <tf2_ros/transform_broadcaster.hpp>
-#include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -21,30 +16,18 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include <mutex>
 
 class CANBridge : public rclcpp::Node
 {
 public:
-    CANBridge() : Node("can_bridge"),
-        tf_broadcaster_(std::make_unique<tf2_ros::TransformBroadcaster>(*this)),
-        odom_x_(0.0), odom_y_(0.0), odom_theta_(0.0),
-        last_vx_(0.0), last_vy_(0.0), last_wz_(0.0)
+    CANBridge() : Node("can_bridge")
     {
-        odom_x_ = declare_parameter("initial_x", 0.2);
-        odom_y_ = declare_parameter("initial_y", 0.2);
-        odom_theta_ = declare_parameter("initial_yaw", 0.0);
-
         init_can();
         init_motors();
 
         cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10,
             std::bind(&CANBridge::cmd_callback, this, std::placeholders::_1));
-
-        initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-            "/initialpose", 10,
-            std::bind(&CANBridge::initial_pose_callback, this, std::placeholders::_1));
 
         can_tx_sub_ = create_subscription<can_interface::msg::CanFrame>(
             "/can_tx", 10,
@@ -53,22 +36,10 @@ public:
         can_rx_pub_ = create_publisher<can_interface::msg::CanFrame>(
             "/can_rx", 10);
 
-        odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
-
-        last_odom_time_ = now();
-
-        // 50 Hz dead-reckoning odometry from cmd_vel integration
-        odom_timer_ = create_wall_timer(
-            std::chrono::milliseconds(20),
-            std::bind(&CANBridge::publish_odom, this));
-
         running_ = true;
         rx_thread_ = std::thread(&CANBridge::rx_loop, this);
 
-        RCLCPP_INFO(
-            get_logger(),
-            "CAN Bridge started (initial pose: x=%.3f, y=%.3f, yaw=%.3f rad, waiting for /initialpose or tracker)",
-            odom_x_, odom_y_, odom_theta_);
+        RCLCPP_INFO(get_logger(), "CAN Bridge started");
     }
 
     ~CANBridge()
@@ -85,99 +56,8 @@ private:
     std::atomic<bool> running_;
 
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_;
     rclcpp::Subscription<can_interface::msg::CanFrame>::SharedPtr can_tx_sub_;
     rclcpp::Publisher<can_interface::msg::CanFrame>::SharedPtr can_rx_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
-    rclcpp::TimerBase::SharedPtr odom_timer_;
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
-    // Dead-reckoning state
-    double odom_x_, odom_y_, odom_theta_;
-    double last_vx_, last_vy_, last_wz_;
-    rclcpp::Time last_odom_time_;
-    std::mutex odom_mutex_;
-    std::atomic<bool> tracker_odom_active_{false};
-
-    static double quaternion_to_yaw(const geometry_msgs::msg::Quaternion & q)
-    {
-        return std::atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-    }
-
-    static double normalize_angle(double angle)
-    {
-        return std::atan2(std::sin(angle), std::cos(angle));
-    }
-
-    void publish_odom_message(
-        const rclcpp::Time & stamp,
-        double x,
-        double y,
-        double theta,
-        double vx,
-        double vy,
-        double wz)
-    {
-        tf2::Quaternion q;
-        q.setRPY(0, 0, theta);
-
-        nav_msgs::msg::Odometry odom;
-        odom.header.stamp = stamp;
-        odom.header.frame_id = "odom";
-        odom.child_frame_id = "base_footprint";
-        odom.pose.pose.position.x = x;
-        odom.pose.pose.position.y = y;
-        odom.pose.pose.position.z = 0.0;
-        odom.pose.pose.orientation.x = q.x();
-        odom.pose.pose.orientation.y = q.y();
-        odom.pose.pose.orientation.z = q.z();
-        odom.pose.pose.orientation.w = q.w();
-        odom.twist.twist.linear.x = vx;
-        odom.twist.twist.linear.y = vy;
-        odom.twist.twist.angular.z = wz;
-        // odom_pub_->publish(odom);  // Disabled: odometry is now published by Raspberry Pi
-
-        geometry_msgs::msg::TransformStamped tf;
-        tf.header.stamp = stamp;
-        tf.header.frame_id = "odom";
-        tf.child_frame_id = "base_footprint";
-        tf.transform.translation.x = x;
-        tf.transform.translation.y = y;
-        tf.transform.translation.z = 0.0;
-        tf.transform.rotation = odom.pose.pose.orientation;
-        tf_broadcaster_->sendTransform(tf);
-    }
-
-    void set_pose(double x, double y, double theta, bool reset_velocity)
-    {
-        const auto stamp = now();
-        double vx;
-        double vy;
-        double wz;
-
-        {
-            std::lock_guard<std::mutex> lock(odom_mutex_);
-            odom_x_ = x;
-            odom_y_ = y;
-            odom_theta_ = normalize_angle(theta);
-            last_odom_time_ = stamp;
-
-            if (reset_velocity)
-            {
-                last_vx_ = 0.0;
-                last_vy_ = 0.0;
-                last_wz_ = 0.0;
-            }
-
-            vx = last_vx_;
-            vy = last_vy_;
-            wz = last_wz_;
-        }
-
-        publish_odom_message(stamp, x, y, normalize_angle(theta), vx, vy, wz);
-    }
 
     void init_can()
     {
@@ -266,86 +146,12 @@ private:
         write(can_socket_, &frame, sizeof(frame));
     }
 
-    void publish_odom()
-    {
-        if (tracker_odom_active_)
-        {
-            return;
-        }
-
-        rclcpp::Time current_time = now();
-        double dt;
-        double x;
-        double y;
-        double theta;
-        double vx, vy, wz;
-
-        {
-            std::lock_guard<std::mutex> lock(odom_mutex_);
-            dt = (current_time - last_odom_time_).seconds();
-            last_odom_time_ = current_time;
-            vx = last_vx_;
-            vy = last_vy_;
-            wz = last_wz_;
-
-            // Integrate pose in world frame (holonomic: vx/vy are robot-frame velocities)
-            const double delta_x = (vx * std::cos(odom_theta_) - vy * std::sin(odom_theta_)) * dt;
-            const double delta_y = (vx * std::sin(odom_theta_) + vy * std::cos(odom_theta_)) * dt;
-            const double delta_theta = wz * dt;
-
-            odom_x_ += delta_x;
-            odom_y_ += delta_y;
-            odom_theta_ = normalize_angle(odom_theta_ + delta_theta);
-
-            x = odom_x_;
-            y = odom_y_;
-            theta = odom_theta_;
-        }
-
-        publish_odom_message(current_time, x, y, theta, vx, vy, wz);
-    }
-
-    void initial_pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
-    {
-        if (!msg->header.frame_id.empty() &&
-            msg->header.frame_id != "map" &&
-            msg->header.frame_id != "odom")
-        {
-            RCLCPP_WARN(
-                get_logger(),
-                "Ignoring /initialpose in frame '%s' (expected 'map' or 'odom')",
-                msg->header.frame_id.c_str());
-            return;
-        }
-
-        tracker_odom_active_ = false;
-
-        const double x = msg->pose.pose.position.x;
-        const double y = msg->pose.pose.position.y;
-        const double theta = quaternion_to_yaw(msg->pose.pose.orientation);
-
-        set_pose(x, y, theta, true);
-
-        RCLCPP_INFO(
-            get_logger(),
-            "Odometry pose set from /initialpose: x=%.3f, y=%.3f, yaw=%.3f rad",
-            x, y, theta);
-    }
-
     // Motor command for three-wheel holonomic robot (120° spacing)
     void cmd_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
     {
         double v_x = msg->linear.x;
         double v_y = msg->linear.y;
         double w_z = msg->angular.z;
-
-        // Store velocities for odometry integration
-        {
-            std::lock_guard<std::mutex> lock(odom_mutex_);
-            last_vx_ = v_x;
-            last_vy_ = v_y;
-            last_wz_ = w_z;
-        }
 
         const double wheel_radius = 0.03;
         const double robot_radius = 0.125;  // distance from center to wheel
@@ -427,22 +233,6 @@ private:
                     can_rx_pub_->publish(msg);
                 }
 
-                // -------------------------
-                // Movement tracker (ID 4)
-                // -------------------------
-                else if (id == 4 && frame.can_dlc >= 8)
-                {
-                    float x, y;
-
-                    std::memcpy(&x, &frame.data[0], sizeof(float));
-                    std::memcpy(&y, &frame.data[4], sizeof(float));
-
-                    // If tracker provides theta, decode it here.
-                    // For now assume theta = 0:
-                    double theta = 0.0;
-                    tracker_odom_active_ = true;
-                    set_pose(x, y, theta, false);
-                }
             }
         }
     }
