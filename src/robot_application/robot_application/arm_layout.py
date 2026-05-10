@@ -14,7 +14,8 @@ class LiftGroupConfig:
     group_index: int
     lift_servo_id: int
     member_arm_indices: tuple[int, int]
-    down_angle_deg: float
+    down_pick_angle_deg: float
+    down_place_angle_deg: float
     up_angle_deg: float
     speed_deg_s: float
 
@@ -42,16 +43,18 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         group_index=0,
         lift_servo_id=1,
         member_arm_indices=(0, 1),
-        down_angle_deg=160.0,
-        up_angle_deg=90.0,
+        down_pick_angle_deg=160.0,
+        down_place_angle_deg=155.0,
+        up_angle_deg=85.0,
         speed_deg_s=50.0,
     ),
     1: LiftGroupConfig(
         group_index=1,
         lift_servo_id=2,
         member_arm_indices=(2, 3),
-        down_angle_deg=155.0,
-        up_angle_deg=85.0,
+        down_pick_angle_deg=155.0,
+        down_place_angle_deg=150.0,
+        up_angle_deg=80.0,
         speed_deg_s=50.0,
     ),
 }

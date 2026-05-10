@@ -68,6 +68,6 @@ def generate_launch_description():
         ),
         can_interface_launch,
         aruco_manager_launch,
-        aruco_alignment_launch,
+        motion_controller_launch,
         aruco_pose_debug_launch,
     ])

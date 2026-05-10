@@ -31,6 +31,7 @@ public:
         this->declare_parameter<double>("pid_xy.kd", 0.1);
         this->declare_parameter<double>("pid_xy.max_integral_error", 0.5);
         this->declare_parameter<double>("pid_xy.max_velocity", 0.1);
+        this->declare_parameter<double>("alignment_max_linear_velocity", 0.2);
         this->declare_parameter<double>("pid_theta.kp", 0.0);
         this->declare_parameter<double>("pid_theta.ki", 0.0);
         this->declare_parameter<double>("pid_theta.kd", 0.0);
@@ -39,6 +40,7 @@ public:
         this->declare_parameter<int>("final_stop_hold_ms", 1000);
         this->declare_parameter<double>("pos_tolerance", 0.02);
         this->declare_parameter<double>("ang_tolerance", 0.05);
+        this->declare_parameter<double>("alignment_max_angular_velocity", 0.5);
         this->declare_parameter<bool>("verbose_logging", false);
         this->declare_parameter<std::string>("cluster_topic", "/aruco_manager/cluster_pickability");
         this->declare_parameter<std::string>("odometry_topic", "/odom");
@@ -47,6 +49,10 @@ public:
         // Get parameters
         double control_rate = this->get_parameter("control_loop_rate").as_double();
         cluster_timeout_ms_ = this->get_parameter("cluster_timeout_ms").as_int();
+        alignment_max_linear_velocity_ = this->get_parameter("alignment_max_linear_velocity").as_double();
+        alignment_max_angular_velocity_ = this->get_parameter("alignment_max_angular_velocity").as_double();
+        pid_xy_max_velocity_ = this->get_parameter("pid_xy.max_velocity").as_double();
+        pid_theta_max_angular_velocity_ = this->get_parameter("pid_theta.max_angular_velocity").as_double();
         pos_tolerance_ = this->get_parameter("pos_tolerance").as_double();
         ang_tolerance_ = this->get_parameter("ang_tolerance").as_double();
         verbose_logging_ = this->get_parameter("verbose_logging").as_bool();
@@ -145,6 +151,7 @@ private:
     bool session_complete_ = false;
     bool session_success_ = false;
     std::string session_message_;
+    double session_alignment_threshold_m_ = 0.0;
 
     // Relative move state (used when session_state_ == REL_MOVE_ACTIVE)
     struct RelativeMoveTarget {
@@ -172,6 +179,8 @@ private:
         double x, y, theta;
     };
     PoseXY last_confident_pose_{0.0, 0.0, 0.0};
+    PoseXY last_alignment_error_pose_{0.0, 0.0, 0.0};
+    bool have_last_alignment_error_pose_ = false;
     bool have_confident_pose_ = false;
     PoseXY frozen_loss_target_{0.0, 0.0, 0.0};
     PoseXY frozen_loss_target_world_{0.0, 0.0, 0.0};
@@ -186,6 +195,10 @@ private:
     int cluster_timeout_ms_;
     int final_stop_hold_ms_;
     double pos_tolerance_, ang_tolerance_;
+    double alignment_max_linear_velocity_;
+    double alignment_max_angular_velocity_;
+    double pid_xy_max_velocity_;
+    double pid_theta_max_angular_velocity_;
     bool verbose_logging_ = false;
     rclcpp::Time stop_hold_until_;
 
@@ -312,6 +325,11 @@ private:
         session_state_ = SessionState::ALIGN_ACTIVE;
         session_complete_ = false;
         session_success_ = false;
+        session_alignment_threshold_m_ =
+            (std::isfinite(request->alignment_threshold) && request->alignment_threshold > 0.0f)
+                ? static_cast<double>(request->alignment_threshold)
+                : pos_tolerance_;
+        have_last_alignment_error_pose_ = false;
         stop_hold_until_ = this->now();
         
         // Keep a recent matching cluster sample if available
@@ -353,10 +371,11 @@ private:
 
         // Populate response
         response->success = session_success_;
-        response->final_correction.x = last_confident_pose_.x;
-        response->final_correction.y = last_confident_pose_.y;
-        response->final_correction.z = last_confident_pose_.theta;
-        response->final_magnitude = std::hypot(last_confident_pose_.x, last_confident_pose_.y);
+        const PoseXY& final_pose = have_last_alignment_error_pose_ ? last_alignment_error_pose_ : last_confident_pose_;
+        response->final_correction.x = final_pose.x;
+        response->final_correction.y = final_pose.y;
+        response->final_correction.z = final_pose.theta;
+        response->final_magnitude = std::hypot(final_pose.x, final_pose.y);
         response->status_message = session_message_;
 
         // Transition to stopping state
@@ -409,8 +428,14 @@ private:
         rel_move_target_.pos_tolerance_m = request->pos_tolerance_m;
         rel_move_target_.yaw_tolerance_rad = request->yaw_tolerance_rad;
         rel_move_target_.timeout_s = request->timeout_s;
-        rel_move_target_.max_linear_speed_mps = request->max_linear_speed_mps;
-        rel_move_target_.max_angular_speed_rps = request->max_angular_speed_rps;
+        rel_move_target_.max_linear_speed_mps =
+            (request->max_linear_speed_mps > 0.0f)
+                ? std::min(static_cast<double>(request->max_linear_speed_mps), pid_xy_max_velocity_)
+                : pid_xy_max_velocity_;
+        rel_move_target_.max_angular_speed_rps =
+            (request->max_angular_speed_rps > 0.0f)
+                ? std::min(static_cast<double>(request->max_angular_speed_rps), pid_theta_max_angular_velocity_)
+                : pid_theta_max_angular_velocity_;
 
         // Reset PID controllers
         pid_x_->reset();
@@ -582,10 +607,16 @@ private:
         // Use correction directly as robot-frame error.
         const double error_x = error_pose.x;
         const double error_y = error_pose.y;
+        const double error_theta = error_pose.theta;
+        last_alignment_error_pose_ = error_pose;
+        have_last_alignment_error_pose_ = true;
 
         // Check convergence
+        const double active_pos_tolerance =
+            (session_alignment_threshold_m_ > 0.0) ? session_alignment_threshold_m_ : pos_tolerance_;
         double pos_error = std::hypot(error_x, error_y);
-        if (pos_error < pos_tolerance_) {
+        double ang_error = std::abs(error_theta);
+        if (pos_error < active_pos_tolerance && ang_error < ang_tolerance_) {
             auto cmd_msg = geometry_msgs::msg::Twist();
             cmd_vel_pub_->publish(cmd_msg);
             session_complete_ = true;
@@ -593,8 +624,8 @@ private:
             session_message_ = "Alignment successful";
             if (verbose_logging_) {
                 RCLCPP_INFO(this->get_logger(),
-                    "Alignment converged: pos_err=%.4f (tol=%.4f)",
-                    pos_error, pos_tolerance_);
+                    "Alignment converged: pos_err=%.4f (tol=%.4f), yaw_err=%.4f (tol=%.4f)",
+                    pos_error, active_pos_tolerance, ang_error, ang_tolerance_);
             }
             return;
         }
@@ -609,7 +640,22 @@ private:
         // motion that reduces the observed robot-frame offset.
         double cmd_vx = pid_x_->update(-error_x, dt);
         double cmd_vy = pid_y_->update(-error_y, dt);
-        double cmd_omega = 0.0; // yaw control disabled
+        double cmd_omega = pid_theta_->update(-error_theta, dt);
+
+        if (alignment_max_linear_velocity_ > 0.0) {
+            double linear_speed = std::hypot(cmd_vx, cmd_vy);
+            if (linear_speed > alignment_max_linear_velocity_ && linear_speed > 1e-6) {
+                double scale = alignment_max_linear_velocity_ / linear_speed;
+                cmd_vx *= scale;
+                cmd_vy *= scale;
+            }
+        }
+
+        if (alignment_max_angular_velocity_ > 0.0) {
+            cmd_omega = std::clamp(cmd_omega,
+                                   -alignment_max_angular_velocity_,
+                                   alignment_max_angular_velocity_);
+        }
 
         // Publish command
         auto cmd_msg = geometry_msgs::msg::Twist();
@@ -620,8 +666,8 @@ private:
 
         if (verbose_logging_) {
             RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                "Alignment control: pos_err=(%.4f, %.4f), cmd_vel=(%.3f, %.3f, %.3f)",
-                error_x, error_y, cmd_vx, cmd_vy, cmd_omega);
+                "Alignment control: pos_err=(%.4f, %.4f), yaw_err=%.4f, cmd_vel=(%.3f, %.3f, %.3f)",
+                error_x, error_y, error_theta, cmd_vx, cmd_vy, cmd_omega);
         }
     }
 

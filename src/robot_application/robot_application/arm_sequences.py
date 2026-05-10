@@ -67,7 +67,7 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
         return [
-            *self._build_lift_steps(end_effectors, target='down', parallel_group=1),
+            *self._build_lift_steps(end_effectors, target='down_pick', parallel_group=1),
             *self._build_pwm_steps(end_effectors, target='pick', parallel_group=1),
             *self._build_pump_steps(end_effectors, enable=True, parallel_group=2),
             *self._build_lift_steps(end_effectors, target='up', parallel_group=3),
@@ -126,7 +126,7 @@ class ArmSequenceBuilder:
         return [
             *self._build_lift_steps(end_effectors, target='up', parallel_group=1),
             *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=2),
-            *self._build_lift_steps(end_effectors, target='down', parallel_group=2),
+            *self._build_lift_steps(end_effectors, target='down_place', parallel_group=2),
             *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
         ]
 
@@ -233,8 +233,10 @@ class ArmSequenceBuilder:
         raise ValueError(f'Unknown PWM target {target}')
 
     def _lift_target_deg(self, lift_group: LiftGroupConfig, target: str) -> float:
-        if target == 'down':
-            return lift_group.down_angle_deg
+        if target == 'down_pick':
+            return lift_group.down_pick_angle_deg
+        if target == 'down_place':
+            return lift_group.down_place_angle_deg
         if target == 'up':
             return lift_group.up_angle_deg
         if target == 'approach':
