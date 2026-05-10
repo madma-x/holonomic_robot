@@ -5,7 +5,7 @@ tag_manager_node:
     # IDs of fixed positioning tags for global localization
     localization_tag_ids: [20]
     # X position of arm[0] in robot frame (meters)
-    arm_x_origin: -0.075
+    arm_x_origin: -0.059
     # Y position of arm[0] in robot frame (meters)
     arm_y_origin: 0.07
     # Maximum distance for a tag to be assigned to an arm (meters)

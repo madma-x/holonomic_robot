@@ -67,10 +67,10 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
         return [
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=150.0, parallel_group=1),
+            *self._build_lift_steps(end_effectors, target='down', parallel_group=1),
             *self._build_pwm_steps(end_effectors, target='pick', parallel_group=1),
             *self._build_pump_steps(end_effectors, enable=True, parallel_group=2),
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=100.0, parallel_group=3),
+            *self._build_lift_steps(end_effectors, target='up', parallel_group=3),
         ]
 
     def build_swap_sequence(self, arm_indices: Iterable[int]) -> list:
@@ -92,6 +92,23 @@ class ArmSequenceBuilder:
     ) -> list:
         return self.build_drop_sequence(arm_indices, swap_arm_indices=swap_arm_indices)
 
+    def build_reset_sequence(
+        self,
+        arm_indices: Iterable[int],
+    ) -> list:
+        if not _HAS_ACTUATOR_STEP:
+            raise RuntimeError('ActuatorStep message unavailable')
+
+        end_effectors = self._resolve_end_effectors(arm_indices)
+        if not end_effectors:
+            return []
+
+        return [
+            *self._build_lift_steps(end_effectors, target='up', parallel_group=1),
+            *self._build_pwm_steps(end_effectors, target='reset', parallel_group=2),
+            *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
+        ]
+
     def build_drop_sequence(
         self,
         arm_indices: Iterable[int],
@@ -107,9 +124,9 @@ class ArmSequenceBuilder:
         swap_effectors = self._resolve_swap_end_effectors(end_effectors, swap_arm_indices)
 
         return [
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=140.0, parallel_group=1),
-            *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=150.0, parallel_group=3),
+            *self._build_lift_steps(end_effectors, target='up', parallel_group=1),
+            *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=2),
+            *self._build_lift_steps(end_effectors, target='down', parallel_group=2),
             *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
         ]
 
@@ -138,59 +155,15 @@ class ArmSequenceBuilder:
             if end_effector.arm_index in requested
         ]
 
-    def _build_lower_steps(
-        self,
-        end_effectors: list[EndEffectorConfig],
-        use_place_pose: bool,
-    ) -> list:
-        steps = [*self._build_lift_steps(end_effectors, to_down=True, parallel_group=1)]
-        target_name = 'place' if use_place_pose else 'pick'
-        steps.extend(self._build_pwm_steps(end_effectors, target=target_name, parallel_group=1))
-        return steps
-
-    def _build_raise_steps(
-        self,
-        end_effectors: list[EndEffectorConfig],
-        parallel_group: int,
-        stow_end_effectors: Optional[list[EndEffectorConfig]] = None,
-    ) -> list:
-        steps = [*self._build_lift_steps(end_effectors, to_down=False, parallel_group=parallel_group)]
-        steps.extend(
-            self._build_pwm_steps(
-                stow_end_effectors or end_effectors,
-                target='stow',
-                parallel_group=parallel_group,
-            )
-        )
-        return steps
-
     def _build_lift_steps(
         self,
         end_effectors: list[EndEffectorConfig],
-        to_down: bool,
+        target: str,
         parallel_group: int,
     ) -> list:
         steps = []
         for lift_group in self._unique_groups(end_effectors):
-            target_deg = lift_group.down_angle_deg if to_down else lift_group.up_angle_deg
-            steps.append(
-                self._make_move_step(
-                    lift_group.lift_servo_id,
-                    target_deg,
-                    lift_group.speed_deg_s,
-                    parallel_group=parallel_group,
-                )
-            )
-        return steps
-
-    def _build_lift_steps_to_angle(
-        self,
-        end_effectors: list[EndEffectorConfig],
-        target_deg: float,
-        parallel_group: int,
-    ) -> list:
-        steps = []
-        for lift_group in self._unique_groups(end_effectors):
+            target_deg = self._lift_target_deg(lift_group, target)
             steps.append(
                 self._make_move_step(
                     lift_group.lift_servo_id,
@@ -255,7 +228,18 @@ class ArmSequenceBuilder:
             return end_effector.pwm_place_deg
         if target == 'stow':
             return end_effector.pwm_stow_deg
+        if target == 'reset':
+            return end_effector.pwm_reset_deg
         raise ValueError(f'Unknown PWM target {target}')
+
+    def _lift_target_deg(self, lift_group: LiftGroupConfig, target: str) -> float:
+        if target == 'down':
+            return lift_group.down_angle_deg
+        if target == 'up':
+            return lift_group.up_angle_deg
+        if target == 'approach':
+            return 150.0
+        raise ValueError(f'Unknown lift target {target}')
 
     def _make_move_step(
         self, servo_id: int, target_deg: float, speed_deg_s: float,

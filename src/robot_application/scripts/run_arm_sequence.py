@@ -37,6 +37,8 @@ class ArmSequenceClient(Node):
             steps = builder.build_pick_sequence(arm_indices)
         elif mode == 'swap':
             steps = builder.build_swap_sequence(arm_indices)
+        elif mode == 'reset':
+            steps = builder.build_reset_sequence(arm_indices)
         elif mode in ('place', 'drop'):
             steps = builder.build_place_sequence(
                 arm_indices,
@@ -102,7 +104,7 @@ def parse_args(argv):
     )
     parser.add_argument(
         '--mode',
-        choices=['pick', 'swap', 'place', 'drop'],
+        choices=['pick', 'swap', 'place', 'drop', 'reset'],
         default='pick',
         help='Sequence mode (default: pick)',
     )
