@@ -90,14 +90,6 @@ def generate_launch_description():
         ),
 
         Node(
-            package='nav2_smoother',
-            executable='smoother_server',
-            name='smoother_server',
-            output='screen',
-            parameters=[nav2_params]
-        ),
-
-        Node(
             package='nav2_planner',
             executable='planner_server',
             name='planner_server',
@@ -129,17 +121,6 @@ def generate_launch_description():
             parameters=[nav2_params]
         ),
 
-        Node(
-            package='nav2_velocity_smoother',
-            executable='velocity_smoother',
-            name='velocity_smoother',
-            output='screen',
-            parameters=[nav2_params],
-            remappings=[
-                ('cmd_vel', 'cmd_vel_nav'),
-            ]
-        ),
-
         # ── Collision monitor ─────────────────────────────────────────────────
         Node(
             package='nav2_collision_monitor',
@@ -160,12 +141,10 @@ def generate_launch_description():
                 'autostart': True,
                 'node_names': [
                     'controller_server',
-                    'smoother_server',
                     'planner_server',
                     'behavior_server',
                     'bt_navigator',
                     'waypoint_follower',
-                    'velocity_smoother',
                     #'collision_monitor',
                 ]
             }]

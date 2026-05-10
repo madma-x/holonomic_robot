@@ -77,11 +77,24 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # ── Localization: static map→odom (robot starts at map origin) ───────
+        # ── odom→base_footprint TF (derived from hardware /odom topic) ────────
+        Node(
+            package='holonomic_robot_bringup',
+            executable='odom_to_base_tf_broadcaster',
+            name='odom_to_base_tf_broadcaster',
+            output='screen',
+            parameters=[{
+                'odom_topic': '/odom',
+                'parent_frame': 'odom',
+                'child_frame': 'base_footprint',
+                'use_odom_stamp': False,
+            }]
+        ),
+
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name='map_odom_tf',
+            name='map_odom_publisher',
             arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
         ),
 
@@ -115,16 +128,19 @@ def generate_launch_description():
             executable='controller_server',
             name='controller_server',
             output='screen',
-            parameters=[nav2_params]
+            parameters=[nav2_params],
+            remappings=[
+                ('cmd_vel', 'cmd_vel'),
+            ]
         ),
 
-        Node(
-            package='nav2_smoother',
-            executable='smoother_server',
-            name='smoother_server',
-            output='screen',
-            parameters=[nav2_params]
-        ),
+        # Node(
+        #     package='nav2_smoother',
+        #     executable='smoother_server',
+        #     name='smoother_server',
+        #     output='screen',
+        #     parameters=[nav2_params]
+        # ),
 
         Node(
             package='nav2_planner',
@@ -139,7 +155,10 @@ def generate_launch_description():
             executable='behavior_server',
             name='behavior_server',
             output='screen',
-            parameters=[nav2_params]
+            parameters=[nav2_params],
+            remappings=[
+                ('cmd_vel', 'cmd_vel'),
+            ]
         ),
 
         Node(
@@ -158,16 +177,17 @@ def generate_launch_description():
             parameters=[nav2_params]
         ),
 
-        Node(
-            package='nav2_velocity_smoother',
-            executable='velocity_smoother',
-            name='velocity_smoother',
-            output='screen',
-            parameters=[nav2_params],
-            remappings=[
-                ('cmd_vel', 'cmd_vel_nav'),
-            ]
-        ),
+        # Node(
+        #     package='nav2_velocity_smoother',
+        #     executable='velocity_smoother',
+        #     name='velocity_smoother',
+        #     output='screen',
+        #     parameters=[nav2_params],
+        #     remappings=[
+        #         ('cmd_vel', 'cmd_vel_nav'),
+        #         ('cmd_vel_smoothed', 'cmd_vel'),
+        #     ]
+        # ),
 
         Node(
             package='nav2_collision_monitor',
@@ -188,12 +208,12 @@ def generate_launch_description():
                 'autostart': True,
                 'node_names': [
                     'controller_server',
-                    'smoother_server',
+                    #'smoother_server',
                     'planner_server',
                     'behavior_server',
                     'bt_navigator',
                     'waypoint_follower',
-                    'velocity_smoother',
+                    #'velocity_smoother',
                     #'collision_monitor',
                 ]
             }]
@@ -257,14 +277,14 @@ def generate_launch_description():
             ]
         ),
 
-        # ── RViz ─────────────────────────────────────────────────────────────
-        # Node(
-        #     package='rviz2',
-        #     executable='rviz2',
-        #     name='rviz2',
-        #     arguments=['-d', rviz_config],
-        #     output='screen'
-        # ),
+       # ── RViz ─────────────────────────────────────────────────────────────
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', rviz_config],
+            output='screen'
+        ),
 
         Node(
             package='robot_gui',

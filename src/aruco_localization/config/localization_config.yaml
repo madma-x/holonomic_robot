@@ -12,3 +12,5 @@ aruco_localization_node:
     confidence_threshold: 0.3
     # TF broadcast rate in Hz (keep alive even when no tag visible)
     broadcast_rate_hz: 10.0
+    # Future-date map->odom TF slightly to avoid Nav2 lookup extrapolation.
+    transform_tolerance_sec: 0.2

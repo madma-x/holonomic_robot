@@ -67,7 +67,8 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
         return [
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=0.0, parallel_group=1),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=150.0, parallel_group=1),
+            *self._build_pwm_steps(end_effectors, target='pick', parallel_group=1),
             *self._build_pump_steps(end_effectors, enable=True, parallel_group=2),
             *self._build_lift_steps_to_angle(end_effectors, target_deg=100.0, parallel_group=3),
         ]
@@ -82,7 +83,6 @@ class ArmSequenceBuilder:
             return []
         return [
             *self._build_pwm_steps(swap_targets, target='swap', parallel_group=1),
-            *self._build_pwm_steps(swap_targets, target='stow', parallel_group=2),
         ]
 
     def build_place_sequence(
@@ -107,9 +107,9 @@ class ArmSequenceBuilder:
         swap_effectors = self._resolve_swap_end_effectors(end_effectors, swap_arm_indices)
 
         return [
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=45.0, parallel_group=1),
-            *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=2),
-            *self._build_lift_steps_to_angle(end_effectors, target_deg=0.0, parallel_group=3),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=140.0, parallel_group=1),
+            *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
+            *self._build_lift_steps_to_angle(end_effectors, target_deg=150.0, parallel_group=3),
             *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
         ]
 

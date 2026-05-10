@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from runtime_actuators.actuator_sequencer import main
 
 

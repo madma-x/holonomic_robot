@@ -31,6 +31,7 @@ setup(
             'environment_markers = holonomic_robot_bringup.environment_markers:main',
             'static_joint_publisher = holonomic_robot_bringup.static_joint_publisher:main',
             'fake_optical_flow = holonomic_robot_bringup.fake_optical_flow:main',
+            'odom_to_base_tf_broadcaster = holonomic_robot_bringup.odom_to_base_tf_broadcaster:main',
             'map_generator = holonomic_robot_bringup.map_generator:main',
             'floor_image_publisher = holonomic_robot_bringup.floor_image_publisher:main',
             'particle_cloud_converter = holonomic_robot_bringup.particle_cloud_converter:main',

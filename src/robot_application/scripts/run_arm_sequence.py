@@ -13,6 +13,7 @@ from rclpy.node import Node
 
 from robot_actuators.action import ExecuteSequence
 from robot_application.arm_sequences import ArmSequenceBuilder
+from robot_application.arm_layout import ARM_SELECTION_PRIORITY
 
 
 class ArmSequenceClient(Node):
@@ -20,18 +21,27 @@ class ArmSequenceClient(Node):
         super().__init__('arm_sequence_test_client')
         self._client = ActionClient(self, ExecuteSequence, 'execute_sequence')
 
-    def run(self, arm_index: int, mode: str, timeout_sec: float) -> int:
+    def run(
+        self,
+        arm_indices: list[int],
+        mode: str,
+        swap_arm_indices: list[int] | None,
+        timeout_sec: float,
+    ) -> int:
         if not self._client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('execute_sequence action server not available')
             return 1
 
         builder = ArmSequenceBuilder()
         if mode == 'pick':
-            steps = builder.build_pick_sequence([arm_index])
+            steps = builder.build_pick_sequence(arm_indices)
         elif mode == 'swap':
-            steps = builder.build_swap_sequence([arm_index])
+            steps = builder.build_swap_sequence(arm_indices)
         elif mode in ('place', 'drop'):
-            steps = builder.build_place_sequence([arm_index])
+            steps = builder.build_place_sequence(
+                arm_indices,
+                swap_arm_indices=swap_arm_indices,
+            )
         else:
             self.get_logger().error(f'Unsupported mode: {mode}')
             return 2
@@ -41,7 +51,7 @@ class ArmSequenceClient(Node):
             return 0
 
         self.get_logger().info(
-            f'Sending {len(steps)} steps for arm {arm_index} in {mode} mode'
+            f'Sending {len(steps)} steps for arms {arm_indices} in {mode} mode'
         )
 
         goal = ExecuteSequence.Goal()
@@ -76,7 +86,20 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(
         description='Execute sequence built by ArmSequenceBuilder.'
     )
-    parser.add_argument('--arm', type=int, default=1, help='Arm index (default: 1)')
+    parser.add_argument(
+        '--arm',
+        type=int,
+        nargs='*',
+        default=None,
+        help='Arm index(es) to operate on. If omitted, uses all arms.',
+    )
+    parser.add_argument(
+        '--swap-arm',
+        type=int,
+        nargs='*',
+        default=None,
+        help='Arm index(es) to swap for drop/place sequences.',
+    )
     parser.add_argument(
         '--mode',
         choices=['pick', 'swap', 'place', 'drop'],
@@ -95,10 +118,21 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
+    # Determine arm indices: use provided arms or all arms if none specified
+    if args.arm is None:
+        arm_indices = list(ARM_SELECTION_PRIORITY)
+    elif len(args.arm) == 0:
+        arm_indices = list(ARM_SELECTION_PRIORITY)
+    else:
+        arm_indices = args.arm
+
+    # Determine swap arms
+    swap_arm_indices = args.swap_arm if args.swap_arm else None
+
     rclpy.init()
     node = ArmSequenceClient()
     try:
-        exit_code = node.run(args.arm, args.mode, args.timeout)
+        exit_code = node.run(arm_indices, args.mode, swap_arm_indices, args.timeout)
     finally:
         node.destroy_node()
         rclpy.shutdown()

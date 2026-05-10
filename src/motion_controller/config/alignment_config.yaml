@@ -9,13 +9,13 @@ motion_controller_node:
     # Single-loop PID gains for XY position correction
     # Input: position error (meters) → Output: velocity command (m/s)
     pid_xy:
-      kp: 0.5          # proportional gain (m/s per meter error)
-      ki: 0.05         # integral gain (m/s per meter-second integrated error)
-      kd: 0.1          # derivative gain (m/s per meter/s error rate)
+      kp: 3.0         # proportional gain (m/s per meter error)
+      ki: 0.0         # integral gain (m/s per meter-second integrated error)
+      kd: 0.0          # derivative gain (m/s per meter/s error rate)
       
       # Limits
       max_integral_error: 0.5      # max m/s from integral term (anti-windup)
-      max_velocity: 0.3          # max linear velocity output (m/s)
+      max_velocity: 1.5          # max linear velocity output (m/s)
     
     # Single-loop PID gains for rotation (theta)
     # Input: angle error (radians) → Output: angular velocity command (rad/s)
@@ -33,8 +33,8 @@ motion_controller_node:
     ang_tolerance: 0.02      # radians, theta error must be below this
 
     # Relative move default limits (can be overridden per request)
-    rel_move_max_linear_speed: 0.1      # m/s default max
-    rel_move_max_angular_speed: 0.5     # rad/s default max
+    rel_move_max_linear_speed: 1.0      # m/s default max
+    rel_move_max_angular_speed: 1.57     # rad/s default max
     rel_move_pos_tolerance: 0.01        # meters default
     rel_move_yaw_tolerance: 0.02        # radians default
     

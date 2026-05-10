@@ -13,6 +13,7 @@ from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import String, Float32, Int32
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import Point, PoseStamped
+from nav_msgs.msg import Odometry
 import threading
 import time
 import json
@@ -97,7 +98,7 @@ class TaskPlanner(Node):
         self.phase_sub = self.create_subscription(
             String, '/game/phase', self.phase_callback, 10)
         self.pose_sub = self.create_subscription(
-            PoseStamped, '/odom', self.pose_callback, 10)
+            Odometry, '/odom', self.pose_callback, 10)
         
         # Publishers
         self.current_task_pub = self.create_publisher(String, '/planner/current_task', 10)
@@ -334,9 +335,9 @@ class TaskPlanner(Node):
         except KeyError:
             pass
 
-    def pose_callback(self, msg: PoseStamped):
+    def pose_callback(self, msg: Odometry):
         """Update robot pose estimate used by utility functions."""
-        self.robot_position = msg.pose.position
+        self.robot_position = msg.pose.pose.position
     
     def replan_tasks(self):
         """Re-evaluate and re-prioritize task queue."""

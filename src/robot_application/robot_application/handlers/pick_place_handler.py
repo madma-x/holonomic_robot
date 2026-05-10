@@ -10,7 +10,6 @@ from rclpy.parameter_client import AsyncParameterClient
 
 from aruco_interfaces.msg import ArmAssignment
 from aruco_interfaces.msg import ClusterPickability
-from aruco_interfaces.msg import DetectedTagArray
 from aruco_interfaces.srv import AlignToCluster as AlignToClusterSrv
 from robot_application.arm_sequences import ArmSequenceBuilder
 
@@ -21,8 +20,6 @@ class PickPlaceHandler:
     def __init__(self, executor_node):
         self.node = executor_node
         self.latest_pickability: Optional[ClusterPickability] = None
-        self.latest_detected_tags: Optional[DetectedTagArray] = None
-        self._latest_detected_tags_stamp = 0.0
         self._cached_team_color: Optional[str] = None
 
         self.node.declare_parameter('pickability_topic', '/cluster_pickability')
@@ -34,7 +31,6 @@ class PickPlaceHandler:
         self.node.declare_parameter('sticky_confirm_wait_sec', 0.4)
         self.node.declare_parameter('tag_manager_node_name', '/tag_manager_node')
         self.node.declare_parameter('game_state_manager_node_name', '/game_state_manager')
-        self.node.declare_parameter('detected_tags_topic', '/findeeznuts/detected_tags')
         self.node.declare_parameter('detected_tags_max_age_sec', 0.75)
         self.node.declare_parameter('drop_clear_wait_sec', 1.0)
 
@@ -42,8 +38,6 @@ class PickPlaceHandler:
         align_service_name = self.node.get_parameter('align_service_name').value
         tag_manager_node_name = self.node.get_parameter('tag_manager_node_name').value
         game_state_manager_node_name = self.node.get_parameter('game_state_manager_node_name').value
-        detected_tags_topic = self.node.get_parameter('detected_tags_topic').value
-
         self.sequence_builder = ArmSequenceBuilder()
 
         self.align_client = self.node.create_client(AlignToClusterSrv, align_service_name)
@@ -55,12 +49,6 @@ class PickPlaceHandler:
             self.pickability_callback,
             10
         )
-        self.detected_tags_sub = self.node.create_subscription(
-            DetectedTagArray,
-            detected_tags_topic,
-            self.detected_tags_callback,
-            10
-        )
 
     def can_handle(self, task: dict) -> bool:
         task_type = str(task.get('task_type', '')).lower()
@@ -68,10 +56,6 @@ class PickPlaceHandler:
 
     def pickability_callback(self, msg: ClusterPickability):
         self.latest_pickability = msg
-
-    def detected_tags_callback(self, msg: DetectedTagArray):
-        self.latest_detected_tags = msg
-        self._latest_detected_tags_stamp = time.time()
         
     def execute(self, task: dict) -> Dict[str, Any]:
         carry_object = bool(task.get('carry_object', False))
