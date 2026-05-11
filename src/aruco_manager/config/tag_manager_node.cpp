@@ -96,11 +96,6 @@ public:
     latched_track_ids_.fill(-1);
   }
 
-  static int public_arm_index(int internal_arm_index)
-  {
-    return (NUM_ARMS - 1) - internal_arm_index;
-  }
-
 private:
   // ── helpers ────────────────────────────────────────────────────────────────
   double dist2d(double dx, double dy) { return std::sqrt(dx*dx + dy*dy); }
@@ -655,7 +650,7 @@ private:
 
     for (int a = 0; a < NUM_ARMS; ++a) {
       aruco_interfaces::msg::ArmAssignment aa;
-      aa.arm_index = public_arm_index(a);
+      aa.arm_index = a;
       aa.track_id = -1;
       aa.assigned = false;
       result.arms[a] = aa;
@@ -816,7 +811,7 @@ private:
 
     for (const auto& [arm_idx, tag_idx] : best.pairs) {
       auto& aa = result.arms[arm_idx];
-      aa.arm_index = public_arm_index(arm_idx);
+      aa.arm_index = arm_idx;
       aa.tag_id = msg->tags[tag_idx].tag_id;
       aa.tag_pose = msg->tags[tag_idx].tag_pose;
       if (tag_idx >= 0 && static_cast<size_t>(tag_idx) < track_id_by_detection.size()) {

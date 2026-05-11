@@ -28,7 +28,8 @@ def generate_launch_description():
     rviz_config = os.path.join(description_dir, 'rviz', 'robot_view.rviz')
     gui_config = os.path.join(gui_dir, 'config', 'gui_config.yaml')
     nav2_params = os.path.join(bringup_dir, 'config', 'nav2_params_odom_only.yaml')
-    map_file = os.path.join(bringup_dir, 'maps', 'rectangle_2x3_map.yaml')
+    custom_objects_init_params = os.path.join(bringup_dir, 'config', 'custom_objects_init.yaml')
+    map_file = os.path.join(bringup_dir, 'maps', 'map_cdf_no_obstacle.yaml')
 
     with open(urdf_file, 'r') as f:
         robot_description = f.read()
@@ -45,12 +46,12 @@ def generate_launch_description():
         )
     )
 
-    safety_launch = IncludeLaunchDescription(
+    gpio_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
-                FindPackageShare('safety_node'),
+                FindPackageShare('gpio_latte'),
                 'launch',
-                'safety.launch.py',
+                'gpio_manager.launch.py',
             ])
         )
     )
@@ -96,6 +97,14 @@ def generate_launch_description():
             executable='static_transform_publisher',
             name='map_odom_publisher',
             arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
+        ),
+
+        Node(
+            package='holonomic_robot_bringup',
+            executable='custom_objects_initializer',
+            name='custom_objects_initializer',
+            output='screen',
+            parameters=[custom_objects_init_params],
         ),
 
         # ── Map server + lifecycle manager ───────────────────────────────────
@@ -239,8 +248,8 @@ def generate_launch_description():
         # ── ArUco alignment stack (CAN bridge + manager + alignment + debug) ─
         motion_controller_stack_launch,
 
-        # ── Safety authority node (includes GPIO latch start trigger) ─────────
-        safety_launch,
+        # ──  GPIO latch start trigger) ─────────
+        gpio_launch,
 
         # ── Robot Application Nodes ──────────────────────────────────────────
 
@@ -278,21 +287,21 @@ def generate_launch_description():
         ),
 
        # ── RViz ─────────────────────────────────────────────────────────────
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=['-d', rviz_config],
-            output='screen'
-        ),
+        # Node(
+        #     package='rviz2',
+        #     executable='rviz2',
+        #     name='rviz2',
+        #     arguments=['-d', rviz_config],
+        #     output='screen'
+        # ),
 
-        Node(
-            package='robot_gui',
-            executable='robot_gui',
-            name='robot_gui',
-            parameters=[gui_config],
-            output='screen',
-            emulate_tty=True,
-        ),
+        # Node(
+        #     package='robot_gui',
+        #     executable='robot_gui',
+        #     name='robot_gui',
+        #     parameters=[gui_config],
+        #     output='screen',
+        #     emulate_tty=True,
+        # ),
         
     ])

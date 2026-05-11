@@ -2,7 +2,7 @@ from setuptools import setup
 import os
 from glob import glob
 
-package_name = 'safety_node'
+package_name = 'gpio_latte'
 
 setup(
     name=package_name,
@@ -18,12 +18,12 @@ setup(
     zip_safe=True,
     maintainer='ovoleur',
     maintainer_email='maxmorlion2024@gmail.com',
-    description='Safety authority node for holonomic robot.',
+    description='GPIO latch manager node for holonomic robot.',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'safety_node = safety_node.safety_node:main',
+            'gpio_manager = gpio_latte.gpio_manager:main',
         ],
     },
 )

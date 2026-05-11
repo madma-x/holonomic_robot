@@ -9,9 +9,9 @@ tag_manager_node:
     # Y position of arm[0] in robot frame (meters)
     arm_y_origin: 0.05
     # Maximum distance for a tag to be assigned to an arm (meters)
-    max_assignment_distance: 0.1
+    max_assignment_distance: 0.2
     # Maximum residual error after rigid fit to be considered pickable (meters)
-    consistency_threshold: 0.03
+    consistency_threshold: 0.005
     # Pick handler enables this only during the pick window
     sticky_assignment: false
     # Mark locked cluster as lost only after this many consecutive missing frames
@@ -20,6 +20,10 @@ tag_manager_node:
     sticky_stable_window_frames: 5
     # Require this many consecutive frames before switching to a new assignment
     assignment_switch_confirm_frames: 3
+    # Prefer consistent subsets for any candidate size (1, 2, or 3 tags)
+    consistency_priority_min_tags: 1
     # Systematic x offset to subtract so correction.x reads 0 when aligned
     correction_x_bias: 0.0
+    # Systematic theta offset added to correction.z (radians)
+    correction_theta_bias: -0.015
     

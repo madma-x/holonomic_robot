@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'fake_lidar_publisher = holonomic_robot_bringup.fake_lidar_publisher:main',
             'environment_markers = holonomic_robot_bringup.environment_markers:main',
+            'custom_objects_initializer = holonomic_robot_bringup.custom_objects_initializer:main',
             'static_joint_publisher = holonomic_robot_bringup.static_joint_publisher:main',
             'fake_optical_flow = holonomic_robot_bringup.fake_optical_flow:main',
             'odom_to_base_tf_broadcaster = holonomic_robot_bringup.odom_to_base_tf_broadcaster:main',

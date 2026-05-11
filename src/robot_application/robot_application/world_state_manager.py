@@ -213,6 +213,7 @@ class WorldStateManager:
                 'name': location.get('name', location.get('id', 'location')),
                 'priority': int(location.get('priority', 0)),
                 'capacity': int(location.get('capacity', 1)),
+                'marker_group_id': location.get('marker_group_id'),
                 'approach_positions': approach_positions,
             })
 

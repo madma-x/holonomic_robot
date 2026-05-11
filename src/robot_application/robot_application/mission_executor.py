@@ -117,7 +117,7 @@ class MissionExecutor(MissionBase):
         elif isinstance(handler_result, bool):
             outcome = {
                 'status': 'COMPLETED' if handler_result else status,
-                'outcome_reason': 'PLACED' if handler_result else reason
+                'outcome_reason': 'DROPPED' if handler_result else reason
             }
         else:
             outcome = {
@@ -138,6 +138,10 @@ class MissionExecutor(MissionBase):
         outcome.setdefault('object_color_before', str(task.get('object_color_before', 'unknown')))
         outcome.setdefault('object_color_after', str(task.get('object_color_after', 'unknown')))
         normalized_status = str(outcome.get('status', 'FAILED')).upper()
+        normalized_reason = str(outcome.get('outcome_reason', '')).upper()
+        if normalized_reason == 'PLACED':
+            normalized_reason = 'DROPPED'
+        outcome['outcome_reason'] = normalized_reason
         if normalized_status not in allowed_statuses:
             normalized_status = 'FAILED'
             outcome['outcome_reason'] = 'INVALID_STATUS'

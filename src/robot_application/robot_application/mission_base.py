@@ -6,6 +6,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
+from action_msgs.msg import GoalStatus
 from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import String, Float32
 from geometry_msgs.msg import PoseStamped
@@ -257,11 +258,25 @@ class MissionBase(Node):
             self.get_logger().error('Navigation timeout')
             return False
         
-        if result_future.result() is not None:
-            self.get_logger().info('Navigation succeeded')
-            return True
-        self.get_logger().error('Navigation failed without result')
-        return False
+        wrapped_result = result_future.result()
+        if wrapped_result is None:
+            self.get_logger().error('Navigation failed without result')
+            return False
+
+        status = wrapped_result.status
+        if status != GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().error(f'Navigation failed with status={status}')
+            return False
+
+        nav_result = wrapped_result.result
+        if hasattr(nav_result, 'error_code') and int(nav_result.error_code) != 0:
+            self.get_logger().error(
+                f'Navigation failed with error_code={int(nav_result.error_code)}'
+            )
+            return False
+
+        self.get_logger().info('Navigation succeeded')
+        return True
     
     def move_servo(self, servo_id: int, angle: float, speed: float = 30.0) -> bool:
         """Move servo to target angle."""

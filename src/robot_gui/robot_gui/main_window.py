@@ -302,6 +302,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_ready(self):
         self.local.match_ready = not self.local.match_ready
+        self.ros.publish_match_ready(self.local.match_ready)
         if self.local.match_ready:
             self.local.latch_armed = True
             self.local.latch_status = 'Armed (waiting latch removal)'
@@ -337,6 +338,7 @@ class MainWindow(QMainWindow):
 
     def _dispatch_match_start(self, latch_status: str, feedback: str):
         self.local.match_ready = False
+        self.ros.publish_match_ready(False)
         self.local.latch_armed = False
         self.local.latch_status = latch_status
         self.ready_button.setText('Match Ready: OFF')
@@ -346,6 +348,7 @@ class MainWindow(QMainWindow):
 
     def _reset_local_state(self):
         self.local = LocalState()
+        self.ros.publish_match_ready(False)
         self._apply_team_selection_state()
         self.strategy_combo.setCurrentText(self.local.strategy)
         self.ready_button.setText('Match Ready: OFF')
@@ -386,6 +389,9 @@ class MainWindow(QMainWindow):
             self.safety_value.setStyleSheet('color: #8a6a00; font-weight: 700;')
 
         self.match_active_value.setText(str(snap.match_active))
+        if snap.match_ready != self.local.match_ready:
+            self.local.match_ready = snap.match_ready
+            self.ready_button.setText('Match Ready: ON' if snap.match_ready else 'Match Ready: OFF')
         self.current_task_value.setText(snap.current_task)
         self.queue_size_value.setText(str(snap.queue_size))
         self.mission_status_value.setText(snap.mission_status)

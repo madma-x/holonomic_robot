@@ -24,6 +24,7 @@ robot_gui:
     topic_score: "/game/score"
     topic_phase: "/game/phase"
     topic_match_active: "/game/match_active"
+    topic_match_ready: "/game/match_ready"
     topic_current_task: "/planner/current_task"
     topic_queue_size: "/planner/queue_size"
     topic_mission_status: "/mission_executor/mission_status"

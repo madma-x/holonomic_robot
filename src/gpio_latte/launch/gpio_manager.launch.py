@@ -6,16 +6,16 @@ import os
 
 def generate_launch_description():
     config = os.path.join(
-        get_package_share_directory('safety_node'),
+        get_package_share_directory('gpio_latte'),
         'config',
-        'safety_config.yaml',
+        'gpio_config.yaml',
     )
 
     return LaunchDescription([
         Node(
-            package='safety_node',
-            executable='safety_node',
-            name='safety_node',
+            package='gpio_latte',
+            executable='gpio_manager',
+            name='gpio_manager',
             parameters=[config],
             output='screen',
             emulate_tty=True,

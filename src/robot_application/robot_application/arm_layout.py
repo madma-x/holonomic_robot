@@ -34,7 +34,7 @@ class EndEffectorConfig:
     pwm_reset_deg: float
 
 
-ARM_SELECTION_PRIORITY = (0, 1, 2, 3)
+ARM_SELECTION_PRIORITY = (3, 2, 1, 0)
 
 
 # Shared lift groups.

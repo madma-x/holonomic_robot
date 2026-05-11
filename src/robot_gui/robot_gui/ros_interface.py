@@ -28,6 +28,7 @@ class GuiSnapshot:
     score: int = 0
     phase: str = "SETUP"
     match_active: bool = False
+    match_ready: bool = False
     current_task: str = "-"
     queue_size: int = 0
     mission_status: str = "UNKNOWN"
@@ -70,6 +71,7 @@ class RobotGuiRosInterface(Node):
         self.declare_parameter('topic_score', '/game/score')
         self.declare_parameter('topic_phase', '/game/phase')
         self.declare_parameter('topic_match_active', '/game/match_active')
+        self.declare_parameter('topic_match_ready', '/game/match_ready')
         self.declare_parameter('topic_current_task', '/planner/current_task')
         self.declare_parameter('topic_queue_size', '/planner/queue_size')
         self.declare_parameter('topic_mission_status', '/mission_executor/mission_status')
@@ -107,6 +109,11 @@ class RobotGuiRosInterface(Node):
             str(self.get_parameter('initial_pose_topic').value),
             10,
         )
+        self._match_ready_pub = self.create_publisher(
+            Bool,
+            str(self.get_parameter('topic_match_ready').value),
+            10,
+        )
 
         self.create_subscription(
             Float32,
@@ -130,6 +137,12 @@ class RobotGuiRosInterface(Node):
             Bool,
             str(self.get_parameter('topic_match_active').value),
             self._active_cb,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter('topic_match_ready').value),
+            self._match_ready_cb,
             10,
         )
         self.create_subscription(
@@ -177,6 +190,7 @@ class RobotGuiRosInterface(Node):
                 score=self._snapshot.score,
                 phase=self._snapshot.phase,
                 match_active=self._snapshot.match_active,
+                match_ready=self._snapshot.match_ready,
                 current_task=self._snapshot.current_task,
                 queue_size=self._snapshot.queue_size,
                 mission_status=self._snapshot.mission_status,
@@ -249,6 +263,18 @@ class RobotGuiRosInterface(Node):
         future.add_done_callback(lambda f: self._on_team_color_result(normalized, f))
         self._set_feedback(f'Setting team_color={normalized} on game_state_manager...')
 
+    def publish_match_ready(self, ready: bool):
+        """Publish operator match-ready state."""
+        msg = Bool()
+        msg.data = bool(ready)
+        self._match_ready_pub.publish(msg)
+
+        with self._lock:
+            self._snapshot.match_ready = bool(ready)
+            self._snapshot.last_update['match_ready'] = time.monotonic()
+
+        self._set_feedback(f'Match Ready published: {bool(ready)}')
+
     def _on_team_color_result(self, team_color: str, future):
         try:
             result = future.result()
@@ -315,6 +341,11 @@ class RobotGuiRosInterface(Node):
         with self._lock:
             self._snapshot.match_active = bool(msg.data)
         self._mark_update('match_active')
+
+    def _match_ready_cb(self, msg: Bool):
+        with self._lock:
+            self._snapshot.match_ready = bool(msg.data)
+        self._mark_update('match_ready')
 
     def _task_cb(self, msg: String):
         with self._lock:

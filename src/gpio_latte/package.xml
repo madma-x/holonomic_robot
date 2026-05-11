@@ -1,20 +1,18 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>safety_node</name>
+  <name>gpio_latte</name>
   <version>0.0.0</version>
-  <description>Safety authority node — reads GPIO safety input and publishes system safety state.</description>
+  <description>GPIO latch manager node for match-start trigger.</description>
   <maintainer email="maxmorlion2024@gmail.com">ovoleur</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>robot_hw_interfaces</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>python3-serial</exec_depend>
-  <exec_depend>python3-libgpiod</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

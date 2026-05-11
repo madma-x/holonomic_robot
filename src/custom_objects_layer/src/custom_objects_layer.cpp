@@ -21,13 +21,21 @@ void CustomObjectsLayer::onInitialize()
   enabled_ = true;
   current_ = true;
 
-  topic_ = declareParameter("topic", std::string("/custom_objects"));
-  lethal_cost_ = declareParameter("lethal_cost", 254);
-  object_size_x_ = declareParameter("object_size_x", 0.15);
-  object_size_y_ = declareParameter("object_size_y", 0.20);
+  declareParameter("topic", rclcpp::ParameterValue(std::string("/custom_objects")));
+  declareParameter("lethal_cost", rclcpp::ParameterValue(254));
+  declareParameter("object_size_x", rclcpp::ParameterValue(0.15));
+  declareParameter("object_size_y", rclcpp::ParameterValue(0.20));
+
+  node->get_parameter(name_ + "." + "topic", topic_);
+  int lethal_cost_int;
+  node->get_parameter(name_ + "." + "lethal_cost", lethal_cost_int);
+  lethal_cost_ = lethal_cost_int;
+  node->get_parameter(name_ + "." + "object_size_x", object_size_x_);
+  node->get_parameter(name_ + "." + "object_size_y", object_size_y_);
 
   sub_ = node->create_subscription<visualization_msgs::msg::MarkerArray>(
-    topic_, rclcpp::SystemDefaultsQoS(),
+    topic_,
+    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
     std::bind(&CustomObjectsLayer::markersCallback, this, std::placeholders::_1));
 }
 
@@ -96,15 +104,16 @@ void CustomObjectsLayer::drawRectangle(
   const double min_y = center_y - (object_size_y_ * 0.5);
   const double max_y = center_y + (object_size_y_ * 0.5);
 
-  unsigned int min_mx;
-  unsigned int min_my;
-  unsigned int max_mx;
-  unsigned int max_my;
-  if (!grid.worldToMapEnforceBounds(min_x, min_y, min_mx, min_my) ||
-    !grid.worldToMapEnforceBounds(max_x, max_y, max_mx, max_my))
-  {
+  int min_mx_i, min_my_i, max_mx_i, max_my_i;
+  grid.worldToMapEnforceBounds(min_x, min_y, min_mx_i, min_my_i);
+  grid.worldToMapEnforceBounds(max_x, max_y, max_mx_i, max_my_i);
+  if (min_mx_i < 0 || min_my_i < 0) {
     return;
   }
+  unsigned int min_mx = static_cast<unsigned int>(min_mx_i);
+  unsigned int min_my = static_cast<unsigned int>(min_my_i);
+  unsigned int max_mx = static_cast<unsigned int>(max_mx_i);
+  unsigned int max_my = static_cast<unsigned int>(max_my_i);
 
   for (unsigned int mx = min_mx; mx <= max_mx; ++mx) {
     for (unsigned int my = min_my; my <= max_my; ++my) {

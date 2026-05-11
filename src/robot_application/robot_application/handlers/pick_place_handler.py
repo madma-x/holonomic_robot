@@ -7,6 +7,11 @@ import rclpy
 from rclpy.duration import Duration
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
+from rclpy.qos import DurabilityPolicy
+from rclpy.qos import HistoryPolicy
+from rclpy.qos import QoSProfile
+from rclpy.qos import ReliabilityPolicy
+from visualization_msgs.msg import Marker, MarkerArray
 
 from aruco_interfaces.msg import ArmAssignment
 from aruco_interfaces.msg import ClusterPickability
@@ -24,8 +29,8 @@ class PickPlaceHandler:
 
         self.node.declare_parameter('pickability_topic', '/cluster_pickability')
         self.node.declare_parameter('align_service_name', '/align_to_cluster')
-        self.node.declare_parameter('align_timeout_sec', 12.0)
-        self.node.declare_parameter('align_threshold', 0.02)
+        self.node.declare_parameter('align_timeout_sec', 5.0)
+        self.node.declare_parameter('align_threshold', 0.003)
         self.node.declare_parameter('pickability_wait_sec', 2.0)
         self.node.declare_parameter('priority_penalty', 1)
         self.node.declare_parameter('sticky_confirm_wait_sec', 0.4)
@@ -33,16 +38,31 @@ class PickPlaceHandler:
         self.node.declare_parameter('game_state_manager_node_name', '/game_state_manager')
         self.node.declare_parameter('detected_tags_max_age_sec', 0.75)
         self.node.declare_parameter('drop_clear_wait_sec', 1.0)
+        self.node.declare_parameter('custom_objects_topic', '/custom_objects')
+        self.node.declare_parameter('custom_objects_marker_ns', 'custom_objects')
 
         pickability_topic = self.node.get_parameter('pickability_topic').value
         align_service_name = self.node.get_parameter('align_service_name').value
         tag_manager_node_name = self.node.get_parameter('tag_manager_node_name').value
         game_state_manager_node_name = self.node.get_parameter('game_state_manager_node_name').value
+        self.custom_objects_topic = str(self.node.get_parameter('custom_objects_topic').value)
+        self.custom_objects_marker_ns = str(self.node.get_parameter('custom_objects_marker_ns').value)
         self.sequence_builder = ArmSequenceBuilder()
 
         self.align_client = self.node.create_client(AlignToClusterSrv, align_service_name)
         self.tag_manager_params = AsyncParameterClient(self.node, str(tag_manager_node_name))
         self.game_state_params = AsyncParameterClient(self.node, str(game_state_manager_node_name))
+        custom_objects_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.custom_objects_pub = self.node.create_publisher(
+            MarkerArray,
+            self.custom_objects_topic,
+            custom_objects_qos,
+        )
         self.pickability_sub = self.node.create_subscription(
             ClusterPickability,
             pickability_topic,
@@ -187,6 +207,7 @@ class PickPlaceHandler:
                     )
 
                 self.node.get_logger().info('Step 8: pick sequence succeeded')
+                self._clear_picked_object_from_costmap(task, source_pick_id)
                 carry_object = True
             finally:
                 self.node.get_logger().info('Step 9: disabling sticky arm-tag assignment')
@@ -300,22 +321,64 @@ class PickPlaceHandler:
             f'Step 13: executing drop sequence for arm_indices={active_arm_indices} '
             f'swap_arm_indices={swap_arm_indices}'
         )
-        if not self.execute_place_sequence(active_arm_indices, swap_arm_indices=swap_arm_indices):
-            self.node.get_logger().warn('Step 13: place sequence failed — object may not be released')
+        if not self.execute_drop_sequence(active_arm_indices, swap_arm_indices=swap_arm_indices):
+            self.node.get_logger().warn('Step 13: drop sequence failed — object may not be released')
 
         if not self.node.move_relative(-0.08, 0.0, 0.0):
             self.node.get_logger().warn('Step 13b: post-drop retreat move failed, continuing')
         
-        self.node.get_logger().info(f'Step 14: task completed successfully, placed at drop {drop_id}')
+        self.node.get_logger().info(f'Step 14: task completed successfully, dropped at drop {drop_id}')
         return self._build_outcome(
             task,
             'COMPLETED',
-            'PLACED',
+            'DROPPED',
             False,
             source_pick_id=source_pick_id,
             target_drop_id=drop_id,
             active_arm_indices=active_arm_indices,
             selected_arm_tag_ids=selected_arm_tag_ids,
+        )
+
+    def _clear_picked_object_from_costmap(self, task: dict, source_pick_id: str):
+        """Remove the picked object's marker group from the custom Nav2 obstacle layer."""
+        pick_location = task.get('pick_location', {}) if isinstance(task.get('pick_location', {}), dict) else {}
+        marker_group_id = pick_location.get('marker_group_id')
+
+        marker_ids: List[int] = []
+        if marker_group_id is not None and marker_group_id != '':
+            try:
+                group_index = int(marker_group_id)
+            except (TypeError, ValueError):
+                self.node.get_logger().warn(
+                    f'Custom object removal skipped: marker_group_id is invalid ({marker_group_id!r})'
+                )
+                return
+
+            group_size = 4
+            marker_ids = [group_index * group_size + offset for offset in range(group_size)]
+        else:
+            try:
+                marker_ids = [int(str(source_pick_id))]
+            except (TypeError, ValueError):
+                self.node.get_logger().warn(
+                    f'Custom object removal skipped: no marker_group_id and source_pick_id is not numeric ({source_pick_id!r})'
+                )
+                return
+
+        marker_array = MarkerArray()
+        stamp = self.node.get_clock().now().to_msg()
+        for object_id in marker_ids:
+            marker = Marker()
+            marker.header.frame_id = 'map'
+            marker.header.stamp = stamp
+            marker.ns = self.custom_objects_marker_ns
+            marker.id = object_id
+            marker.action = Marker.DELETE
+            marker_array.markers.append(marker)
+
+        self.custom_objects_pub.publish(marker_array)
+        self.node.get_logger().info(
+            f'Published custom object DELETE for ns={self.custom_objects_marker_ns!r} ids={marker_ids}'
         )
 
 
@@ -418,14 +481,14 @@ class PickPlaceHandler:
             return True
         return self.node.execute_sequence(steps)
 
-    def execute_place_sequence(
+    def execute_drop_sequence(
         self,
         arm_indices: List[int],
         swap_arm_indices: Optional[List[int]] = None,
     ) -> bool:
         """Execute the configured drop sequence for the selected arms."""
         try:
-            steps = self.sequence_builder.build_place_sequence(
+            steps = self.sequence_builder.build_drop_sequence(
                 arm_indices,
                 swap_arm_indices=swap_arm_indices,
             )

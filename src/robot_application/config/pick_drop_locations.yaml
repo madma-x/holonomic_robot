@@ -10,6 +10,7 @@ pick:
   - id: 1
     name: "Pick A"
     priority: 100
+    marker_group_id: 0
     approach_positions:
       - id: "pick_A_app_1"
         priority: 1
@@ -20,6 +21,7 @@ pick:
   - id: 2
     name: "Pick B"
     priority: 100
+    marker_group_id: 1
     approach_positions:
       - id: "pick_B_app_1"
         priority: 1
@@ -30,6 +32,7 @@ pick:
   - id: 3
     name: "Pick C"
     priority: 90
+    marker_group_id: 2
     approach_positions:
       - id: "pick_C_app_1"
         priority: 1
@@ -47,6 +50,7 @@ pick:
   - id: 4
     name: "Pick D"
     priority: 80
+    marker_group_id: 3
     approach_positions:
       - id: "pick_D_app_1"
         priority: 1
@@ -64,6 +68,7 @@ pick:
   - id: 5
     name: "Pick E"
     priority: 70
+    marker_group_id: 4
     approach_positions:
       - id: "pick_E_app_1"
         priority: 1
