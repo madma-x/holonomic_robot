@@ -122,13 +122,35 @@ class ArmSequenceBuilder:
             return []
 
         swap_effectors = self._resolve_swap_end_effectors(end_effectors, swap_arm_indices)
+        non_swap_effectors = self._resolve_non_swap_end_effectors(
+            end_effectors,
+            swap_arm_indices,
+        )
 
-        return [
-            *self._build_lift_steps(end_effectors, target='up', parallel_group=1),
-            *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=2),
-            *self._build_lift_steps(end_effectors, target='down_place', parallel_group=2),
-            *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
-        ]
+        if swap_effectors and not non_swap_effectors:
+            return [
+                *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
+                *self._build_pump_steps(swap_effectors, enable=False, parallel_group=6),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=7),
+            ]
+        elif swap_effectors:
+            return [
+                *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
+                *self._build_pump_steps(non_swap_effectors, enable=False, parallel_group=2),
+                *self._build_lift_steps(end_effectors, target='down_reset', parallel_group=3),
+                *self._build_pwm_steps(non_swap_effectors, target='reset', parallel_group=4),
+                *self._build_lift_steps(end_effectors, target='down_pick', parallel_group=5),
+                *self._build_pump_steps(swap_effectors, enable=False, parallel_group=6),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=7),
+            ]
+        else:
+            return [
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=2),
+                *self._build_pump_steps(end_effectors, enable=False, parallel_group=3),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=4),
+            ]
 
     def _resolve_end_effectors(self, arm_indices: Iterable[int]) -> list[EndEffectorConfig]:
         unique_arm_indices = []
@@ -153,6 +175,21 @@ class ArmSequenceBuilder:
             end_effector
             for end_effector in end_effectors
             if end_effector.arm_index in requested
+        ]
+
+    def _resolve_non_swap_end_effectors(
+        self,
+        end_effectors: list[EndEffectorConfig],
+        swap_arm_indices: Optional[Iterable[int]],
+    ) -> list[EndEffectorConfig]:
+        if swap_arm_indices is None:
+            return list(end_effectors)
+
+        requested = {int(arm_index) for arm_index in swap_arm_indices}
+        return [
+            end_effector
+            for end_effector in end_effectors
+            if end_effector.arm_index not in requested
         ]
 
     def _build_lift_steps(
@@ -239,6 +276,8 @@ class ArmSequenceBuilder:
             return lift_group.down_place_angle_deg
         if target == 'up':
             return lift_group.up_angle_deg
+        if target == 'down_reset':
+            return lift_group.down_reset_deg
         if target == 'approach':
             return 150.0
         raise ValueError(f'Unknown lift target {target}')

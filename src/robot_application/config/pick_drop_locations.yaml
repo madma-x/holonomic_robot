@@ -81,73 +81,28 @@ drop_locations:
   - id: 1
     name: "Drop A"
     priority: 1
-    approach_positions:
-      - id: "drop_A_app_1"
-        priority: 1
-        pose:
-          x: 2.20
-          y: 0.60
-          theta: 0.00
-      - id: "drop_A_app_2"
-        priority: 2
-        pose:
-          x: 2.20
-          y: 1.0
-          theta: 1.57
+    pose:
+      x: 0.7
+      y: 0.2
 
   - id: 2
     name: "Drop B"
     priority: 2
-    approach_positions:
-      - id: "drop_B_app_1"
-        priority: 1
-        pose:
-          x: 1.50
-          y: 0.60
-          theta: 0.00
-      - id: "drop_B_app_2"
-        priority: 2
-        pose:
-          x: 1.50
-          y: 1.0
-          theta: 1.57
+    pose:
+      x: 1.5
+      y: 0.2
 
   - id: 3
     name: "Drop C"
     priority: 3
-    approach_positions:
-      - id: "drop_C_app_1"
-        priority: 1
-        pose:
-          x: 0.80
-          y: 1.0
-          theta: 3.14
-      - id: "drop_C_app_2"
-        priority: 2
-        pose:
-          x: 0.80
-          y: 0.60
-          theta: -1.57
+    pose:
+      x: 0.2
+      y: 0.8
 
   - id: 4
     name: "Drop D"
     priority: 4
-    approach_positions:
-      - id: "drop_D_app_1"
-        priority: 1
-        pose:
-          x: 0.30
-          y: 0.8
-          theta: 3.14
-      
-  - id: 4
-    name: "Drop D"
-    priority: 4
-    approach_positions:
-      - id: "drop_D_app_1"
-        priority: 1
-        pose:
-          x: 1.25
-          y: 1.2
-          theta: 1.57
+    pose:
+      x: 0.8
+      y: 0.8
       

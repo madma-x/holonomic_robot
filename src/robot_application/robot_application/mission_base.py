@@ -1,6 +1,8 @@
 """Base class for mission implementations."""
 
+import math
 import time
+from typing import Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -11,6 +13,7 @@ from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import String, Float32
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import ComputePathToPose
 import threading
 from enum import Enum
 
@@ -64,6 +67,10 @@ class MissionBase(Node):
         self.declare_parameter('max_recovery_attempts', 3)
         self.declare_parameter('mock_navigation', False)
         self.declare_parameter('mock_actuators', not HAS_ROBOT_ACTUATORS)
+        self.declare_parameter('planner_timeout_sec', 8.0)
+        self.declare_parameter('post_drop_back_distance_m', 0.1)
+        self.declare_parameter('post_drop_back_timeout_s', 4.0)
+        self.declare_parameter('post_drop_back_max_linear_speed_mps', 0.15)
         
         # Get parameters
         self.nav_timeout = self.get_parameter('nav_timeout_sec').value
@@ -73,9 +80,14 @@ class MissionBase(Node):
         self.max_recovery_attempts = self.get_parameter('max_recovery_attempts').value
         self.mock_navigation = self.get_parameter('mock_navigation').value
         self.mock_actuators = self.get_parameter('mock_actuators').value
+        self.planner_timeout = self.get_parameter('planner_timeout_sec').value
+        self.post_drop_back_distance_m = self.get_parameter('post_drop_back_distance_m').value
+        self.post_drop_back_timeout_s = self.get_parameter('post_drop_back_timeout_s').value
+        self.post_drop_back_max_linear_speed_mps = self.get_parameter('post_drop_back_max_linear_speed_mps').value
         
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.compute_path_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         if HAS_ROBOT_ACTUATORS and not self.mock_actuators:
             self.servo_client = ActionClient(self, MoveServo, 'move_servo')
             self.pump_client = ActionClient(self, ControlPump, 'control_pump')
@@ -237,7 +249,6 @@ class MissionBase(Node):
         goal_msg.pose.pose.position.y = y
         
         # Convert theta to quaternion (simplified for z-axis rotation)
-        import math
         goal_msg.pose.pose.orientation.z = math.sin(theta / 2.0)
         goal_msg.pose.pose.orientation.w = math.cos(theta / 2.0)
         
@@ -277,6 +288,70 @@ class MissionBase(Node):
 
         self.get_logger().info('Navigation succeeded')
         return True
+
+    def compute_path_to_pose(
+        self,
+        x: float,
+        y: float,
+        theta: float,
+        planner_id: str = ''
+    ) -> Tuple[bool, float, str]:
+        """Compute a path to pose and return (ok, path_length_m, reason)."""
+        if self.mock_navigation:
+            return True, 0.0, 'mock_navigation'
+
+        if not self.compute_path_client.wait_for_server(timeout_sec=2.0):
+            return False, float('inf'), 'planner_server_unavailable'
+
+        goal = ComputePathToPose.Goal()
+        goal.goal = PoseStamped()
+        goal.goal.header.frame_id = 'map'
+        goal.goal.header.stamp = self.get_clock().now().to_msg()
+        goal.goal.pose.position.x = float(x)
+        goal.goal.pose.position.y = float(y)
+        goal.goal.pose.orientation.z = math.sin(float(theta) / 2.0)
+        goal.goal.pose.orientation.w = math.cos(float(theta) / 2.0)
+        goal.planner_id = str(planner_id)
+        goal.use_start = False
+
+        send_goal_future = self.compute_path_client.send_goal_async(goal)
+        if not self._wait_for_future(send_goal_future, timeout_sec=3.0):
+            return False, float('inf'), 'planner_goal_timeout'
+
+        goal_handle = send_goal_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            return False, float('inf'), 'planner_goal_rejected'
+
+        result_future = goal_handle.get_result_async()
+        if not self._wait_for_future(result_future, timeout_sec=float(self.planner_timeout)):
+            return False, float('inf'), 'planner_result_timeout'
+
+        wrapped_result = result_future.result()
+        if wrapped_result is None:
+            return False, float('inf'), 'planner_no_result'
+
+        if wrapped_result.status != GoalStatus.STATUS_SUCCEEDED:
+            return False, float('inf'), f'planner_status_{int(wrapped_result.status)}'
+
+        action_result = wrapped_result.result
+        if hasattr(action_result, 'error_code') and int(action_result.error_code) != 0:
+            return False, float('inf'), f'planner_error_{int(action_result.error_code)}'
+
+        path = getattr(action_result, 'path', None)
+        poses = list(getattr(path, 'poses', [])) if path is not None else []
+        if len(poses) < 2:
+            return False, float('inf'), 'planner_empty_path'
+
+        length = 0.0
+        previous = poses[0].pose.position
+        for pose_stamped in poses[1:]:
+            current = pose_stamped.pose.position
+            dx = float(current.x) - float(previous.x)
+            dy = float(current.y) - float(previous.y)
+            length += math.hypot(dx, dy)
+            previous = current
+
+        return True, float(length), 'ok'
     
     def move_servo(self, servo_id: int, angle: float, speed: float = 30.0) -> bool:
         """Move servo to target angle."""
@@ -472,6 +547,41 @@ class MissionBase(Node):
         else:
             self.get_logger().info(f'MoveRelative succeeded: {response.status_message}')
         return bool(response.success)
+
+    def move_back_straight_after_drop(
+        self,
+        distance_m: float | None = None,
+        timeout_s: float | None = None,
+        max_linear_speed_mps: float | None = None,
+    ) -> bool:
+        """Move straight backward after a drop using the relative move service."""
+        retreat_distance_m = abs(
+            float(distance_m if distance_m is not None else self.post_drop_back_distance_m)
+        )
+        retreat_timeout_s = float(
+            timeout_s if timeout_s is not None else self.post_drop_back_timeout_s
+        )
+        retreat_max_linear_speed_mps = abs(float(
+            max_linear_speed_mps
+            if max_linear_speed_mps is not None
+            else self.post_drop_back_max_linear_speed_mps
+        ))
+
+        if retreat_distance_m == 0.0:
+            self.get_logger().info('Post-drop move back skipped: distance is zero')
+            return True
+
+        self.get_logger().info(
+            'Post-drop move back: distance=%.3fm timeout=%.2fs max_linear_speed=%.3fm/s'
+            % (retreat_distance_m, retreat_timeout_s, retreat_max_linear_speed_mps)
+        )
+        return self.move_relative(
+            -retreat_distance_m,
+            0.0,
+            0.0,
+            timeout_s=retreat_timeout_s,
+            max_linear_speed_mps=retreat_max_linear_speed_mps,
+        )
 
     def call_service_async(self, service_name: str, srv_type):
         """Helper to call a service asynchronously."""

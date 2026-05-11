@@ -223,27 +223,27 @@ def generate_launch_description():
                     'bt_navigator',
                     'waypoint_follower',
                     #'velocity_smoother',
-                    #'collision_monitor',
+                    'collision_monitor',
                 ]
             }]
         ),
 
         # ── SL Lidar C1 ──────────────────────────────────────────────────────
-        # Node(
-        #     package='sllidar_ros2',
-        #     executable='sllidar_node',
-        #     name='sllidar_node',
-        #     parameters=[{
-        #         'channel_type': 'serial',
-        #         'serial_port': '/dev/ttyUSB0',
-        #         'serial_baudrate': 460800,
-        #         'frame_id': 'base_scan',
-        #         'inverted': False,
-        #         'angle_compensate': True,
-        #         'scan_mode': 'Standard',
-        #     }],
-        #     output='screen'
-        # ),
+        Node(
+            package='sllidar_ros2',
+            executable='sllidar_node',
+            name='sllidar_node',
+            parameters=[{
+                'channel_type': 'serial',
+                'serial_port': '/dev/ttyUSB0',
+                'serial_baudrate': 460800,
+                'frame_id': 'base_scan',
+                'inverted': True,
+                'angle_compensate': True,
+                'scan_mode': 'Standard',
+            }],
+            output='screen'
+        ),
 
         # ── ArUco alignment stack (CAN bridge + manager + alignment + debug) ─
         motion_controller_stack_launch,

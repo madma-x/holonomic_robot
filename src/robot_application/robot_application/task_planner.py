@@ -10,7 +10,8 @@ Simplified architecture:
 import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
-from std_msgs.msg import String, Float32, Int32
+from rclpy.parameter_client import AsyncParameterClient
+from std_msgs.msg import String, Float32, Int32, Bool
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import Point, PoseStamped
 from nav_msgs.msg import Odometry
@@ -60,6 +61,7 @@ class TaskPlanner(Node):
         self.declare_parameter('mission_executor_assignment_topic', '/planner/task_assignment')
         self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
         self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
+        self.declare_parameter('game_state_manager_node_name', '/game_state_manager')
         self.declare_parameter('team_color', 'blue')
         
         # Get parameters
@@ -89,6 +91,7 @@ class TaskPlanner(Node):
         self.match_active = False
         self.robot_position = Point()
         self.mission_executor_status = 'IDLE'
+        self.tasks_initialized = False  # Track if task list has been created
         
         # Subscribers for game state
         self.time_sub = self.create_subscription(
@@ -99,6 +102,12 @@ class TaskPlanner(Node):
             String, '/game/phase', self.phase_callback, 10)
         self.pose_sub = self.create_subscription(
             Odometry, '/odom', self.pose_callback, 10)
+        self.match_ready_sub = self.create_subscription(
+            Bool, '/game/match_ready', self.match_ready_callback, 10)
+        
+        # Parameter client for getting team_color from game_state_manager
+        game_state_manager_node = self.get_parameter('game_state_manager_node_name').value
+        self._game_state_params = AsyncParameterClient(self, str(game_state_manager_node))
         
         # Publishers
         self.current_task_pub = self.create_publisher(String, '/planner/current_task', 10)
@@ -153,10 +162,7 @@ class TaskPlanner(Node):
         self.status_timer = self.create_timer(1.0, self.publish_status)
         self.add_on_set_parameters_callback(self._on_parameters_changed)
         
-        # Initialize default tasks
-        self.initialize_default_tasks()
-        
-        self.get_logger().info('Task planner initialized (simplified, Nav2-integrated)')
+        self.get_logger().info('Task planner initialized (simplified, Nav2-integrated). Waiting for team selection to build task list.')
 
     def _normalize_team_color(self, value: Any) -> str:
         normalized = str(value).strip().lower()
@@ -186,6 +192,12 @@ class TaskPlanner(Node):
             f'Team color set to {self.team_color}; base=({self.base_location["x"]:.3f}, '
             f'{self.base_location["y"]:.3f}, {self.base_location["theta"]:.3f})'
         )
+        
+        # Initialize task list on first team selection (initial pose chosen)
+        if not self.tasks_initialized:
+            self.initialize_default_tasks()
+            self.tasks_initialized = True
+            self.get_logger().info(f'Task list created for {self.team_color} team')
 
     def _on_parameters_changed(self, params):
         relevant = {
@@ -339,6 +351,39 @@ class TaskPlanner(Node):
         """Update robot pose estimate used by utility functions."""
         self.robot_position = msg.pose.pose.position
     
+    def match_ready_callback(self, msg: Bool):
+        """Initialize task list when match ready signal received."""
+        if msg.data and not self.tasks_initialized:
+            # Match is ready, get team_color from game_state_manager and initialize tasks
+            try:
+                self.get_logger().info('Match ready signal received, fetching team_color from game_state_manager...')
+                if not self._game_state_params.wait_for_services(timeout_sec=1.0):
+                    self.get_logger().warn('Could not reach game_state_manager to get team_color')
+                    return
+                
+                future = self._game_state_params.get_parameters(['team_color'])
+                future.add_done_callback(self._on_team_color_fetched)
+            except Exception as e:
+                self.get_logger().error(f'Error fetching team_color: {e}')
+    
+    def _on_team_color_fetched(self, future):
+        """Callback when team_color parameter is retrieved from game_state_manager."""
+        try:
+            result = future.result()
+            if result and len(result.values) > 0:
+                team_color_param = result.values[0]
+                team_color = str(team_color_param.string_value).strip().lower()
+                if team_color in ('blue', 'yellow'):
+                    self.team_color = team_color
+                    self.base_location = self._get_base_location_for_team(self.team_color)
+                    self.initialize_default_tasks()
+                    self.tasks_initialized = True
+                    self.get_logger().info(f'Task list initialized for {self.team_color} team from match_ready signal')
+                else:
+                    self.get_logger().warn(f'Invalid team_color from game_state_manager: {team_color}')
+        except Exception as e:
+            self.get_logger().error(f'Error processing team_color result: {e}')
+    
     def replan_tasks(self):
         """Re-evaluate and re-prioritize task queue."""
         if not self.planning_active or len(self.task_queue) == 0:
@@ -396,18 +441,25 @@ class TaskPlanner(Node):
         if self.planning_active:
             response.success = False
             response.message = 'Planning already active'
-        else:
-            self.planning_active = True
-            self.stop_requested = False
-            
-            # Start planning thread
-            self.planning_thread = threading.Thread(target=self.planning_loop)
-            self.planning_thread.daemon = True
-            self.planning_thread.start()
-            
-            response.success = True
-            response.message = 'Strategic planning started'
-            self.get_logger().info(response.message)
+            return response
+        
+        if not self.tasks_initialized:
+            response.success = False
+            response.message = 'Cannot start planning: initial pose (team color) not selected. Please select blue or yellow.'
+            self.get_logger().warn(response.message)
+            return response
+        
+        self.planning_active = True
+        self.stop_requested = False
+        
+        # Start planning thread
+        self.planning_thread = threading.Thread(target=self.planning_loop)
+        self.planning_thread.daemon = True
+        self.planning_thread.start()
+        
+        response.success = True
+        response.message = 'Strategic planning started'
+        self.get_logger().info(response.message)
         
         return response
     
@@ -425,15 +477,15 @@ class TaskPlanner(Node):
         return response
 
     def reset_planning_callback(self, request, response):
-        """Reset planner state and reinitialize default tasks."""
+        """Reset planner state and wait for match ready signal."""
         self._reset_to_default_state()
         response.success = True
-        response.message = f'Planner reset. Queue size: {len(self.task_queue)}'
+        response.message = 'Planner reset. Task list cleared. Waiting for match ready signal with team selection.'
         self.get_logger().info(response.message)
         return response
 
     def _reset_to_default_state(self):
-        """Reset planner internals and load default tasks for a fresh match."""
+        """Reset planner internals and prepare for match startup."""
         self.planning_active = False
         self.stop_requested = True
         self.current_task = None
@@ -446,8 +498,10 @@ class TaskPlanner(Node):
         self.task_context_by_id = {}
         self.mission_executor_status = 'IDLE'
 
+        # Mark tasks as uninitialized so they will be created when match_ready is signaled
+        self.tasks_initialized = False
         self.base_location = self._get_base_location_for_team(self.team_color)
-        self.initialize_default_tasks()
+        self.get_logger().info('Planner reset. Waiting for match ready signal to initialize task list.')
     
     def replan_callback(self, request, response):
         """Force immediate replanning."""

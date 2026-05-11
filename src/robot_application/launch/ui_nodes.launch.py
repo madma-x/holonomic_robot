@@ -47,7 +47,7 @@ def generate_launch_description():
         #         'pickability_topic': pickability_topic,
         #         'show_window': True,
         #     }],
-        # ),
+       # ),
 
         Node(
             package='rviz2',

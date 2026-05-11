@@ -28,6 +28,7 @@ setup(
             'game_state_manager = robot_application.game_state_manager:main',
             'task_planner = robot_application.task_planner:main',
             'mission_executor = robot_application.mission_executor:main',
+            'odom_theta_monitor = robot_application.odom_theta_monitor:main',
         ],
     },
 )

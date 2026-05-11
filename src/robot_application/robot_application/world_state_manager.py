@@ -208,13 +208,24 @@ class WorldStateManager:
                 approach_positions,
                 key=lambda approach: int(approach.get('priority', 1)),
             )
-            normalized.append({
+
+            entry: Dict[str, Any] = {
                 'id': location.get('id'),
                 'name': location.get('name', location.get('id', 'location')),
                 'priority': int(location.get('priority', 0)),
                 'capacity': int(location.get('capacity', 1)),
                 'marker_group_id': location.get('marker_group_id'),
                 'approach_positions': approach_positions,
-            })
+            }
+
+            # Direct drop pose (used by DropTargetManager; no approach_positions needed)
+            raw_pose = location.get('pose')
+            if raw_pose:
+                entry['location'] = {
+                    'x': float(raw_pose.get('x', 0.0)),
+                    'y': float(raw_pose.get('y', 0.0)),
+                }
+
+            normalized.append(entry)
 
         return normalized

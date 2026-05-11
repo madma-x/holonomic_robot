@@ -31,4 +31,4 @@ else
 fi
 
 echo "Launching aruco_pose_debug..."
-ros2 launch aruco_manager aruco_pose_debug.launch.py "$@"
+ros2 launch robot_application ui_nodes.launch.py "$@"

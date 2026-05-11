@@ -161,6 +161,11 @@ private:
         double start_x_m = 0.0;
         double start_y_m = 0.0;
         double start_yaw_rad = 0.0;
+        // Fixed world-frame goal computed once at session start from start_yaw.
+        // Using a fixed target avoids frame-coupling on every control loop tick.
+        double target_world_x = 0.0;
+        double target_world_y = 0.0;
+        double target_world_yaw = 0.0;
         double pos_tolerance_m = 0.01;
         double yaw_tolerance_rad = 0.05;
         float timeout_s = 5.0;
@@ -425,6 +430,19 @@ private:
         rel_move_target_.start_x_m = robot_state_.x;
         rel_move_target_.start_y_m = robot_state_.y;
         rel_move_target_.start_yaw_rad = robot_state_.theta;
+        // Convert body-frame request into a fixed world-frame goal.
+        // This means target_x/y are interpreted in the robot's start body frame.
+        {
+            double sc = std::cos(robot_state_.theta);
+            double ss = std::sin(robot_state_.theta);
+            rel_move_target_.target_world_x =
+                robot_state_.x + request->target_x_m * sc - request->target_y_m * ss;
+            rel_move_target_.target_world_y =
+                robot_state_.y + request->target_x_m * ss + request->target_y_m * sc;
+            rel_move_target_.target_world_yaw = robot_state_.theta + request->target_yaw_rad;
+            while (rel_move_target_.target_world_yaw >  M_PI) rel_move_target_.target_world_yaw -= 2.0 * M_PI;
+            while (rel_move_target_.target_world_yaw < -M_PI) rel_move_target_.target_world_yaw += 2.0 * M_PI;
+        }
         rel_move_target_.pos_tolerance_m = request->pos_tolerance_m;
         rel_move_target_.yaw_tolerance_rad = request->yaw_tolerance_rad;
         rel_move_target_.timeout_s = request->timeout_s;
@@ -466,22 +484,29 @@ private:
             lock.lock();
         }
 
-        // Populate response
-        double final_x = robot_state_.x - rel_move_target_.start_x_m;
-        double final_y = robot_state_.y - rel_move_target_.start_y_m;
-        double final_yaw = robot_state_.theta - rel_move_target_.start_yaw_rad;
-        while (final_yaw > M_PI) final_yaw -= 2.0 * M_PI;
-        while (final_yaw < -M_PI) final_yaw += 2.0 * M_PI;
+        // Populate response: actual odom deltas since session start.
+        // Report displacement in start body frame.
+        {
+            double dx = robot_state_.x - rel_move_target_.start_x_m;
+            double dy = robot_state_.y - rel_move_target_.start_y_m;
+            double sc = std::cos(rel_move_target_.start_yaw_rad);
+            double ss = std::sin(rel_move_target_.start_yaw_rad);
+            double final_x   =  dx * sc + dy * ss;
+            double final_y   = -dx * ss + dy * sc;
+            double final_yaw = robot_state_.theta - rel_move_target_.start_yaw_rad;
+            while (final_yaw > M_PI)  final_yaw -= 2.0 * M_PI;
+            while (final_yaw < -M_PI) final_yaw += 2.0 * M_PI;
 
-        response->success = session_success_;
-        response->final_x_m = final_x;
-        response->final_y_m = final_y;
-        response->final_yaw_rad = final_yaw;
-        response->residual_distance_m = std::hypot(
-            rel_move_target_.target_x_m - final_x,
-            rel_move_target_.target_y_m - final_y);
-        response->residual_yaw_rad = rel_move_target_.target_yaw_rad - final_yaw;
-        response->status_message = session_message_;
+            response->success = session_success_;
+            response->final_x_m = final_x;
+            response->final_y_m = final_y;
+            response->final_yaw_rad = final_yaw;
+            response->residual_distance_m = std::hypot(
+                rel_move_target_.target_x_m - final_x,
+                rel_move_target_.target_y_m - final_y);
+            response->residual_yaw_rad = rel_move_target_.target_yaw_rad - final_yaw;
+            response->status_message = session_message_;
+        }
 
         // Transition to stopping state
         session_state_ = SessionState::STOPPING;
@@ -492,9 +517,8 @@ private:
         auto stop_cmd = geometry_msgs::msg::Twist();
         cmd_vel_pub_->publish(stop_cmd);
 
-        RCLCPP_INFO(this->get_logger(),
-            "Relative move session complete: success=%d, traveled=(%.3f, %.3f, %.3f), message=%s",
-            session_success_, final_x, final_y, final_yaw, session_message_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Relative move session complete: success=%d, message=%s",
+            session_success_, session_message_.c_str());
 
         // Return to idle after response
         session_state_ = SessionState::IDLE;
@@ -672,23 +696,16 @@ private:
     }
 
     void control_loop_relative_move() {
-        // Compute current error relative to session start + target delta
-        double target_world_x = rel_move_target_.start_x_m + rel_move_target_.target_x_m;
-        double target_world_y = rel_move_target_.start_y_m + rel_move_target_.target_y_m;
-        double target_world_theta = rel_move_target_.start_yaw_rad + rel_move_target_.target_yaw_rad;
-        while (target_world_theta > M_PI) target_world_theta -= 2.0 * M_PI;
-        while (target_world_theta < -M_PI) target_world_theta += 2.0 * M_PI;
-
-        // Error in world frame
-        double error_x_world = target_world_x - robot_state_.x;
-        double error_y_world = target_world_y - robot_state_.y;
-        double error_theta_world = target_world_theta - robot_state_.theta;
-        while (error_theta_world > M_PI) error_theta_world -= 2.0 * M_PI;
-        while (error_theta_world < -M_PI) error_theta_world += 2.0 * M_PI;
+        // Error relative to the fixed world-frame goal (computed once at session start).
+        double error_world_x = rel_move_target_.target_world_x - robot_state_.x;
+        double error_world_y = rel_move_target_.target_world_y - robot_state_.y;
+        double error_yaw = rel_move_target_.target_world_yaw - robot_state_.theta;
+        while (error_yaw > M_PI) error_yaw -= 2.0 * M_PI;
+        while (error_yaw < -M_PI) error_yaw += 2.0 * M_PI;
 
         // Check convergence
-        double pos_error = std::hypot(error_x_world, error_y_world);
-        double ang_error = std::abs(error_theta_world);
+        double pos_error = std::hypot(error_world_x, error_world_y);
+        double ang_error = std::abs(error_yaw);
         if (pos_error < rel_move_target_.pos_tolerance_m &&
             ang_error < rel_move_target_.yaw_tolerance_rad) {
             auto cmd_msg = geometry_msgs::msg::Twist();
@@ -710,16 +727,17 @@ private:
         last_loop_time = this->now();
         if (dt <= 0.0) dt = 0.02; // Fallback
 
-        // Convert world-frame errors to robot frame for holonomic control
-        double cos_theta = std::cos(robot_state_.theta);
-        double sin_theta = std::sin(robot_state_.theta);
-        double error_x_robot = error_x_world * cos_theta + error_y_world * sin_theta;
-        double error_y_robot = -error_x_world * sin_theta + error_y_world * cos_theta;
+        // Transform world-frame position error into the current robot body frame
+        // so cmd_vel.linear.x/y match what the hardware expects.
+        // Yaw is independent and fed directly.
+        double ct = std::cos(robot_state_.theta);
+        double st = std::sin(robot_state_.theta);
+        double error_x_robot =  error_world_x * ct + error_world_y * st;
+        double error_y_robot = -error_world_x * st + error_world_y * ct;
 
-        // Compute velocity commands with velocity scaling
-        double cmd_vx = pid_x_->update(error_x_robot, dt);
-        double cmd_vy = pid_y_->update(error_y_robot, dt);
-        double cmd_omega = pid_theta_->update(error_theta_world, dt);
+        double cmd_vx    = pid_x_->update(error_x_robot, dt);
+        double cmd_vy    = pid_y_->update(error_y_robot, dt);
+        double cmd_omega = pid_theta_->update(error_yaw, dt);
 
         // Apply velocity limits from request
         double linear_speed = std::hypot(cmd_vx, cmd_vy);
@@ -736,7 +754,7 @@ private:
         // Publish command
         auto cmd_msg = geometry_msgs::msg::Twist();
         cmd_msg.linear.x = cmd_vx;
-        cmd_msg.linear.y = cmd_vy;
+        cmd_msg.linear.y = cmd_vy; // Disabled vy for testing
         cmd_msg.angular.z = cmd_omega;
         cmd_vel_pub_->publish(cmd_msg);
 

@@ -45,13 +45,17 @@ def test_pick_place_season_composer_builds_prioritized_tasks_and_unique_drops():
         base_location={'x': 1.0, 'y': 2.0, 'theta': 0.5},
     )
 
+    # Tasks should now be sorted by distance from initial pose (base_location at 1.0, 2.0)
+    # pick_low at (0.0, 0.0): distance = sqrt((1-0)^2 + (2-0)^2) = sqrt(5) ≈ 2.24
+    # pick_high at (3.0, 0.0): distance = sqrt((1-3)^2 + (2-0)^2) = sqrt(8) ≈ 2.83
+    # So pick_low should come first (closer), then pick_high
     assert [task.task_id for task in tasks] == [
-        'pick_place_pick_high',
         'pick_place_pick_low',
+        'pick_place_pick_high',
         'return_base',
     ]
-    assert tasks[0].parameters['drop_location']['id'] == 'drop_near_high'
-    assert tasks[1].parameters['drop_location']['id'] == 'drop_near_low'
+    assert tasks[0].parameters['drop_location']['id'] == 'drop_near_low'
+    assert tasks[1].parameters['drop_location']['id'] == 'drop_near_high'
     assert tasks[0].parameters['drop_location']['id'] != tasks[1].parameters['drop_location']['id']
     assert tasks[2].task_type == TaskType.RETURN_BASE
     assert tasks[2].parameters['target_location'] == {'x': 1.0, 'y': 2.0, 'theta': 0.5}

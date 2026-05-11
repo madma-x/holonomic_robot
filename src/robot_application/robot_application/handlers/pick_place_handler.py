@@ -1,6 +1,7 @@
 """Pick-and-place mission handler for MissionExecutor."""
 
 import time
+from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple
 
 import rclpy
@@ -17,6 +18,7 @@ from aruco_interfaces.msg import ArmAssignment
 from aruco_interfaces.msg import ClusterPickability
 from aruco_interfaces.srv import AlignToCluster as AlignToClusterSrv
 from robot_application.arm_sequences import ArmSequenceBuilder
+from robot_application.drop_target_manager import DropTargetManager
 
 
 class PickPlaceHandler:
@@ -48,6 +50,7 @@ class PickPlaceHandler:
         self.custom_objects_topic = str(self.node.get_parameter('custom_objects_topic').value)
         self.custom_objects_marker_ns = str(self.node.get_parameter('custom_objects_marker_ns').value)
         self.sequence_builder = ArmSequenceBuilder()
+        self.drop_target_manager = DropTargetManager(self.node)
 
         self.align_client = self.node.create_client(AlignToClusterSrv, align_service_name)
         self.tag_manager_params = AsyncParameterClient(self.node, str(tag_manager_node_name))
@@ -324,8 +327,11 @@ class PickPlaceHandler:
         if not self.execute_drop_sequence(active_arm_indices, swap_arm_indices=swap_arm_indices):
             self.node.get_logger().warn('Step 13: drop sequence failed — object may not be released')
 
-        if not self.node.move_relative(-0.08, 0.0, 0.0):
-            self.node.get_logger().warn('Step 13b: post-drop retreat move failed, continuing')
+        if not self.node.move_back_straight_after_drop():
+            self.node.get_logger().warn('Step 13b: post-drop move back failed, continuing')
+
+        self._publish_dropped_object_marker(drop_id, drop_ref, drop_location)
+        self.execute_reset_sequence_async(active_arm_indices)
         
         self.node.get_logger().info(f'Step 14: task completed successfully, dropped at drop {drop_id}')
         return self._build_outcome(
@@ -395,6 +401,7 @@ class PickPlaceHandler:
     ) -> Dict[str, Any]:
         arm_indices = list(active_arm_indices or [])
         selected_map = selected_arm_tag_ids or self._task_selected_arm_tag_ids(task)
+        excluded_ids = sorted({str(item) for item in task.get('excluded_drop_ids', [])})
         return {
             'task_id': str(task.get('task_id', 'unknown')),
             'task_type': str(task.get('task_type', 'unknown')),
@@ -403,6 +410,7 @@ class PickPlaceHandler:
             'carry_object': bool(carry_object),
             'source_pick_id': source_pick_id,
             'target_drop_id': target_drop_id,
+            'excluded_drop_ids': excluded_ids,
             'active_arm_index': arm_indices[0] if arm_indices else None,
             'active_arm_indices': arm_indices,
             'selected_arm_tag_ids': {
@@ -496,6 +504,81 @@ class PickPlaceHandler:
             self.node.get_logger().error(str(exc))
             return False
         return self.node.execute_sequence(steps)
+
+    def execute_reset_sequence(self, arm_indices: List[int]) -> bool:
+        """Execute reset sequence for the provided arms."""
+        try:
+            steps = self.sequence_builder.build_reset_sequence(arm_indices)
+        except RuntimeError as exc:
+            self.node.get_logger().error(str(exc))
+            return False
+
+        if not steps:
+            return True
+        return self.node.execute_sequence(steps)
+
+    def execute_reset_sequence_async(self, arm_indices: List[int]):
+        """Trigger reset sequence in background without blocking mission completion."""
+
+        def _run_reset():
+            if self.execute_reset_sequence(arm_indices):
+                self.node.get_logger().info(
+                    f'Post-drop reset sequence completed for arm_indices={arm_indices}'
+                )
+            else:
+                self.node.get_logger().warn(
+                    f'Post-drop reset sequence failed for arm_indices={arm_indices}'
+                )
+
+        Thread(target=_run_reset, daemon=True).start()
+        self.node.get_logger().info(
+            f'Post-drop reset sequence started asynchronously for arm_indices={arm_indices}'
+        )
+
+    def _publish_dropped_object_marker(self, drop_id: str, drop_ref: dict, nav_goal: dict):
+        """Publish an ADD marker at the drop position after post-drop backup."""
+        location = drop_ref.get('location') if isinstance(drop_ref, dict) else None
+        if not isinstance(location, dict):
+            location = nav_goal if isinstance(nav_goal, dict) else {}
+
+        x = float(location.get('x', 0.0))
+        y = float(location.get('y', 0.0))
+
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.node.get_clock().now().to_msg()
+        marker.ns = self.custom_objects_marker_ns
+        marker.id = self._drop_marker_id(drop_id)
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        marker.pose.position.z = 0.0
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.15
+        marker.scale.y = 0.05
+        marker.scale.z = 0.02
+        marker.color.r = 1.0
+        marker.color.g = 0.45
+        marker.color.b = 0.0
+        marker.color.a = 0.85
+        marker.lifetime.sec = 0
+
+        marker_array = MarkerArray()
+        marker_array.markers.append(marker)
+        self.custom_objects_pub.publish(marker_array)
+        self.node.get_logger().info(
+            f'Published custom object ADD marker for drop {drop_id} at x={x:.3f}, y={y:.3f}, id={marker.id}'
+        )
+
+    @staticmethod
+    def _drop_marker_id(drop_id: str) -> int:
+        """Generate a stable marker id namespace offset for dropped-object markers."""
+        try:
+            return 10000 + int(str(drop_id))
+        except (TypeError, ValueError):
+            text = str(drop_id)
+            return 10000 + (sum(ord(char) for char in text) % 9000)
 
     def select_pick_arm_indices(self, pickability: ClusterPickability) -> List[int]:
         return self.sequence_builder.select_arm_indices(pickability)
@@ -705,7 +788,7 @@ class PickPlaceHandler:
         task: dict,
         excluded_ids: Optional[set] = None
     ) -> Optional[Tuple[dict, dict]]:
-        """Select the first available drop location not excluded by replanning."""
+        """Select a feasible drop base pose not excluded by replanning."""
         excluded_ids = excluded_ids or set()
         drop_ref = task.get('drop_location')
         if drop_ref:
@@ -717,14 +800,33 @@ class PickPlaceHandler:
             drop_id = str(drop_ref.get('id', ''))
             if drop_id in excluded_ids:
                 continue
-
-            task['target_drop_id'] = drop_id
             location = drop_ref.get('location')
             if not location:
                 approaches = drop_ref.get('approach_positions', [])
                 location = approaches[0] if approaches else {'x': 0.0, 'y': 0.0, 'theta': 0.0}
 
-            return location, drop_ref
+            nav_goal, diagnostics = self.drop_target_manager.select_navigation_goal(
+                drop_id=drop_id,
+                drop_location=location,
+            )
+            if nav_goal is None:
+                excluded_ids.add(drop_id)
+                task['excluded_drop_ids'] = sorted(list(excluded_ids))
+                self.node.get_logger().warn(
+                    f'Drop {drop_id} rejected by drop target manager: '
+                    f"tested={int(diagnostics.get('tested_candidates', 0))} "
+                    f"feasible={int(diagnostics.get('feasible_candidates', 0))} "
+                    f"rejects={diagnostics.get('reject_reasons', {})}"
+                )
+                continue
+
+            task['target_drop_id'] = drop_id
+            self.node.get_logger().info(
+                f'Drop {drop_id} selected by drop target manager: '
+                f"tested={int(diagnostics.get('tested_candidates', 0))} "
+                f"feasible={int(diagnostics.get('feasible_candidates', 0))}"
+            )
+            return nav_goal, drop_ref
 
         return None
 

@@ -117,6 +117,7 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
 
         failed_drop_id = str(outcome.get('target_drop_id', ''))
         excluded_ids = set(original_payload.get('excluded_drop_ids', []))
+        excluded_ids.update(str(item) for item in outcome.get('excluded_drop_ids', []))
         if failed_drop_id:
             excluded_ids.add(failed_drop_id)
 

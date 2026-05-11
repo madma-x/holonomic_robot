@@ -16,6 +16,7 @@ class LiftGroupConfig:
     member_arm_indices: tuple[int, int]
     down_pick_angle_deg: float
     down_place_angle_deg: float
+    down_reset_deg: float
     up_angle_deg: float
     speed_deg_s: float
 
@@ -45,6 +46,7 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         member_arm_indices=(0, 1),
         down_pick_angle_deg=160.0,
         down_place_angle_deg=155.0,
+        down_reset_deg=140.0,
         up_angle_deg=85.0,
         speed_deg_s=50.0,
     ),
@@ -54,6 +56,7 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         member_arm_indices=(2, 3),
         down_pick_angle_deg=155.0,
         down_place_angle_deg=150.0,
+        down_reset_deg=135.0,
         up_angle_deg=80.0,
         speed_deg_s=50.0,
     ),

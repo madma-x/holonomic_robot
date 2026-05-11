@@ -34,10 +34,18 @@ class PickPlaceSeasonTaskComposer(BaseSeasonTaskComposer):
         pick_locations = world_state.all_pick_locations()
         available_drop_locations = list(world_state.all_drop_locations())
 
+        # Sort picks by distance from initial pose (base_location for yellow/blue)
+        # This ensures the robot prioritizes nearby tasks from its initial position
         sorted_picks = sorted(
             pick_locations,
-            key=lambda pick: pick.get('priority', 0),
-            reverse=True,
+            key=lambda pick: (
+                world_state.distance_between_locations(
+                    base_location,
+                    self._location_anchor(pick),
+                ),
+                -int(pick.get('priority', 0)),  # Secondary sort: higher priority first
+                str(pick.get('id', '')),         # Tertiary sort: stable ordering
+            ),
         )
 
         for pick in sorted_picks:

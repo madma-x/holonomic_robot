@@ -301,6 +301,14 @@ class MainWindow(QMainWindow):
         self.feedback_label.setText(f'Strategy set to {value}.')
 
     def _toggle_ready(self):
+        # Block enabling Match Ready when the system is not safe
+        if not self.local.match_ready:
+            snap = self.ros.snapshot()
+            if snap.safety_state != 'SAFE_ON':
+                self.feedback_label.setText(
+                    f'Cannot arm Match Ready: system is not safe ({snap.safety_state}).'
+                )
+                return
         self.local.match_ready = not self.local.match_ready
         self.ros.publish_match_ready(self.local.match_ready)
         if self.local.match_ready:
