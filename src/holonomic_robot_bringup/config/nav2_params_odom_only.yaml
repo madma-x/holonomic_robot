@@ -60,9 +60,9 @@ controller_server:
       vy_max: 2.0
       wz_max: 3.14
       iteration_count: 1
-      prune_distance: 1.0
+      prune_distance: 0.5
       transform_tolerance: 0.1
-      temperature: 0.3
+      temperature: 0.55
       gamma: 0.01
       motion_model: "Omni"
       visualize: false
