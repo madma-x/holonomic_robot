@@ -12,8 +12,12 @@ from action_msgs.msg import GoalStatus
 from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import String, Float32
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.action import ComputePathToPose
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 import threading
 from enum import Enum
 
@@ -71,6 +75,12 @@ class MissionBase(Node):
         self.declare_parameter('post_drop_back_distance_m', 0.1)
         self.declare_parameter('post_drop_back_timeout_s', 4.0)
         self.declare_parameter('post_drop_back_max_linear_speed_mps', 0.15)
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('post_nav_rotate_timeout_s', 5.0)
+        self.declare_parameter('post_nav_rotate_yaw_tolerance_rad', 0.03)
+        self.declare_parameter('post_nav_rotate_max_angular_speed_rps', 0.6)
         
         # Get parameters
         self.nav_timeout = self.get_parameter('nav_timeout_sec').value
@@ -84,6 +94,17 @@ class MissionBase(Node):
         self.post_drop_back_distance_m = self.get_parameter('post_drop_back_distance_m').value
         self.post_drop_back_timeout_s = self.get_parameter('post_drop_back_timeout_s').value
         self.post_drop_back_max_linear_speed_mps = self.get_parameter('post_drop_back_max_linear_speed_mps').value
+        self.odom_topic = str(self.get_parameter('odom_topic').value)
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.odom_frame = str(self.get_parameter('odom_frame').value)
+        self.post_nav_rotate_timeout_s = float(self.get_parameter('post_nav_rotate_timeout_s').value)
+        self.post_nav_rotate_yaw_tolerance_rad = float(self.get_parameter('post_nav_rotate_yaw_tolerance_rad').value)
+        self.post_nav_rotate_max_angular_speed_rps = float(self.get_parameter('post_nav_rotate_max_angular_speed_rps').value)
+
+        self._latest_odom_yaw_rad = None
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -124,6 +145,13 @@ class MissionBase(Node):
         
         # Status timer
         self.status_timer = self.create_timer(1.0, self.publish_status)
+
+        self.create_subscription(
+            Odometry,
+            self.odom_topic,
+            self._odom_callback,
+            10,
+        )
         
         self.get_logger().info(f'{mission_name} mission initialized')
     
@@ -229,9 +257,45 @@ class MissionBase(Node):
                 return True
             time.sleep(poll_interval)
         return future.done()
+
+    @staticmethod
+    def _yaw_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> float:
+        return math.atan2(
+            2.0 * (qw * qz + qx * qy),
+            1.0 - 2.0 * (qy * qy + qz * qz),
+        )
+
+    @staticmethod
+    def _wrap_angle(angle_rad: float) -> float:
+        return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+    def _odom_callback(self, msg: Odometry):
+        q = msg.pose.pose.orientation
+        self._latest_odom_yaw_rad = self._yaw_from_quaternion(q.x, q.y, q.z, q.w)
+
+    def _map_to_odom_yaw_rad(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.odom_frame,
+                rclpy.time.Time(),
+            )
+        except TransformException:
+            return None
+
+        q = transform.transform.rotation
+        return self._yaw_from_quaternion(q.x, q.y, q.z, q.w)
+
+    def _current_heading_rad(self) -> float:
+        if self._latest_odom_yaw_rad is not None:
+            map_to_odom_yaw = self._map_to_odom_yaw_rad()
+            if map_to_odom_yaw is not None:
+                return self._wrap_angle(float(map_to_odom_yaw) + float(self._latest_odom_yaw_rad))
+            return float(self._latest_odom_yaw_rad)
+        return 0.0
     
     def navigate_to_pose(self, x: float, y: float, theta: float) -> bool:
-        """Navigate to a pose using Nav2."""
+        """Navigate to x/y with Nav2, then rotate to target theta via MoveRelative."""
         if self.mock_navigation:
             self.get_logger().info(
                 f'[MOCK] Navigating to: x={x:.2f}, y={y:.2f}, theta={theta:.2f}'
@@ -247,10 +311,10 @@ class MissionBase(Node):
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = x
         goal_msg.pose.pose.position.y = y
-        
-        # Convert theta to quaternion (simplified for z-axis rotation)
-        goal_msg.pose.pose.orientation.z = math.sin(theta / 2.0)
-        goal_msg.pose.pose.orientation.w = math.cos(theta / 2.0)
+
+        # Let Nav2 handle only x/y; orientation is finalized with MoveRelative.
+        goal_msg.pose.pose.orientation.z = 0.0
+        goal_msg.pose.pose.orientation.w = 1.0
         
         self.get_logger().info(f'Navigating to: x={x:.2f}, y={y:.2f}, theta={theta:.2f}')
         
@@ -286,7 +350,32 @@ class MissionBase(Node):
             )
             return False
 
-        self.get_logger().info('Navigation succeeded')
+        current_theta = self._current_heading_rad()
+        delta_theta = self._wrap_angle(float(theta) - current_theta)
+        if abs(delta_theta) <= self.post_nav_rotate_yaw_tolerance_rad:
+            self.get_logger().info(
+                f'Navigation succeeded; rotation skipped (delta={delta_theta:.3f}rad)'
+            )
+            return True
+
+        self.get_logger().info(
+            f'Navigation succeeded; applying post-nav rotation delta_theta={delta_theta:.3f}rad '
+            f'(goal={float(theta):.3f}, current={current_theta:.3f})'
+        )
+        rotate_ok = self.move_relative(
+            0.0,
+            0.0,
+            delta_theta,
+            pos_tolerance_m=0.01,
+            yaw_tolerance_rad=self.post_nav_rotate_yaw_tolerance_rad,
+            timeout_s=self.post_nav_rotate_timeout_s,
+            max_linear_speed_mps=0.0,
+            max_angular_speed_rps=self.post_nav_rotate_max_angular_speed_rps,
+        )
+        if not rotate_ok:
+            self.get_logger().error('Post-navigation rotation failed')
+            return False
+
         return True
 
     def compute_path_to_pose(
