@@ -99,6 +99,14 @@ def generate_launch_description():
             arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
         ),
 
+        # Explicit lidar TF for Nav2/collision_monitor even when URDF TF is not consumed
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='base_link_base_scan_publisher',
+            arguments=['0', '0', '0.075', '0', '0', '0', 'base_link', 'base_scan']
+        ),
+
         Node(
             package='holonomic_robot_bringup',
             executable='custom_objects_initializer',
@@ -238,7 +246,7 @@ def generate_launch_description():
                 'serial_port': '/dev/ttyUSB0',
                 'serial_baudrate': 460800,
                 'frame_id': 'base_scan',
-                'inverted': True,
+                'inverted': False,
                 'angle_compensate': True,
                 'scan_mode': 'Standard',
             }],

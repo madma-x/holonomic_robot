@@ -138,7 +138,12 @@ class TaskPlanner(Node):
                 start_mission_executor=self._start_mission_executor,
                 wait_for_mission_executor_result=self._wait_for_mission_executor_result,
             ),
-            TaskType.RETURN_BASE: ReturnBaseTaskAdapter(self.get_logger()),
+            TaskType.RETURN_BASE: ReturnBaseTaskAdapter(
+                logger=self.get_logger(),
+                mission_assignment_pub=self.mission_assignment_pub,
+                start_mission_executor=self._start_mission_executor,
+                wait_for_mission_executor_result=self._wait_for_mission_executor_result,
+            ),
         }
         
         # Services

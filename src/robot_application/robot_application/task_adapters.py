@@ -24,14 +24,58 @@ class BaseTaskAdapter:
 
 
 class ReturnBaseTaskAdapter(BaseTaskAdapter):
-    """Adapter for RETURN_BASE until mission-executor-level handler exists."""
+    """Adapter for RETURN_BASE: navigates the robot to the base pose."""
 
-    def __init__(self, logger):
+    def __init__(
+        self,
+        logger,
+        mission_assignment_pub=None,
+        start_mission_executor: Callable[[], bool] = None,
+        wait_for_mission_executor_result: Callable[[str, float], bool] = None,
+    ):
         self._logger = logger
+        self._mission_assignment_pub = mission_assignment_pub
+        self._start_mission_executor = start_mission_executor
+        self._wait_for_mission_executor_result = wait_for_mission_executor_result
 
     def execute(self, task: Task) -> bool:
-        self._logger.warn('RETURN_BASE has no dedicated executor handler yet; treating as completed')
-        return True
+        target_location = task.parameters.get('target_location', {})
+        if not target_location:
+            self._logger.error('RETURN_BASE task has no target_location parameter')
+            return False
+
+        if (self._mission_assignment_pub is None
+                or self._start_mission_executor is None
+                or self._wait_for_mission_executor_result is None):
+            self._logger.warn('RETURN_BASE adapter not fully configured; treating as completed')
+            return True
+
+        payload = {
+            'task_id': task.task_id,
+            'task_type': task.task_type.value,
+            'task_name': task.name,
+            'target_pose': {
+                'x': float(target_location.get('x', 0.0)),
+                'y': float(target_location.get('y', 0.0)),
+                'theta': float(target_location.get('theta', 0.0)),
+            },
+        }
+
+        assignment_msg = String()
+        assignment_msg.data = json.dumps(payload)
+        self._mission_assignment_pub.publish(assignment_msg)
+        self._logger.info(
+            f'Dispatched RETURN_BASE to mission_executor: task_id={task.task_id} '
+            f'target=({payload["target_pose"]["x"]:.3f}, {payload["target_pose"]["y"]:.3f}, '
+            f'{payload["target_pose"]["theta"]:.3f})'
+        )
+
+        if not self._start_mission_executor():
+            self._logger.error('Failed to start mission_executor for RETURN_BASE')
+            return False
+
+        timeout = max(30.0, float(task.time_estimate) + 25.0)
+        return self._wait_for_mission_executor_result(task.task_id, timeout)
 
 
 class PickPlaceTaskAdapter(BaseTaskAdapter):
