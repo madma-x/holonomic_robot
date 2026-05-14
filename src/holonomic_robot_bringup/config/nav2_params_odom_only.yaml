@@ -25,7 +25,7 @@ bt_navigator_navigate_to_pose_rclcpp_node:
 controller_server:
   ros__parameters:
     use_sim_time: False
-    controller_frequency: 40.0
+    controller_frequency: 20.0
     min_x_velocity_threshold: 0.02
     min_y_velocity_threshold: 0.02
     min_theta_velocity_threshold: 0.01
@@ -43,69 +43,68 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.05
-      yaw_goal_tolerance: 0.10
-      stateful: True
+      yaw_goal_tolerance: 3.14
+      stateful: False
 
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 16
-      model_dt: 0.025
+      time_steps: 15
+      model_dt: 0.05
       batch_size: 3000
       vx_std: 0.3
       vy_std: 0.3
-      wz_std: 0.35
-      vx_max: 2.0
-      vx_min: -2.0
-      vy_min: -2.0
-      vy_max: 2.0
+      wz_std: 0.3
+      vx_max: 0.3
+      vy_min: -0.3
+      vx_min: -0.3
+      wz_min: -3.14
+      vy_max: 0.3
       wz_max: 3.14
+      ax_max: 5.0
+      ay_max: 5.0
+      az_max: 20.0
       iteration_count: 1
-      prune_distance: 0.5
+      prune_distance: 0.6
       transform_tolerance: 0.1
-      temperature: 0.55
-      gamma: 0.01
+      temperature: 0.3
+      gamma: 0.015
       motion_model: "Omni"
       visualize: false
-      critics: ["ConstraintCritic", "CostCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic"]
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "PathAlignCritic", "PathFollowCritic"]
       ConstraintCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 0.8
+        cost_weight: 4.0
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 1.5
-        critical_cost: 300.0
-        consider_footprint: true
+        cost_weight: 3.0
+        critical_cost: 320.0
+        consider_footprint: false
         collision_cost: 1000000.0
         near_goal_distance: 0.5
       ObstaclesCritic:
         enabled: true
         cost_power: 1
         repulsion_weight: 0.4
-        critical_weight: 6.0
+        critical_weight: 3.0
         consider_footprint: true
         collision_cost: 10000.0
         collision_margin_distance: 0.03
         near_goal_distance: 0.3
-        inflation_radius: 0.24
-        cost_scaling_factor: 10.0
+        inflation_radius: 0.4
+        cost_scaling_factor: 5.0
       GoalCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 4.0
-        threshold_to_consider: 1.2
-      GoalAngleCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 0.8
-        threshold_to_consider: 0.2
+        cost_weight: 7.0
+        threshold_to_consider: 0.5
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 4.0
-        offset_from_furthest: 10
-        threshold_to_consider: 1.5
+        cost_weight: 1.0
+        offset_from_furthest: 12
+        threshold_to_consider: 4.0
 
 controller_server_rclcpp_node:
   ros__parameters:
@@ -120,12 +119,11 @@ local_costmap:
       robot_base_frame: base_footprint
       use_sim_time: False
       rolling_window: true
-      width: 4
-      height: 4
+      width: 3
+      height: 3
       resolution: 0.05
-      # footprint: "[[0.15, 0.0], [0.138, 0.057], [0.106, 0.106], [0.057, 0.138], [0.0, 0.15], [-0.057, 0.138], [-0.106, 0.106], [-0.138, 0.057], [-0.15, 0.0], [-0.138, -0.057], [-0.106, -0.106], [-0.057, -0.138], [0.0, -0.15], [0.057, -0.138], [0.106, -0.106], [0.138, -0.057]]" 
-      # footprint_padding: 0.02
-      robot_radius: 0.15
+      footprint: "[[0.15, 0.0], [0.138, 0.057], [0.106, 0.106], [0.057, 0.138], [0.0, 0.15], [-0.057, 0.138], [-0.106, 0.106], [-0.138, 0.057], [-0.15, 0.0], [-0.138, -0.057], [-0.106, -0.106], [-0.057, -0.138], [0.0, -0.15], [0.057, -0.138], [0.106, -0.106], [0.138, -0.057]]"
+      footprint_padding: 0.02
       transform_tolerance: 0.3
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
@@ -136,19 +134,25 @@ local_costmap:
           topic: /scan
           sensor_frame: base_scan
           data_type: LaserScan
-          obstacle_max_range: 4.0
+          obstacle_max_range: 2.0
           obstacle_min_range: 0.13
-          raytrace_max_range: 5.0
+          raytrace_max_range: 4.0
           raytrace_min_range: 0.0
           max_obstacle_height: 2.0
           min_obstacle_height: 0.0
           clearing: true
           marking: true
+          inf_is_valid: true
+          observation_persistence: 0.0
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: false
+        filter_info_topic: "/costmap_filter_info"
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.20
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.2
         inflate_unknown: false
         inflate_around_unknown: false
       always_send_full_costmap: True
@@ -162,14 +166,13 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 1.0
-      publish_frequency: 1.0
+      update_frequency: 5.0
+      publish_frequency: 3.0
       global_frame: map
       robot_base_frame: base_footprint
       use_sim_time: False
-      # footprint: "[[0.15, 0.0], [0.138, 0.057], [0.106, 0.106], [0.057, 0.138], [0.0, 0.15], [-0.057, 0.138], [-0.106, 0.106], [-0.138, 0.057], [-0.15, 0.0], [-0.138, -0.057], [-0.106, -0.106], [-0.057, -0.138], [0.0, -0.15], [0.057, -0.138], [0.106, -0.106], [0.138, -0.057]]" 
-      # footprint_padding: 0.02
-      robot_radius: 0.15
+      footprint: "[[0.15, 0.0], [0.138, 0.057], [0.106, 0.106], [0.057, 0.138], [0.0, 0.15], [-0.057, 0.138], [-0.106, 0.106], [-0.138, 0.057], [-0.15, 0.0], [-0.138, -0.057], [-0.106, -0.106], [-0.057, -0.138], [0.0, -0.15], [0.057, -0.138], [0.106, -0.106], [0.138, -0.057]]"
+      footprint_padding: 0.02
       resolution: 0.05
       track_unknown_space: true
       transform_tolerance: 0.3
@@ -185,6 +188,25 @@ global_costmap:
         object_size_x: 0.15
         object_size_y: 0.20
         lethal_cost: 254
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: false
+        observation_sources: scan
+        scan:
+          topic: /scan
+          sensor_frame: base_scan
+          data_type: LaserScan
+          obstacle_max_range: 4.0
+          obstacle_min_range: 0.13
+          raytrace_max_range: 5.0
+          raytrace_min_range: 0.0
+          max_obstacle_height: 2.0
+          min_obstacle_height: 0.0
+          clearing: true
+
+          marking: true
+          inf_is_valid: true
+          observation_persistence: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
@@ -220,7 +242,7 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.05
+      tolerance: 0.3
       use_astar: false
       allow_unknown: true
       transform_tolerance: 0.3
@@ -291,6 +313,20 @@ collision_monitor:
       max_height: 0.5
       enabled: True
 
+filter_mask_server:
+  ros__parameters:
+    use_sim_time: False
+    yaml_filename: ""
+
+costmap_filter_info_server:
+  ros__parameters:
+    use_sim_time: False
+    type: 0
+    filter_info_topic: "/costmap_filter_info"
+    mask_topic: "/filter_mask"
+    base: 0.0
+    multiplier: 1.0
+
 lifecycle_manager_navigation:
   ros__parameters:
     use_sim_time: False
@@ -301,4 +337,4 @@ lifecycle_manager_localization:
   ros__parameters:
     use_sim_time: False
     autostart: True
-    node_names: ['map_server']
+    node_names: ['map_server', 'filter_mask_server', 'costmap_filter_info_server']
