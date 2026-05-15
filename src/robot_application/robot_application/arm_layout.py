@@ -19,6 +19,7 @@ class LiftGroupConfig:
     down_reset_deg: float
     up_angle_deg: float
     speed_deg_s: float
+    down_swap_angle_deg: float
 
 
 @dataclass(frozen=True)
@@ -44,21 +45,23 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         group_index=0,
         lift_servo_id=1,
         member_arm_indices=(0, 1),
-        down_pick_angle_deg=160.0,
+        down_pick_angle_deg=164.0,
         down_place_angle_deg=155.0,
+        down_swap_angle_deg=170.0,
         down_reset_deg=140.0,
         up_angle_deg=85.0,
-        speed_deg_s=50.0,
+        speed_deg_s=100.0,
     ),
     1: LiftGroupConfig(
         group_index=1,
         lift_servo_id=2,
         member_arm_indices=(2, 3),
-        down_pick_angle_deg=155.0,
+        down_pick_angle_deg=159.0,
         down_place_angle_deg=150.0,
+        down_swap_angle_deg=165.0,
         down_reset_deg=135.0,
         up_angle_deg=80.0,
-        speed_deg_s=50.0,
+        speed_deg_s=100.0,
     ),
 }
 
@@ -71,7 +74,7 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         pump_id=0,
         pwm_channel=0,
         pwm_pick_deg=180.0,
-        pwm_swap_deg=45.0,
+        pwm_swap_deg=40.0,
         pwm_place_deg=180.0,
         pwm_stow_deg=0.0,
         pwm_reset_deg=90.0,
@@ -83,7 +86,7 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         pump_id=1,
         pwm_channel=1,
         pwm_pick_deg=180.0,
-        pwm_swap_deg=45.0,
+        pwm_swap_deg=40.0,
         pwm_place_deg=180.0,
         pwm_stow_deg=0.0,
         pwm_reset_deg=90.0,
@@ -95,7 +98,7 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         pump_id=2,
         pwm_channel=2,
         pwm_pick_deg=180.0,
-        pwm_swap_deg=45.0,
+        pwm_swap_deg=40.0,
         pwm_place_deg=180.0,
         pwm_stow_deg=0.0,
         pwm_reset_deg=90.0,
@@ -106,8 +109,8 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         group_index=1,
         pump_id=3,
         pwm_channel=3,
-        pwm_pick_deg=180.0,
-        pwm_swap_deg=45.0,
+        pwm_pick_deg=185.0,
+        pwm_swap_deg=40.0,
         pwm_place_deg=180.0,
         pwm_stow_deg=0.0,
         pwm_reset_deg=90.0,

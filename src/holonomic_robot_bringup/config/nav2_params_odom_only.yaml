@@ -51,9 +51,9 @@ controller_server:
       time_steps: 15
       model_dt: 0.05
       batch_size: 3000
-      vx_std: 0.3
-      vy_std: 0.3
-      wz_std: 0.3
+      vx_std: 0.2
+      vy_std: 0.15
+      wz_std: 0.12
       vx_max: 0.3
       vy_min: -0.3
       vx_min: -0.3
@@ -251,30 +251,6 @@ planner_server_rclcpp_node:
   ros__parameters:
     use_sim_time: False
 
-behavior_server:
-  ros__parameters:
-    costmap_topic: local_costmap/costmap_raw
-    footprint_topic: local_costmap/published_footprint
-    cycle_frequency: 10.0
-    behavior_plugins: ["spin", "backup", "wait"]
-    spin:
-      plugin: "nav2_behaviors::Spin"
-    backup:
-      plugin: "nav2_behaviors::BackUp"
-    wait:
-      plugin: "nav2_behaviors::Wait"
-    global_frame: odom
-    robot_base_frame: base_footprint
-    transform_tolerance: 0.3
-    use_sim_time: False
-    simulate_ahead_time: 1.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.2
-    rotational_acc_lim: 3.0
-
-behavior_server_rclcpp_node:
-  ros__parameters:
-    use_sim_time: False
 
 robot_state_publisher:
   ros__parameters:
@@ -331,7 +307,7 @@ lifecycle_manager_navigation:
   ros__parameters:
     use_sim_time: False
     autostart: True
-    node_names: ['controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'waypoint_follower']
+    node_names: ['controller_server', 'planner_server', 'bt_navigator', 'local_costmap', 'global_costmap']
 
 lifecycle_manager_localization:
   ros__parameters:

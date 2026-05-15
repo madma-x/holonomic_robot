@@ -141,7 +141,7 @@ class ArmSequenceBuilder:
                 *self._build_pump_steps(non_swap_effectors, enable=False, parallel_group=2),
                 *self._build_lift_steps(end_effectors, target='down_reset', parallel_group=3),
                 *self._build_pwm_steps(non_swap_effectors, target='reset', parallel_group=4),
-                *self._build_lift_steps(end_effectors, target='down_pick', parallel_group=5),
+                *self._build_lift_steps(end_effectors, target='down_swap', parallel_group=5),
                 *self._build_pump_steps(swap_effectors, enable=False, parallel_group=6),
                 *self._build_lift_steps(end_effectors, target='up', parallel_group=7),
             ]
@@ -278,6 +278,8 @@ class ArmSequenceBuilder:
             return lift_group.up_angle_deg
         if target == 'down_reset':
             return lift_group.down_reset_deg
+        if target == 'down_swap':
+            return lift_group.down_swap_angle_deg 
         if target == 'approach':
             return 150.0
         raise ValueError(f'Unknown lift target {target}')

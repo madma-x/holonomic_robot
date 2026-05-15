@@ -100,7 +100,7 @@ class PickPlaceHandler:
         # Team colors are mirrored, so lateral offset sign is mirrored too.
         self._first_task_team_relative_move: Dict[str, Dict[str, float]] = {
             'blue': {'x': -0.2, 'y': -0.5, 'yaw': 0.0},
-            'yellow': {'x': -0.2, 'y': -0.5, 'yaw': 0.0},
+            'yellow': {'x': -0.2, 'y': 0.5, 'yaw': 0.0},
         }
 
     def can_handle(self, task: dict) -> bool:

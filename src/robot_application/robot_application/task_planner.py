@@ -68,6 +68,7 @@ class TaskPlanner(Node):
         self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
         self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
         self.declare_parameter('mission_executor_stop_service', '/mission_executor/stop_mission')
+        self.declare_parameter('game_stop_match_service', '/game/stop_match')
         self.declare_parameter('game_state_manager_node_name', '/game_state_manager')
         self.declare_parameter('team_color', 'blue')
         
@@ -124,6 +125,7 @@ class TaskPlanner(Node):
         status_topic = self.get_parameter('mission_executor_status_topic').value
         start_service = self.get_parameter('mission_executor_start_service').value
         stop_service = self.get_parameter('mission_executor_stop_service').value
+        stop_match_service = self.get_parameter('game_stop_match_service').value
 
         self.mission_assignment_pub = self.create_publisher(String, assignment_topic, 10)
         self.mission_executor_status_sub = self.create_subscription(
@@ -134,6 +136,7 @@ class TaskPlanner(Node):
         )
         self.mission_executor_start_client = self.create_client(Trigger, start_service)
         self.mission_executor_stop_client = self.create_client(Trigger, stop_service)
+        self.game_stop_match_client = self.create_client(Trigger, stop_match_service)
 
         # Task adapters: keep planner generic and delegate task-type specifics.
         self.task_adapters = {
@@ -619,6 +622,12 @@ class TaskPlanner(Node):
                 self.current_task.status = TaskStatus.COMPLETED
                 self.completed_tasks.append(self.current_task)
                 self.get_logger().info(f'Task completed: {self.current_task.name}')
+                if self.current_task.task_type == TaskType.RETURN_BASE:
+                    self.get_logger().info('Return-base task completed, requesting match stop')
+                    if not self._request_stop_match():
+                        self.get_logger().warn('Return-base completed but /game/stop_match request failed')
+                    self.planning_active = False
+                    self.stop_requested = True
             else:
                 if self.current_task.attempts >= self.current_task.max_attempts:
                     self.current_task.status = TaskStatus.FAILED
@@ -711,6 +720,26 @@ class TaskPlanner(Node):
         if response.success:
             self.mission_executor_status = 'IDLE'
         return bool(response.success)
+
+    def _request_stop_match(self) -> bool:
+        """Call /game/stop_match to finish the match after return-base completion."""
+        if not self.game_stop_match_client.wait_for_service(timeout_sec=2.0):
+            return False
+
+        future = self.game_stop_match_client.call_async(Trigger.Request())
+        if not self._wait_for_future(future, timeout_sec=3.0):
+            return False
+
+        response = future.result()
+        if response is None:
+            return False
+
+        if not response.success:
+            self.get_logger().warn(f'/game/stop_match failed: {response.message}')
+            return False
+
+        self.get_logger().info(f'/game/stop_match succeeded: {response.message}')
+        return True
 
     def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
         """Wait for an async future without re-entering the spinning executor."""
