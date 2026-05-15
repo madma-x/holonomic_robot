@@ -25,8 +25,14 @@ from robot_application.task_definitions import (
     early_game_priority, mid_game_priority,
     late_game_priority, endgame_priority
 )
-from robot_application.season_task_composers import PickPlaceSeasonTaskComposer
-from robot_application.task_adapters import PickPlaceTaskAdapter, ReturnBaseTaskAdapter
+from robot_application.season_task_composers import (
+    PickPlaceSeasonTaskComposer,
+)
+from robot_application.task_adapters import (
+    GotoPoseTaskAdapter,
+    PickPlaceTaskAdapter,
+    ReturnBaseTaskAdapter,
+)
 from robot_application.game_state_manager import GamePhase
 from robot_application.world_state_manager import WorldStateManager
 
@@ -61,6 +67,7 @@ class TaskPlanner(Node):
         self.declare_parameter('mission_executor_assignment_topic', '/planner/task_assignment')
         self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
         self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
+        self.declare_parameter('mission_executor_stop_service', '/mission_executor/stop_mission')
         self.declare_parameter('game_state_manager_node_name', '/game_state_manager')
         self.declare_parameter('team_color', 'blue')
         
@@ -92,6 +99,7 @@ class TaskPlanner(Node):
         self.robot_position = Point()
         self.mission_executor_status = 'IDLE'
         self.tasks_initialized = False  # Track if task list has been created
+        self.interrupted_task_ids = set()
         
         # Subscribers for game state
         self.time_sub = self.create_subscription(
@@ -115,6 +123,7 @@ class TaskPlanner(Node):
         assignment_topic = self.get_parameter('mission_executor_assignment_topic').value
         status_topic = self.get_parameter('mission_executor_status_topic').value
         start_service = self.get_parameter('mission_executor_start_service').value
+        stop_service = self.get_parameter('mission_executor_stop_service').value
 
         self.mission_assignment_pub = self.create_publisher(String, assignment_topic, 10)
         self.mission_executor_status_sub = self.create_subscription(
@@ -124,6 +133,7 @@ class TaskPlanner(Node):
             10
         )
         self.mission_executor_start_client = self.create_client(Trigger, start_service)
+        self.mission_executor_stop_client = self.create_client(Trigger, stop_service)
 
         # Task adapters: keep planner generic and delegate task-type specifics.
         self.task_adapters = {
@@ -135,6 +145,12 @@ class TaskPlanner(Node):
                 task_queue=self.task_queue,
                 task_pick_id_getter=self._task_pick_id,
                 task_drop_candidates_getter=self._task_drop_candidates,
+                start_mission_executor=self._start_mission_executor,
+                wait_for_mission_executor_result=self._wait_for_mission_executor_result,
+            ),
+            TaskType.GOTO_POSE: GotoPoseTaskAdapter(
+                logger=self.get_logger(),
+                mission_assignment_pub=self.mission_assignment_pub,
                 start_mission_executor=self._start_mission_executor,
                 wait_for_mission_executor_result=self._wait_for_mission_executor_result,
             ),
@@ -204,6 +220,29 @@ class TaskPlanner(Node):
             self.tasks_initialized = True
             self.get_logger().info(f'Task list created for {self.team_color} team')
 
+    def _reinitialize_task_list(self, reason: str) -> bool:
+        """Clear planner task state and rebuild the task list for the current team."""
+        if self.planning_active:
+            self.get_logger().warn(
+                f'Ignoring task list reinitialization while planning is active ({reason})'
+            )
+            return False
+
+        self.current_task = None
+        self.task_queue.clear()
+        self.completed_tasks.clear()
+        self.failed_tasks.clear()
+        self.recent_outcomes.clear()
+        self.last_mission_outcome = None
+        self.task_context_by_id.clear()
+        self.mission_executor_status = 'IDLE'
+        self.interrupted_task_ids.clear()
+
+        self.initialize_default_tasks()
+        self.tasks_initialized = True
+        self.get_logger().info(f'Task list initialized for {self.team_color} team ({reason})')
+        return True
+
     def _on_parameters_changed(self, params):
         relevant = {
             'team_color',
@@ -245,6 +284,7 @@ class TaskPlanner(Node):
     def initialize_default_tasks(self):
         """Initialize the default task set via the current season composer."""
         pick_locations, drop_locations = self.world_state.reload_catalog_and_state()
+        self.task_composer = PickPlaceSeasonTaskComposer()
         self.get_logger().info(
             f'Loaded pick/drop catalog: {len(pick_locations)} picks, {len(drop_locations)} drops'
         )
@@ -347,10 +387,26 @@ class TaskPlanner(Node):
     
     def phase_callback(self, msg: String):
         """Update game phase."""
+        previous_phase = self.current_phase
         try:
             self.current_phase = GamePhase[msg.data]
         except KeyError:
-            pass
+            return
+
+        if previous_phase == self.current_phase:
+            return
+
+        if not self.planning_active:
+            return
+
+        if self.current_phase in (GamePhase.LATE, GamePhase.ENDGAME):
+            if self.current_task and self.current_task.task_type != TaskType.RETURN_BASE:
+                self.get_logger().warn(
+                    f'Phase changed to {self.current_phase.name}; aborting current task '
+                    'to return to base'
+                )
+                self.interrupt_current_task()
+            self.replan_tasks()
 
     def pose_callback(self, msg: Odometry):
         """Update robot pose estimate used by utility functions."""
@@ -358,8 +414,8 @@ class TaskPlanner(Node):
     
     def match_ready_callback(self, msg: Bool):
         """Initialize task list when match ready signal received."""
-        if msg.data and not self.tasks_initialized:
-            # Match is ready, get team_color from game_state_manager and initialize tasks
+        if msg.data:
+            # Match is ready, get team_color from game_state_manager and (re)initialize tasks
             try:
                 self.get_logger().info('Match ready signal received, fetching team_color from game_state_manager...')
                 if not self._game_state_params.wait_for_services(timeout_sec=1.0):
@@ -381,9 +437,7 @@ class TaskPlanner(Node):
                 if team_color in ('blue', 'yellow'):
                     self.team_color = team_color
                     self.base_location = self._get_base_location_for_team(self.team_color)
-                    self.initialize_default_tasks()
-                    self.tasks_initialized = True
-                    self.get_logger().info(f'Task list initialized for {self.team_color} team from match_ready signal')
+                    self._reinitialize_task_list('match_ready signal')
                 else:
                     self.get_logger().warn(f'Invalid team_color from game_state_manager: {team_color}')
         except Exception as e:
@@ -396,6 +450,7 @@ class TaskPlanner(Node):
         
         # Calculate utility for all available tasks
         task_utilities = []
+        all_available_task_utilities = []
         for task in self.task_queue:
             if not task.is_available():
                 continue
@@ -414,9 +469,17 @@ class TaskPlanner(Node):
                 task.priority_function = endgame_priority
             
             utility = task.calculate_utility(self.time_remaining, self.current_score, self)
+            all_available_task_utilities.append((task, utility))
             
             if utility >= self.min_utility_threshold:
                 task_utilities.append((task, utility))
+
+        if not task_utilities and all_available_task_utilities:
+            self.get_logger().warn(
+                f'No task met min_utility_threshold={self.min_utility_threshold:.3f}; '
+                'falling back to best available tasks below threshold'
+            )
+            task_utilities = all_available_task_utilities
         
         # Sort by utility (highest first)
         task_utilities.sort(key=lambda x: x[1], reverse=True)
@@ -502,6 +565,7 @@ class TaskPlanner(Node):
         self.last_mission_outcome = None
         self.task_context_by_id = {}
         self.mission_executor_status = 'IDLE'
+        self.interrupted_task_ids = set()
 
         # Mark tasks as uninitialized so they will be created when match_ready is signaled
         self.tasks_initialized = False
@@ -543,6 +607,14 @@ class TaskPlanner(Node):
             success = self.execute_task(self.current_task)
             
             # Update task status
+            if self.current_task.status == TaskStatus.CANCELED:
+                self.get_logger().warn(f'Task canceled: {self.current_task.name}')
+                if self.current_task in self.task_queue:
+                    self.task_queue.remove(self.current_task)
+                self.current_task = None
+                time.sleep(0.1)
+                continue
+
             if success:
                 self.current_task.status = TaskStatus.COMPLETED
                 self.completed_tasks.append(self.current_task)
@@ -560,7 +632,12 @@ class TaskPlanner(Node):
             
             # Remove from queue if completed or failed
             if self.current_task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
-                self.task_queue.remove(self.current_task)
+                if self.current_task in self.task_queue:
+                    self.task_queue.remove(self.current_task)
+                else:
+                    self.get_logger().warn(
+                        f'Task {self.current_task.task_id} already removed from queue before terminal update'
+                    )
             
             self.current_task = None
             
@@ -573,13 +650,19 @@ class TaskPlanner(Node):
         """Interrupt currently executing task."""
         if self.current_task:
             self.current_task.status = TaskStatus.CANCELED
+            self.interrupted_task_ids.add(self.current_task.task_id)
             self.get_logger().warn(f'Task interrupted: {self.current_task.name}')
-            # In real implementation, would cancel active action goals
+            if not self._stop_mission_executor():
+                self.get_logger().warn('Failed to stop mission_executor during task interruption')
     
 
     def execute_task(self, task: Task) -> bool:
         """Execute task by dispatching to mission implementation."""
         self.get_logger().info(f'Executing {task.task_type.value}: {task.name}')
+
+        # If this task_id was interrupted earlier, clear stale interruption state
+        # before a fresh dispatch attempt.
+        self.interrupted_task_ids.discard(task.task_id)
 
         adapter = self.task_adapters.get(task.task_type)
         if adapter is not None:
@@ -605,8 +688,29 @@ class TaskPlanner(Node):
         if response.success:
             return True
 
-        # Mission might already be running and able to consume assignment.
-        return 'already running' in response.message.lower()
+        # Mission might already be active and able to consume the queued assignment.
+        response_message = response.message.lower()
+        return (
+            'already running' in response_message
+            or 'thread still active' in response_message
+        )
+
+    def _stop_mission_executor(self) -> bool:
+        """Call mission_executor stop_mission service."""
+        if not self.mission_executor_stop_client.wait_for_service(timeout_sec=1.0):
+            return False
+
+        future = self.mission_executor_stop_client.call_async(Trigger.Request())
+        if not self._wait_for_future(future, timeout_sec=2.0):
+            return False
+
+        response = future.result()
+        if response is None:
+            return False
+
+        if response.success:
+            self.mission_executor_status = 'IDLE'
+        return bool(response.success)
 
     def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
         """Wait for an async future without re-entering the spinning executor."""
@@ -628,6 +732,10 @@ class TaskPlanner(Node):
             if status == 'RUNNING':
                 saw_running = True
 
+            if expected_task_id in self.interrupted_task_ids and status == 'IDLE' and saw_running:
+                self.interrupted_task_ids.discard(expected_task_id)
+                return False
+
             outcome = self.last_mission_outcome or {}
             outcome_task_id = str(outcome.get('task_id', ''))
             outcome_seq = self._mission_outcome_sequence(outcome)
@@ -641,15 +749,22 @@ class TaskPlanner(Node):
                     self.mission_executor_status = 'RUNNING'
                     baseline_outcome_seq = outcome_seq
                     continue
+                self.interrupted_task_ids.discard(expected_task_id)
                 return False
             if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'COMPLETED':
+                self.interrupted_task_ids.discard(expected_task_id)
                 return True
             if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'FAILED':
+                self.interrupted_task_ids.discard(expected_task_id)
                 return False
             time.sleep(0.1)
 
         if saw_running:
-            self.get_logger().warn('Mission executor timed out waiting for terminal outcome')
+            self.get_logger().warn(
+                f'Mission executor timed out waiting for task_id={expected_task_id}; stopping active mission to prevent overlap'
+            )
+            self._stop_mission_executor()
+            self.interrupted_task_ids.discard(expected_task_id)
         return False
 
     def _mission_outcome_sequence(self, outcome: Optional[Dict[str, Any]]) -> int:

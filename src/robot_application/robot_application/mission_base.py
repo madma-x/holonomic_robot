@@ -67,25 +67,30 @@ class MissionBase(Node):
         self.declare_parameter('nav_timeout_sec', 120.0)
         self.declare_parameter('servo_timeout_sec', 10.0)
         self.declare_parameter('pump_timeout_sec', 30.0)
+        self.declare_parameter('sequence_failed_servo_retry_attempts', 3)
         self.declare_parameter('enable_recovery', True)
         self.declare_parameter('max_recovery_attempts', 3)
         self.declare_parameter('mock_navigation', False)
         self.declare_parameter('mock_actuators', not HAS_ROBOT_ACTUATORS)
         self.declare_parameter('planner_timeout_sec', 8.0)
-        self.declare_parameter('post_drop_back_distance_m', 0.1)
+        self.declare_parameter('post_drop_back_distance_m', 0.15)
         self.declare_parameter('post_drop_back_timeout_s', 4.0)
         self.declare_parameter('post_drop_back_max_linear_speed_mps', 0.15)
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('post_nav_rotate_timeout_s', 5.0)
-        self.declare_parameter('post_nav_rotate_yaw_tolerance_rad', 0.03)
-        self.declare_parameter('post_nav_rotate_max_angular_speed_rps', 0.6)
+        self.declare_parameter('post_nav_rotate_yaw_tolerance_rad', 0.02)
+        self.declare_parameter('post_nav_rotate_max_angular_speed_rps', 5.0)
+        self.declare_parameter('post_nav_rotate_pos_tolerance_m', 0.02)
         
         # Get parameters
         self.nav_timeout = self.get_parameter('nav_timeout_sec').value
         self.servo_timeout = self.get_parameter('servo_timeout_sec').value
         self.pump_timeout = self.get_parameter('pump_timeout_sec').value
+        self.sequence_failed_servo_retry_attempts = int(
+            self.get_parameter('sequence_failed_servo_retry_attempts').value
+        )
         self.enable_recovery = self.get_parameter('enable_recovery').value
         self.max_recovery_attempts = self.get_parameter('max_recovery_attempts').value
         self.mock_navigation = self.get_parameter('mock_navigation').value
@@ -98,6 +103,7 @@ class MissionBase(Node):
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.odom_frame = str(self.get_parameter('odom_frame').value)
         self.post_nav_rotate_timeout_s = float(self.get_parameter('post_nav_rotate_timeout_s').value)
+        self.post_nav_rotate_pos_tolerance_m = float(self.get_parameter('post_nav_rotate_pos_tolerance_m').value)
         self.post_nav_rotate_yaw_tolerance_rad = float(self.get_parameter('post_nav_rotate_yaw_tolerance_rad').value)
         self.post_nav_rotate_max_angular_speed_rps = float(self.get_parameter('post_nav_rotate_max_angular_speed_rps').value)
 
@@ -351,7 +357,14 @@ class MissionBase(Node):
             return False
 
         current_theta = self._current_heading_rad()
-        delta_theta = self._wrap_angle(float(theta) - current_theta)
+        delta_theta = float(theta) - current_theta
+        
+        # Normalize to shortest rotation path [-π, π]
+        while delta_theta > math.pi:
+            delta_theta -= 2.0 * math.pi
+        while delta_theta < -math.pi:
+            delta_theta += 2.0 * math.pi
+        
         if abs(delta_theta) <= self.post_nav_rotate_yaw_tolerance_rad:
             self.get_logger().info(
                 f'Navigation succeeded; rotation skipped (delta={delta_theta:.3f}rad)'
@@ -366,7 +379,7 @@ class MissionBase(Node):
             0.0,
             0.0,
             delta_theta,
-            pos_tolerance_m=0.01,
+            pos_tolerance_m=self.post_nav_rotate_pos_tolerance_m,
             yaw_tolerance_rad=self.post_nav_rotate_yaw_tolerance_rad,
             timeout_s=self.post_nav_rotate_timeout_s,
             max_linear_speed_mps=0.0,
@@ -583,6 +596,32 @@ class MissionBase(Node):
             self.get_logger().error(
                 f'Sequence failed at step {res.result.failed_step}: {res.result.message}'
             )
+            failed_step = int(res.result.failed_step)
+            if (
+                0 <= failed_step < len(steps)
+                and getattr(steps[failed_step], 'step_type', None) == ActuatorStep.MOVE_SERVO
+            ):
+                retry_attempts = max(0, int(self.sequence_failed_servo_retry_attempts))
+                if retry_attempts > 0:
+                    step = steps[failed_step]
+                    self.get_logger().warn(
+                        f'Retrying failed MOVE_SERVO step {failed_step} '
+                        f'(servo={step.servo_id}, target={step.target_deg:.1f}deg) '
+                        f'up to {retry_attempts} time(s)'
+                    )
+                    for attempt in range(1, retry_attempts + 1):
+                        if self.move_servo(
+                            servo_id=int(step.servo_id),
+                            angle=float(step.target_deg),
+                            speed=float(step.speed_deg_s),
+                        ):
+                            self.get_logger().info(
+                                f'MOVE_SERVO retry succeeded on attempt {attempt}/{retry_attempts}'
+                            )
+                            return True
+                        self.get_logger().warn(
+                            f'MOVE_SERVO retry failed on attempt {attempt}/{retry_attempts}'
+                        )
         return bool(res.result.success)
 
     def move_relative(

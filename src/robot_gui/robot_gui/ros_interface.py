@@ -252,16 +252,17 @@ class RobotGuiRosInterface(Node):
         normalized = str(team_color).strip().lower()
         if normalized not in ('blue', 'yellow'):
             self._set_feedback(f'Invalid team color: {team_color}')
-            return
+            return None
 
         if not self._game_state_params.wait_for_services(timeout_sec=0.2):
             self._set_feedback('Service unavailable: game_state_manager team_color')
-            return
+            return None
 
         param = Parameter('team_color', Parameter.Type.STRING, normalized)
         future = self._game_state_params.set_parameters([param])
         future.add_done_callback(lambda f: self._on_team_color_result(normalized, f))
         self._set_feedback(f'Setting team_color={normalized} on game_state_manager...')
+        return future
 
     def publish_match_ready(self, ready: bool):
         """Publish operator match-ready state."""

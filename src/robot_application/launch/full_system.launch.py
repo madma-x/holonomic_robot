@@ -99,14 +99,6 @@ def generate_launch_description():
             arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
         ),
 
-        # Explicit lidar TF for Nav2/collision_monitor even when URDF TF is not consumed
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='base_link_base_scan_publisher',
-            arguments=['0', '0', '0.075', '0', '0', '0', 'base_link', 'base_scan']
-        ),
-
         Node(
             package='holonomic_robot_bringup',
             executable='custom_objects_initializer',
@@ -128,6 +120,34 @@ def generate_launch_description():
         ),
 
         Node(
+            package='nav2_map_server',
+            executable='map_server',
+            name='filter_mask_server',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'yaml_filename': os.path.join(bringup_dir, 'maps', 'keepout_filter_mask.yaml'),
+                'topic_name': '/filter_mask',
+                'frame_id': 'map',
+            }]
+        ),
+
+        Node(
+            package='nav2_map_server',
+            executable='costmap_filter_info_server',
+            name='costmap_filter_info_server',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'type': 0,
+                'filter_info_topic': '/costmap_filter_info',
+                'mask_topic': '/filter_mask',
+                'base': 0.0,
+                'multiplier': 1.0,
+            }]
+        ),
+
+        Node(
             package='nav2_lifecycle_manager',
             executable='lifecycle_manager',
             name='lifecycle_manager_localization',
@@ -135,7 +155,7 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': use_sim_time,
                 'autostart': True,
-                'node_names': ['map_server']
+                'node_names': ['map_server', 'filter_mask_server', 'costmap_filter_info_server']
             }]
         ),
 

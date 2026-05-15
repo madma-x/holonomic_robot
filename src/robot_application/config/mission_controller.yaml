@@ -1,0 +1,10 @@
+mission_executor:
+  ros__parameters:
+    task_assignment_topic: /planner/task_assignment
+    align_threshold: 0.01
+    post_nav_rotate_timeout_s: 10.0
+    post_nav_rotate_pos_tolerance_m: 0.05
+    post_nav_rotate_yaw_tolerance_rad: 0.02
+    post_nav_rotate_max_angular_speed_rps: 5.0
+    custom_objects_delete_republish_count: 3
+    custom_objects_delete_republish_delay_sec: 0.05

@@ -29,6 +29,7 @@ setup(
             'task_planner = robot_application.task_planner:main',
             'mission_executor = robot_application.mission_executor:main',
             'odom_theta_monitor = robot_application.odom_theta_monitor:main',
+            'custom_object_delete_test = robot_application.custom_object_delete_test:main',
         ],
     },
 )

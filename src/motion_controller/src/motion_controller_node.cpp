@@ -40,6 +40,8 @@ public:
         this->declare_parameter<int>("final_stop_hold_ms", 1000);
         this->declare_parameter<double>("pos_tolerance", 0.02);
         this->declare_parameter<double>("ang_tolerance", 0.05);
+        this->declare_parameter<double>("rel_move_pos_tolerance", 0.01);
+        this->declare_parameter<double>("rel_move_yaw_tolerance", 0.05);
         this->declare_parameter<double>("alignment_max_angular_velocity", 0.5);
         this->declare_parameter<bool>("verbose_logging", false);
         this->declare_parameter<std::string>("cluster_topic", "/aruco_manager/cluster_pickability");
@@ -55,8 +57,16 @@ public:
         pid_theta_max_angular_velocity_ = this->get_parameter("pid_theta.max_angular_velocity").as_double();
         pos_tolerance_ = this->get_parameter("pos_tolerance").as_double();
         ang_tolerance_ = this->get_parameter("ang_tolerance").as_double();
+        rel_move_pos_tolerance_default_ = this->get_parameter("rel_move_pos_tolerance").as_double();
+        rel_move_yaw_tolerance_default_ = this->get_parameter("rel_move_yaw_tolerance").as_double();
         verbose_logging_ = this->get_parameter("verbose_logging").as_bool();
         final_stop_hold_ms_ = this->get_parameter("final_stop_hold_ms").as_int();
+        if (rel_move_pos_tolerance_default_ <= 0.0) {
+            rel_move_pos_tolerance_default_ = 0.01;
+        }
+        if (rel_move_yaw_tolerance_default_ <= 0.0) {
+            rel_move_yaw_tolerance_default_ = 0.05;
+        }
         if (final_stop_hold_ms_ < 0) {
             final_stop_hold_ms_ = 0;
         }
@@ -204,6 +214,8 @@ private:
     double alignment_max_angular_velocity_;
     double pid_xy_max_velocity_;
     double pid_theta_max_angular_velocity_;
+    double rel_move_pos_tolerance_default_;
+    double rel_move_yaw_tolerance_default_;
     bool verbose_logging_ = false;
     rclcpp::Time stop_hold_until_;
 
@@ -443,8 +455,14 @@ private:
             while (rel_move_target_.target_world_yaw >  M_PI) rel_move_target_.target_world_yaw -= 2.0 * M_PI;
             while (rel_move_target_.target_world_yaw < -M_PI) rel_move_target_.target_world_yaw += 2.0 * M_PI;
         }
-        rel_move_target_.pos_tolerance_m = request->pos_tolerance_m;
-        rel_move_target_.yaw_tolerance_rad = request->yaw_tolerance_rad;
+        rel_move_target_.pos_tolerance_m =
+            (request->pos_tolerance_m > 0.0f)
+                ? request->pos_tolerance_m
+                : rel_move_pos_tolerance_default_;
+        rel_move_target_.yaw_tolerance_rad =
+            (request->yaw_tolerance_rad > 0.0f)
+                ? request->yaw_tolerance_rad
+                : rel_move_yaw_tolerance_default_;
         rel_move_target_.timeout_s = request->timeout_s;
         rel_move_target_.max_linear_speed_mps =
             (request->max_linear_speed_mps > 0.0f)
@@ -472,11 +490,20 @@ private:
         while (!session_complete_) {
             if (request->timeout_s > 0 &&
                 (this->now() - start_time) > wait_timeout) {
+                double timeout_error_world_x = rel_move_target_.target_world_x - robot_state_.x;
+                double timeout_error_world_y = rel_move_target_.target_world_y - robot_state_.y;
+                double timeout_error_yaw = rel_move_target_.target_world_yaw - robot_state_.theta;
+                while (timeout_error_yaw > M_PI) timeout_error_yaw -= 2.0 * M_PI;
+                while (timeout_error_yaw < -M_PI) timeout_error_yaw += 2.0 * M_PI;
+                double timeout_pos_error = std::hypot(timeout_error_world_x, timeout_error_world_y);
+                double timeout_ang_error = std::abs(timeout_error_yaw);
+
                 session_complete_ = true;
                 session_success_ = false;
                 session_message_ = "Timeout waiting for relative move";
                 RCLCPP_ERROR(this->get_logger(),
-                    "Relative move timed out after %.2fs", request->timeout_s);
+                    "Relative move timed out after %.2fs (remaining pos_err=%.4f, yaw_err=%.4f)",
+                    request->timeout_s, timeout_pos_error, timeout_ang_error);
                 break;
             }
             lock.unlock();
@@ -699,9 +726,20 @@ private:
         // Error relative to the fixed world-frame goal (computed once at session start).
         double error_world_x = rel_move_target_.target_world_x - robot_state_.x;
         double error_world_y = rel_move_target_.target_world_y - robot_state_.y;
-        double error_yaw = rel_move_target_.target_world_yaw - robot_state_.theta;
-        while (error_yaw > M_PI) error_yaw -= 2.0 * M_PI;
-        while (error_yaw < -M_PI) error_yaw += 2.0 * M_PI;
+
+        // Compute yaw progress relative to the session start, then unwrap it around
+        // the requested signed target. This avoids sign flips for near-180deg turns,
+        // where a wrapped absolute yaw error can jump between +pi and -pi each cycle.
+        double relative_yaw = robot_state_.theta - rel_move_target_.start_yaw_rad;
+        while (relative_yaw > M_PI) relative_yaw -= 2.0 * M_PI;
+        while (relative_yaw < -M_PI) relative_yaw += 2.0 * M_PI;
+        while ((relative_yaw - rel_move_target_.target_yaw_rad) > M_PI) {
+            relative_yaw -= 2.0 * M_PI;
+        }
+        while ((relative_yaw - rel_move_target_.target_yaw_rad) < -M_PI) {
+            relative_yaw += 2.0 * M_PI;
+        }
+        double error_yaw = rel_move_target_.target_yaw_rad - relative_yaw;
 
         // Check convergence
         double pos_error = std::hypot(error_world_x, error_world_y);

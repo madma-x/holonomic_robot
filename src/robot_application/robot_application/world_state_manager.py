@@ -224,6 +224,7 @@ class WorldStateManager:
                 entry['location'] = {
                     'x': float(raw_pose.get('x', 0.0)),
                     'y': float(raw_pose.get('y', 0.0)),
+                    'theta': float(raw_pose.get('theta', 0.0)),
                 }
 
             normalized.append(entry)

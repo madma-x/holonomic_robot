@@ -2,7 +2,12 @@
 
 from typing import Any, Dict, List
 
-from robot_application.task_definitions import Task, create_pick_place_task, create_return_base_task
+from robot_application.task_definitions import (
+    Task,
+    create_goto_pose_task,
+    create_pick_place_task,
+    create_return_base_task,
+)
 
 
 class BaseSeasonTaskComposer:
@@ -75,6 +80,51 @@ class PickPlaceSeasonTaskComposer(BaseSeasonTaskComposer):
                 drop for drop in available_drop_locations
                 if str(drop.get('id', '')) != str(linked_drop.get('id', ''))
             ]
+
+        tasks.append(create_return_base_task(base_location))
+        return tasks
+
+
+class GotoPoseReturnBaseSeasonTaskComposer(BaseSeasonTaskComposer):
+    """Alternate initial task list: go to first drop pose, then return to base."""
+
+    @staticmethod
+    def _location_anchor(location: Dict[str, Any]) -> Dict[str, float]:
+        pose = location.get('location')
+        if isinstance(pose, dict) and pose:
+            return pose
+
+        approach_positions = location.get('approach_positions', [])
+        if isinstance(approach_positions, list) and approach_positions:
+            first_approach = approach_positions[0]
+            if isinstance(first_approach, dict):
+                return first_approach
+
+        return {}
+
+    def compose_initial_tasks(self, *, world_state, base_location) -> List[Task]:
+        tasks: List[Task] = []
+        drop_locations = list(world_state.all_drop_locations())
+
+        if drop_locations:
+            first_drop = min(
+                drop_locations,
+                key=lambda drop: (
+                    int(drop.get('priority', 999)),
+                    world_state.distance_between_locations(
+                        base_location,
+                        self._location_anchor(drop),
+                    ),
+                    str(drop.get('id', '')),
+                ),
+            )
+            tasks.append(
+                create_goto_pose_task(
+                    self._location_anchor(first_drop),
+                    task_id=f"goto_pose_{first_drop.get('id', '1')}",
+                    name=f"Go To Drop {first_drop.get('id', '1')}",
+                )
+            )
 
         tasks.append(create_return_base_task(base_location))
         return tasks

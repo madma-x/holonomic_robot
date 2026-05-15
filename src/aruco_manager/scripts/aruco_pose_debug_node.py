@@ -82,6 +82,7 @@ class ArucoPosgDebugNode(Node):
         self.declare_parameter("arm_y_origin", 0.07)
         self.declare_parameter("arm_z_origin", 0.5)
         self.declare_parameter("arm_spacing", 0.05)
+        self.declare_parameter("reverse_arm_index_display", True)
         default_picker_yaml = os.path.join(
             get_package_share_directory("aruco_manager"),
             "config",
@@ -102,6 +103,9 @@ class ArucoPosgDebugNode(Node):
         self._arm_y_origin = float(self.get_parameter("arm_y_origin").value)
         self._arm_z_origin = float(self.get_parameter("arm_z_origin").value)
         self._arm_spacing = float(self.get_parameter("arm_spacing").value)
+        self._reverse_arm_index_display = bool(
+            self.get_parameter("reverse_arm_index_display").value
+        )
         self._load_camera_config()
         self._bridge      = CvBridge()
         self._latest_tags = None   # type: DetectedTagArray | None
@@ -171,6 +175,11 @@ class ArucoPosgDebugNode(Node):
 
     def _pick_cb(self, msg: ClusterPickability):
         self._latest_pick = msg
+
+    def _display_arm_index(self, arm_index: int, total_arms: int) -> int:
+        if self._reverse_arm_index_display and total_arms > 0:
+            return (total_arms - 1) - arm_index
+        return arm_index
 
     def _image_cb(self, msg: Image):
         try:
@@ -276,6 +285,8 @@ class ArucoPosgDebugNode(Node):
         if pick is None:
             return
 
+        total_arms = len(pick.arms)
+
         for aa in pick.arms:
             if not aa.assigned:
                 continue
@@ -292,7 +303,8 @@ class ArucoPosgDebugNode(Node):
 
             # Goal point from configured arm geometry at a fixed depth in camera frame.
             arm_idx = int(aa.arm_index)
-            gx = self._arm_x_origin + arm_idx * self._arm_spacing
+            display_arm_idx = self._display_arm_index(arm_idx, total_arms)
+            gx = self._arm_x_origin + display_arm_idx * self._arm_spacing
             gy = self._arm_y_origin
             goal_uv = self._project_point(gx, gy, self._arm_z_origin)
             if goal_uv is None:
@@ -389,11 +401,14 @@ class ArucoPosgDebugNode(Node):
         )
 
         arm_chunks = []
+        total_arms = len(pick.arms)
         for aa in pick.arms:
+            raw_arm_idx = int(aa.arm_index)
+            disp_arm_idx = self._display_arm_index(raw_arm_idx, total_arms)
             if aa.assigned:
-                arm_chunks.append(f"A{int(aa.arm_index)}->ID{int(aa.tag_id)} T{int(aa.track_id)}")
+                arm_chunks.append(f"A{disp_arm_idx}->ID{int(aa.tag_id)} T{int(aa.track_id)}")
             else:
-                arm_chunks.append(f"A{int(aa.arm_index)}->-")
+                arm_chunks.append(f"A{disp_arm_idx}->-")
         _shadow_text(
             out,
             "  ".join(arm_chunks),

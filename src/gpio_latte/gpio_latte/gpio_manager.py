@@ -34,6 +34,8 @@ class GpioManagerNode(Node):
         self.declare_parameter('start_latch_pullup', True)
         self.declare_parameter('start_latch_trigger_value', 0)
         self.declare_parameter('start_latch_debounce_ms', 50)
+        self.declare_parameter('start_latch_retrigger_lockout_ms', 1500)
+        self.declare_parameter('start_latch_reconnect_sec', 1.0)
         self.declare_parameter('start_match_service', '/game/start_match')
         self.declare_parameter('match_active_topic', '/game/match_active')
         self.declare_parameter('match_ready_topic', '/game/match_ready')
@@ -47,6 +49,12 @@ class GpioManagerNode(Node):
             self.get_parameter('start_latch_trigger_value').value
         )
         self._start_latch_debounce_ms = self.get_parameter('start_latch_debounce_ms').value
+        self._start_latch_retrigger_lockout_ms = self.get_parameter(
+            'start_latch_retrigger_lockout_ms'
+        ).value
+        self._start_latch_reconnect_sec = float(
+            self.get_parameter('start_latch_reconnect_sec').value
+        )
         self._start_match_service = self.get_parameter('start_match_service').value
         self._match_active_topic = self.get_parameter('match_active_topic').value
         self._match_ready_topic = self.get_parameter('match_ready_topic').value
@@ -56,9 +64,11 @@ class GpioManagerNode(Node):
         self._match_active = False
         self._match_ready = False
         self._pending_start_future = None
+        self._last_start_request_time = 0.0
 
         self._start_latch_ok = False
         self._start_latch_serial = None
+        self._last_reconnect_attempt_time = 0.0
 
         self._start_match_client = self.create_client(
             Trigger,
@@ -80,15 +90,14 @@ class GpioManagerNode(Node):
         self._init_start_latch()
 
         if self._start_latch_enabled:
-            if self._start_latch_ok:
-                self._start_latch_thread = threading.Thread(
-                    target=self._start_latch_monitor_loop,
-                    daemon=True,
-                )
-                self._start_latch_thread.start()
-            else:
+            self._start_latch_thread = threading.Thread(
+                target=self._start_latch_monitor_loop,
+                daemon=True,
+            )
+            self._start_latch_thread.start()
+            if not self._start_latch_ok:
                 self.get_logger().warn(
-                    'Start latch unavailable — latch start trigger disabled.'
+                    'Start latch unavailable at startup — background reconnect is active.'
                 )
 
     def _init_start_latch(self):
@@ -127,8 +136,13 @@ class GpioManagerNode(Node):
             self._start_latch_ok = False
 
     def _start_latch_monitor_loop(self):
-        while rclpy.ok() and self._start_latch_ok:
+        while rclpy.ok() and self._start_latch_enabled:
             try:
+                if not self._start_latch_ok:
+                    self._attempt_start_latch_reconnect()
+                    time.sleep(0.1)
+                    continue
+
                 current_value = self._micropython_read_latch_value()
                 if current_value is None:
                     time.sleep(0.02)
@@ -138,11 +152,10 @@ class GpioManagerNode(Node):
                 self._last_start_latch_value = current_value
                 now = time.monotonic()
 
-                trigger_value = bool(self._start_latch_trigger_value)
                 if (
                     previous_value is not None
-                    and previous_value != current_value
-                    and current_value == trigger_value
+                    and previous_value is False
+                    and current_value is True
                 ):
                     if (
                         (now - self._last_start_latch_edge_time) * 1000
@@ -154,7 +167,28 @@ class GpioManagerNode(Node):
                 time.sleep(0.02)
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().error(f'Start latch monitor error: {exc}')
+                self._mark_latch_disconnected()
                 time.sleep(0.1)
+
+    def _mark_latch_disconnected(self):
+        self._start_latch_ok = False
+        try:
+            if self._start_latch_serial is not None:
+                self._start_latch_serial.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._start_latch_serial = None
+
+    def _attempt_start_latch_reconnect(self):
+        now = time.monotonic()
+        if self._start_latch_reconnect_sec > 0.0:
+            if (now - self._last_reconnect_attempt_time) < self._start_latch_reconnect_sec:
+                return
+        self._last_reconnect_attempt_time = now
+        self.get_logger().warn(
+            f'Attempting start latch reconnect on {self._start_latch_port}...'
+        )
+        self._init_start_latch()
 
     def _micropython_write_line(self, line: str):
         self._start_latch_serial.write((line + '\r\n').encode('utf-8'))
@@ -189,6 +223,15 @@ class GpioManagerNode(Node):
         return self._match_ready and (not self._match_active)
 
     def _try_start_match_from_latch(self):
+        now = time.monotonic()
+        if (
+            self._start_latch_retrigger_lockout_ms > 0
+            and (now - self._last_start_request_time) * 1000
+            < self._start_latch_retrigger_lockout_ms
+        ):
+            self.get_logger().info('Start latch ignored: retrigger lockout active')
+            return
+
         if not self._is_match_ready():
             self.get_logger().info(
                 f'Start latch falling edge ignored: match not ready '
@@ -207,6 +250,7 @@ class GpioManagerNode(Node):
             return
 
         self.get_logger().info('Start latch falling edge detected: requesting match start')
+        self._last_start_request_time = now
         self._pending_start_future = self._start_match_client.call_async(Trigger.Request())
         self._pending_start_future.add_done_callback(self._on_start_match_response)
 

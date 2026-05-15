@@ -62,9 +62,9 @@ def generate_launch_description():
         parameters=[{
             'match_duration_sec': LaunchConfiguration('match_duration_sec'),
             'auto_start': LaunchConfiguration('auto_start'),
-            'early_phase_threshold': 60.0,
+            'early_phase_threshold': 30.0,
             'mid_phase_threshold': 30.0,
-            'late_phase_threshold': 10.0
+            'late_phase_threshold': 25.0
         }]
     )
     

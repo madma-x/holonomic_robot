@@ -23,6 +23,61 @@ class BaseTaskAdapter:
         return False
 
 
+class GotoPoseTaskAdapter(BaseTaskAdapter):
+    """Adapter for GOTO_POSE: navigate to a target pose through mission_executor."""
+
+    def __init__(
+        self,
+        logger,
+        mission_assignment_pub=None,
+        start_mission_executor: Callable[[], bool] = None,
+        wait_for_mission_executor_result: Callable[[str, float], bool] = None,
+    ):
+        self._logger = logger
+        self._mission_assignment_pub = mission_assignment_pub
+        self._start_mission_executor = start_mission_executor
+        self._wait_for_mission_executor_result = wait_for_mission_executor_result
+
+    def execute(self, task: Task) -> bool:
+        target_location = task.parameters.get('target_location', {})
+        if not target_location:
+            self._logger.error('GOTO_POSE task has no target_location parameter')
+            return False
+
+        if (self._mission_assignment_pub is None
+                or self._start_mission_executor is None
+                or self._wait_for_mission_executor_result is None):
+            self._logger.warn('GOTO_POSE adapter not fully configured; treating as completed')
+            return True
+
+        if not self._start_mission_executor():
+            self._logger.error('Failed to start mission_executor for GOTO_POSE')
+            return False
+
+        payload = {
+            'task_id': task.task_id,
+            'task_type': task.task_type.value,
+            'task_name': task.name,
+            'target_pose': {
+                'x': float(target_location.get('x', 0.0)),
+                'y': float(target_location.get('y', 0.0)),
+                'theta': float(target_location.get('theta', 0.0)),
+            },
+        }
+
+        assignment_msg = String()
+        assignment_msg.data = json.dumps(payload)
+        self._mission_assignment_pub.publish(assignment_msg)
+        self._logger.info(
+            f'Dispatched GOTO_POSE to mission_executor: task_id={task.task_id} '
+            f'target=({payload["target_pose"]["x"]:.3f}, {payload["target_pose"]["y"]:.3f}, '
+            f'{payload["target_pose"]["theta"]:.3f})'
+        )
+
+        timeout = max(120.0, float(task.time_estimate) + 60.0)
+        return self._wait_for_mission_executor_result(task.task_id, timeout)
+
+
 class ReturnBaseTaskAdapter(BaseTaskAdapter):
     """Adapter for RETURN_BASE: navigates the robot to the base pose."""
 
@@ -50,6 +105,10 @@ class ReturnBaseTaskAdapter(BaseTaskAdapter):
             self._logger.warn('RETURN_BASE adapter not fully configured; treating as completed')
             return True
 
+        if not self._start_mission_executor():
+            self._logger.error('Failed to start mission_executor for RETURN_BASE')
+            return False
+
         payload = {
             'task_id': task.task_id,
             'task_type': task.task_type.value,
@@ -70,11 +129,7 @@ class ReturnBaseTaskAdapter(BaseTaskAdapter):
             f'{payload["target_pose"]["theta"]:.3f})'
         )
 
-        if not self._start_mission_executor():
-            self._logger.error('Failed to start mission_executor for RETURN_BASE')
-            return False
-
-        timeout = max(30.0, float(task.time_estimate) + 25.0)
+        timeout = max(120.0, float(task.time_estimate) + 60.0)
         return self._wait_for_mission_executor_result(task.task_id, timeout)
 
 
@@ -112,6 +167,11 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
         pick_id = self._task_pick_id_getter(task)
         drop_candidates = self._task_drop_candidates_getter(task)
 
+        start_ok = self._start_mission_executor()
+        if not start_ok:
+            self._logger.error('Failed to start mission_executor mission')
+            return False
+
         payload = self._payload_builder.build_assignment_payload(
             task_name=task.name,
             task_id=task.task_id,
@@ -130,15 +190,11 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
         self._mission_assignment_pub.publish(assignment_msg)
         self._logger.info(f'Dispatched task to mission_executor: {task.task_id}')
 
-        start_ok = self._start_mission_executor()
-        if not start_ok:
-            self._logger.error('Failed to start mission_executor mission')
-            return False
-
         timeout = max(15.0, float(task.time_estimate) + 25.0)
         return self._wait_for_mission_executor_result(task.task_id, timeout)
 
     def process_outcome(self, outcome: Dict[str, Any]) -> Dict[str, Any]:
+        self._sync_task_retry_state_from_outcome(outcome)
         return self._outcome_processor.process_outcome(
             outcome=outcome,
             world_state=self._world_state,
@@ -146,6 +202,42 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
             task_context_by_id=self._task_context_by_id,
             task_pick_id_getter=self._task_pick_id_getter,
         )
+
+    def _sync_task_retry_state_from_outcome(self, outcome: Dict[str, Any]) -> None:
+        """Persist carry/drop context into queued task state for retry attempts."""
+        task_id = str(outcome.get('task_id', ''))
+        if not task_id:
+            return
+
+        carry_object = bool(outcome.get('carry_object', False))
+        source_pick_id = str(outcome.get('source_pick_id', ''))
+        active_arm_index = outcome.get('active_arm_index')
+        active_arm_indices = outcome.get('active_arm_indices', [])
+        selected_arm_tag_ids = outcome.get('selected_arm_tag_ids', {})
+
+        task_obj = next((task for task in self._task_queue if task.task_id == task_id), None)
+        if task_obj is not None:
+            task_obj.parameters['carry_object'] = carry_object
+            if source_pick_id:
+                task_obj.parameters['source_pick_id'] = source_pick_id
+            if active_arm_index is not None:
+                task_obj.parameters['active_arm_index'] = active_arm_index
+            if isinstance(active_arm_indices, list):
+                task_obj.parameters['active_arm_indices'] = list(active_arm_indices)
+            if isinstance(selected_arm_tag_ids, dict):
+                task_obj.parameters['selected_arm_tag_ids'] = dict(selected_arm_tag_ids)
+
+        context_payload = self._task_context_by_id.get(task_id)
+        if isinstance(context_payload, dict):
+            context_payload['carry_object'] = carry_object
+            if source_pick_id:
+                context_payload['source_pick_id'] = source_pick_id
+            if active_arm_index is not None:
+                context_payload['active_arm_index'] = active_arm_index
+            if isinstance(active_arm_indices, list):
+                context_payload['active_arm_indices'] = list(active_arm_indices)
+            if isinstance(selected_arm_tag_ids, dict):
+                context_payload['selected_arm_tag_ids'] = dict(selected_arm_tag_ids)
 
     def handle_replan_required(self, outcome: Dict[str, Any]) -> bool:
         reason = str(outcome.get('outcome_reason', '')).upper()

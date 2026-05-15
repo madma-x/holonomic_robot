@@ -17,8 +17,8 @@ motion_controller_node:
       max_integral_error: 0.5      # max m/s from integral term (anti-windup)
       max_velocity: 1.5      # max linear velocity output (m/s)
 
-    # Extra cap applied only during tag alignment (kept separate from relative move)
-    alignment_max_linear_velocity: 0.05
+      # Extra cap applied only during tag alignment (kept separate from relative move)
+      alignment_max_linear_velocity: 0.15
     
     # Single-loop PID gains for rotation (theta)
     # Input: angle error (radians) → Output: angular velocity command (rad/s)
@@ -32,12 +32,12 @@ motion_controller_node:
       max_angular_velocity: 5.0    # max angular velocity output (rad/s)
     
     # Alignment convergence criteria
-    pos_tolerance: 0.01      # meters, XY error must be below this
-    ang_tolerance: 0.05      # radians, theta error must be below this
+    pos_tolerance: 0.0005      # meters, XY error must be below this
+    ang_tolerance: 0.02      # radians, theta error must be below this
     alignment_max_angular_velocity: 0.5   # rad/s cap used only during tag alignment
 
-    rel_move_pos_tolerance: 0.01        # meters default
-    rel_move_yaw_tolerance: 0.05        # radians default
+    rel_move_pos_tolerance: 0.05        # meters default
+    rel_move_yaw_tolerance: 0.04        # radians default
     
     # Topics
     cluster_topic: "/cluster_pickability"

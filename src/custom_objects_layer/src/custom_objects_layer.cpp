@@ -23,15 +23,11 @@ void CustomObjectsLayer::onInitialize()
 
   declareParameter("topic", rclcpp::ParameterValue(std::string("/custom_objects")));
   declareParameter("lethal_cost", rclcpp::ParameterValue(254));
-  declareParameter("object_size_x", rclcpp::ParameterValue(0.15));
-  declareParameter("object_size_y", rclcpp::ParameterValue(0.20));
 
   node->get_parameter(name_ + "." + "topic", topic_);
   int lethal_cost_int;
   node->get_parameter(name_ + "." + "lethal_cost", lethal_cost_int);
   lethal_cost_ = lethal_cost_int;
-  node->get_parameter(name_ + "." + "object_size_x", object_size_x_);
-  node->get_parameter(name_ + "." + "object_size_y", object_size_y_);
 
   sub_ = node->create_subscription<visualization_msgs::msg::MarkerArray>(
     topic_,
@@ -43,6 +39,7 @@ void CustomObjectsLayer::reset()
 {
   std::lock_guard<std::mutex> lk(mtx_);
   objects_.clear();
+  prev_objects_.clear();
   current_ = false;
 }
 
@@ -72,6 +69,10 @@ void CustomObjectsLayer::markersCallback(const visualization_msgs::msg::MarkerAr
     Obj object;
     object.x = marker.pose.position.x;
     object.y = marker.pose.position.y;
+    object.size_x = marker.scale.x;
+    object.size_y = marker.scale.y;
+    // Extract yaw from quaternion (qz, qw)
+    object.theta = 2.0 * std::atan2(marker.pose.orientation.z, marker.pose.orientation.w);
 
     objects_[object_key] = object;
   }
@@ -85,28 +86,49 @@ void CustomObjectsLayer::updateBounds(
 {
   std::lock_guard<std::mutex> lk(mtx_);
 
-  const double half_x = object_size_x_ * 0.5;
-  const double half_y = object_size_y_ * 0.5;
-
-  for (const auto & [_, object] : objects_) {
-    *min_x = std::min(*min_x, object.x - half_x);
-    *min_y = std::min(*min_y, object.y - half_y);
-    *max_x = std::max(*max_x, object.x + half_x);
-    *max_y = std::max(*max_y, object.y + half_y);
-  }
+  // Include both current and previous objects so deleted cells fall inside the update window
+  auto expand = [&](const Obj & obj) {
+    const double half_diag = 0.5 * std::hypot(obj.size_x, obj.size_y);
+    *min_x = std::min(*min_x, obj.x - half_diag);
+    *min_y = std::min(*min_y, obj.y - half_diag);
+    *max_x = std::max(*max_x, obj.x + half_diag);
+    *max_y = std::max(*max_y, obj.y + half_diag);
+  };
+  for (const auto & [_, obj] : objects_) { expand(obj); }
+  for (const auto & [_, obj] : prev_objects_) { expand(obj); }
 }
 
 void CustomObjectsLayer::drawRectangle(
-  nav2_costmap_2d::Costmap2D & grid, double center_x, double center_y, unsigned char cost)
+  nav2_costmap_2d::Costmap2D & grid,
+  double center_x, double center_y,
+  double size_x, double size_y,
+  double theta, unsigned char cost)
 {
-  const double min_x = center_x - (object_size_x_ * 0.5);
-  const double max_x = center_x + (object_size_x_ * 0.5);
-  const double min_y = center_y - (object_size_y_ * 0.5);
-  const double max_y = center_y + (object_size_y_ * 0.5);
+  const double half_x = size_x * 0.5;
+  const double half_y = size_y * 0.5;
+  const double cos_t = std::cos(theta);
+  const double sin_t = std::sin(theta);
+
+  // Four corners of the oriented rectangle in world frame
+  const double corners[4][2] = {
+    {center_x + cos_t * half_x - sin_t * half_y, center_y + sin_t * half_x + cos_t * half_y},
+    {center_x - cos_t * half_x - sin_t * half_y, center_y - sin_t * half_x + cos_t * half_y},
+    {center_x + cos_t * half_x + sin_t * half_y, center_y + sin_t * half_x - cos_t * half_y},
+    {center_x - cos_t * half_x + sin_t * half_y, center_y - sin_t * half_x - cos_t * half_y},
+  };
+
+  double wx_min = corners[0][0], wx_max = corners[0][0];
+  double wy_min = corners[0][1], wy_max = corners[0][1];
+  for (int i = 1; i < 4; ++i) {
+    wx_min = std::min(wx_min, corners[i][0]);
+    wx_max = std::max(wx_max, corners[i][0]);
+    wy_min = std::min(wy_min, corners[i][1]);
+    wy_max = std::max(wy_max, corners[i][1]);
+  }
 
   int min_mx_i, min_my_i, max_mx_i, max_my_i;
-  grid.worldToMapEnforceBounds(min_x, min_y, min_mx_i, min_my_i);
-  grid.worldToMapEnforceBounds(max_x, max_y, max_mx_i, max_my_i);
+  grid.worldToMapEnforceBounds(wx_min, wy_min, min_mx_i, min_my_i);
+  grid.worldToMapEnforceBounds(wx_max, wy_max, max_mx_i, max_my_i);
   if (min_mx_i < 0 || min_my_i < 0) {
     return;
   }
@@ -117,8 +139,16 @@ void CustomObjectsLayer::drawRectangle(
 
   for (unsigned int mx = min_mx; mx <= max_mx; ++mx) {
     for (unsigned int my = min_my; my <= max_my; ++my) {
-      const auto old_cost = grid.getCost(mx, my);
-      grid.setCost(mx, my, std::max(old_cost, cost));
+      // Test if the cell centre is inside the oriented rectangle
+      double wx, wy;
+      grid.mapToWorld(mx, my, wx, wy);
+      const double dx = wx - center_x;
+      const double dy = wy - center_y;
+      const double local_x = cos_t * dx + sin_t * dy;
+      const double local_y = -sin_t * dx + cos_t * dy;
+      if (std::abs(local_x) <= half_x && std::abs(local_y) <= half_y) {
+        grid.setCost(mx, my, cost);
+      }
     }
   }
 }
@@ -129,10 +159,19 @@ void CustomObjectsLayer::updateCosts(
 {
   std::lock_guard<std::mutex> lk(mtx_);
 
-  for (const auto & [_, object] : objects_) {
-    drawRectangle(master_grid, object.x, object.y, static_cast<unsigned char>(lethal_cost_));
+  // Erase only cells that we painted in the previous cycle (don't touch other layers).
+  for (const auto & [_, obj] : prev_objects_) {
+    drawRectangle(master_grid, obj.x, obj.y, obj.size_x, obj.size_y, obj.theta,
+      nav2_costmap_2d::FREE_SPACE);
   }
 
+  // Paint current objects.
+  for (const auto & [_, obj] : objects_) {
+    drawRectangle(master_grid, obj.x, obj.y, obj.size_x, obj.size_y, obj.theta,
+      static_cast<unsigned char>(lethal_cost_));
+  }
+
+  prev_objects_ = objects_;
   current_ = true;
 }
 

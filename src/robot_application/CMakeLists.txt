@@ -18,8 +18,10 @@ install(PROGRAMS
   scripts/game_state_manager.py
   scripts/mission_executor.py
   scripts/odom_theta_monitor.py
+  scripts/safety_arm_reset.py
   scripts/task_planner.py
   scripts/run_arm_sequence.py
+  scripts/custom_object_delete_test
   DESTINATION lib/${PROJECT_NAME}
 )
 

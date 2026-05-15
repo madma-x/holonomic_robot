@@ -115,6 +115,12 @@ class GameStateManager(Node):
     
     def start_match_callback(self, request, response):
         """Start match timer."""
+        if self.match_started:
+            response.success = True
+            response.message = 'Match already active'
+            self.get_logger().info('Ignoring duplicate /game/start_match while match is active')
+            return response
+
         planner_started, planner_message = self.start_match()
         response.success = planner_started
         response.message = (
@@ -200,6 +206,9 @@ class GameStateManager(Node):
     
     def start_match(self):
         """Start the match and request planner execution."""
+        if self.match_started:
+            return False, 'Match already active'
+
         self.match_started = True
         self._match_end_processed = False
         self.match_start_time = time.time()

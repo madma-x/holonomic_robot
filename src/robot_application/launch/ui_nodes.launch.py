@@ -35,7 +35,13 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
         ),
-
+        # Node(
+        #     package='rviz2',
+        #     executable='rviz2',
+        #     name='rviz2',
+        #     arguments=['-d', rviz_config],
+        #     output='screen',
+        # ),
         # Node(
         #     package='aruco_manager',
         #     executable='aruco_pose_debug_node.py',
@@ -47,13 +53,6 @@ def generate_launch_description():
         #         'pickability_topic': pickability_topic,
         #         'show_window': True,
         #     }],
-       # ),
+    #    )
 
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=['-d', rviz_config],
-            output='screen',
-        ),
     ])

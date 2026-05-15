@@ -1,7 +1,7 @@
 game_state_manager:
   ros__parameters:
     # Match configuration
-    match_duration_sec: 180.0       # 3 minutes
+    match_duration_sec: 85.0       # 85 seconds
     auto_start: false               # Manually start match
     planner_start_service: '/planner/start'
     planner_stop_service: '/planner/stop'
@@ -9,14 +9,14 @@ game_state_manager:
     team_color: blue
 
     # Initial pose by team color, published by /game/reset_pose
-    blue_initial_pose_x: 2.8
-    blue_initial_pose_y: 1.8
-    blue_initial_pose_theta: 3.14
-    yellow_initial_pose_x: 0.4
+    blue_initial_pose_x: 2.727761
+    blue_initial_pose_y: 1.7
+    blue_initial_pose_theta: 0.0
+    yellow_initial_pose_x: 0.272239
     yellow_initial_pose_y: 1.7
     yellow_initial_pose_theta: 3.14
     
     # Phase thresholds (seconds remaining)
-    early_phase_threshold: 60.0     # >60s = EARLY
+    early_phase_threshold: 30.0     # >60s = EARLY
     mid_phase_threshold: 30.0       # 30-60s = MID
-    late_phase_threshold: 10.0      # 10-30s = LATE, <10s = ENDGAME
+    late_phase_threshold: 25.0      # 10-30s = LATE, <10s = ENDGAME

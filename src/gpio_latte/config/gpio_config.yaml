@@ -7,6 +7,8 @@ gpio_manager:
     start_latch_pullup: true
     start_latch_trigger_value: 0
     start_latch_debounce_ms: 50
+    start_latch_retrigger_lockout_ms: 1500
+    start_latch_reconnect_sec: 1.0
     start_match_service: "/game/start_match"
     match_active_topic: "/game/match_active"
     match_ready_topic: "/game/match_ready"

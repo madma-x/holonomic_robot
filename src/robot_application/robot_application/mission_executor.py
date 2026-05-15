@@ -10,7 +10,7 @@ from std_msgs.msg import String
 from robot_application.mission_base import MissionBase, MissionState
 from robot_application.handlers.pick_place_handler import PickPlaceHandler
 from robot_application.handlers.return_base_handler import ReturnBaseHandler
-
+from robot_application.handlers.goto_pose_handler import GotoPoseHandler
 
 class MissionExecutor(MissionBase):
     """Centralized mission executor using in-process mission handlers."""
@@ -22,7 +22,7 @@ class MissionExecutor(MissionBase):
         assignment_topic = self.get_parameter('task_assignment_topic').value
 
         self.task_queue: List[dict] = []
-        self.handlers = [PickPlaceHandler(self), ReturnBaseHandler(self)]
+        self.handlers = [PickPlaceHandler(self), ReturnBaseHandler(self), GotoPoseHandler(self)]
         self.outcome_seq = 0
 
         self.assignment_sub = self.create_subscription(

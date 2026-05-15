@@ -1,5 +1,6 @@
 """Pick-and-place mission handler for MissionExecutor."""
 
+import math
 import time
 from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +13,7 @@ from rclpy.qos import DurabilityPolicy
 from rclpy.qos import HistoryPolicy
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker, MarkerArray
 
 from aruco_interfaces.msg import ArmAssignment
@@ -27,13 +29,16 @@ class PickPlaceHandler:
     def __init__(self, executor_node):
         self.node = executor_node
         self.latest_pickability: Optional[ClusterPickability] = None
+        self._pickability_seq: int = 0
         self._cached_team_color: Optional[str] = None
+        self._first_task_team_move_done: bool = False
 
         self.node.declare_parameter('pickability_topic', '/cluster_pickability')
         self.node.declare_parameter('align_service_name', '/align_to_cluster')
-        self.node.declare_parameter('align_timeout_sec', 5.0)
-        self.node.declare_parameter('align_threshold', 0.003)
-        self.node.declare_parameter('pickability_wait_sec', 2.0)
+        self.node.declare_parameter('align_timeout_sec', 8.0)
+        self.node.declare_parameter('align_threshold', 0.002)
+        self.node.declare_parameter('pickability_wait_sec', 5.0)
+        self.node.declare_parameter('pickability_confirm_sec', 1.5)
         self.node.declare_parameter('priority_penalty', 1)
         self.node.declare_parameter('sticky_confirm_wait_sec', 0.4)
         self.node.declare_parameter('tag_manager_node_name', '/tag_manager_node')
@@ -42,6 +47,10 @@ class PickPlaceHandler:
         self.node.declare_parameter('drop_clear_wait_sec', 1.0)
         self.node.declare_parameter('custom_objects_topic', '/custom_objects')
         self.node.declare_parameter('custom_objects_marker_ns', 'custom_objects')
+        self.node.declare_parameter('custom_objects_delete_republish_count', 3)
+        self.node.declare_parameter('custom_objects_delete_republish_delay_sec', 0.05)
+        self.node.declare_parameter('pick_reset_pose_topic', '/initialpose')
+        self.node.declare_parameter('drop_marker_arm_x_offset_m', 0.20)
 
         pickability_topic = self.node.get_parameter('pickability_topic').value
         align_service_name = self.node.get_parameter('align_service_name').value
@@ -49,6 +58,7 @@ class PickPlaceHandler:
         game_state_manager_node_name = self.node.get_parameter('game_state_manager_node_name').value
         self.custom_objects_topic = str(self.node.get_parameter('custom_objects_topic').value)
         self.custom_objects_marker_ns = str(self.node.get_parameter('custom_objects_marker_ns').value)
+        self.pick_reset_pose_topic = str(self.node.get_parameter('pick_reset_pose_topic').value)
         self.sequence_builder = ArmSequenceBuilder()
         self.drop_target_manager = DropTargetManager(self.node)
 
@@ -66,6 +76,11 @@ class PickPlaceHandler:
             self.custom_objects_topic,
             custom_objects_qos,
         )
+        self.pick_reset_pose_pub = self.node.create_publisher(
+            PoseWithCovarianceStamped,
+            self.pick_reset_pose_topic,
+            10,
+        )
         self.pickability_sub = self.node.create_subscription(
             ClusterPickability,
             pickability_topic,
@@ -73,12 +88,28 @@ class PickPlaceHandler:
             10
         )
 
+        # Hard-coded per-pick map reset poses after successful alignment.
+        self._pick_reset_pose_by_id: Dict[str, Dict[str, float]] = {
+            '1': {'x': 0.37239, 'y': 0.40, 'theta': 3.14},
+            '2': {'x': 0.372239, 'y': 1.20, 'theta': 3.14},
+            '3': {'x': 1.45, 'y': 0.60, 'theta': 0.00},
+            '4': {'x': 1.85, 'y': 0.60, 'theta': 1.57},
+            '5': {'x': 2.60, 'y': 0.40, 'theta': 1.57},
+        }
+        # One-time opening move before the first pick-place task.
+        # Team colors are mirrored, so lateral offset sign is mirrored too.
+        self._first_task_team_relative_move: Dict[str, Dict[str, float]] = {
+            'blue': {'x': -0.2, 'y': -0.5, 'yaw': 0.0},
+            'yellow': {'x': -0.2, 'y': -0.5, 'yaw': 0.0},
+        }
+
     def can_handle(self, task: dict) -> bool:
         task_type = str(task.get('task_type', '')).lower()
         return task_type in ('move_object', 'pick_place', 'pick_and_place')
 
     def pickability_callback(self, msg: ClusterPickability):
         self.latest_pickability = msg
+        self._pickability_seq += 1
         
     def execute(self, task: dict) -> Dict[str, Any]:
         carry_object = bool(task.get('carry_object', False))
@@ -87,6 +118,16 @@ class PickPlaceHandler:
         selected_arm_tag_ids = self._task_selected_arm_tag_ids(task)
         pick_ref: Optional[dict] = None
         team_color = self.get_team_color()
+
+        if not self._run_first_task_team_relative_move(team_color, task):
+            return self._build_outcome(
+                task,
+                'FAILED',
+                'OPENING_REL_MOVE_FAIL',
+                carry_object,
+                source_pick_id=source_pick_id,
+                active_arm_indices=active_arm_indices,
+            )
 
         self.node.get_logger().info(
             'PickPlace execute() start: '
@@ -126,10 +167,15 @@ class PickPlaceHandler:
                     self.lower_pick_priority(task, pick_ref, 'approach unreachable')
                     return self._build_outcome(task, 'FAILED', 'NAV_FAIL', False, source_pick_id=source_pick_id)
 
-
-                self.node.get_logger().info('Step 6: waiting for pickability message')
+                pickability_wait_sec = float(self.node.get_parameter('pickability_wait_sec').value)
+                pickability_confirm_sec = float(self.node.get_parameter('pickability_confirm_sec').value)
+                self.node.get_logger().info(
+                    'Step 6: waiting up to '
+                    f'{pickability_wait_sec:.2f}s for fresh pickability and '
+                    f'{pickability_confirm_sec:.2f}s stable assignment confirmation'
+                )
                 pickability = self.wait_for_pickability()
-                if pickability is None or not bool(pickability.is_pickable):
+                if pickability is None:
                     self.node.get_logger().warn('Step 6: pickability check failed or timed out')
                     self.lower_pick_priority(task, pick_ref, 'not pickable')
                     return self._build_outcome(
@@ -145,6 +191,10 @@ class PickPlaceHandler:
                     'Step 6: pickability confirmed '
                     f'Step 6: pickability message: {pickability}'
                 )
+                if not bool(getattr(pickability, 'is_pickable', True)):
+                    self.node.get_logger().warn(
+                        'Step 6: pickability.is_pickable is false; continuing with assigned pickable arms'
+                    )
                 active_arm_indices = self.select_pick_arm_indices(pickability)
                 if not active_arm_indices:
                     self.node.get_logger().warn('Step 6: no arm is assigned to a pickable object')
@@ -178,13 +228,11 @@ class PickPlaceHandler:
                     f'Step 6: selected arm_indices={active_arm_indices} tag_ids={selected_tag_ids}'
                 )
 
-                # Keep arm->tag mapping stable only while robot is in the pick window.
                 self.node.get_logger().info('Step 5: enabling sticky arm-tag assignment')
                 self._set_sticky_assignment(True)
 
                 if not self.wait_for_sticky_active():
                     self.node.get_logger().warn('Step 5: sticky confirmation timeout, proceeding anyway')
-
 
                 cluster_id = int(getattr(pickability, 'cluster_id', 0))
                 self.node.get_logger().info(f'Step 7: calling align_to_cluster for cluster_id={cluster_id}')
@@ -194,6 +242,12 @@ class PickPlaceHandler:
                     return self._build_outcome(task, 'FAILED', 'ALIGN_FAIL', False, source_pick_id=source_pick_id)
 
                 self.node.get_logger().info('Step 7: alignment succeeded')
+                if self.should_publish_pick_reset_pose(pickability):
+                    self.publish_pick_reset_pose(task)
+                else:
+                    self.node.get_logger().info(
+                        'Step 7: skip map/odom reset pose publish (requires exactly 4 pickable objects)'
+                    )
                 self.node.get_logger().info(
                     f'Step 8: executing pick sequence for arm_indices={active_arm_indices}'
                 )
@@ -345,46 +399,83 @@ class PickPlaceHandler:
             selected_arm_tag_ids=selected_arm_tag_ids,
         )
 
+    def _run_first_task_team_relative_move(self, team_color: str, task: dict) -> bool:
+        if self._first_task_team_move_done:
+            return True
+
+        normalized_color = str(team_color).strip().lower()
+        if normalized_color not in self._first_task_team_relative_move:
+            normalized_color = 'blue'
+
+        move = self._first_task_team_relative_move[normalized_color]
+        self.node.get_logger().info(
+            'Opening relative move before first task: '
+            f"task_id={task.get('task_id', 'unknown')} team={normalized_color} "
+            f"x={float(move.get('x', 0.0)):.3f} y={float(move.get('y', 0.0)):.3f} "
+            f"yaw={float(move.get('yaw', 0.0)):.3f}"
+        )
+
+        success = self.node.move_relative(
+            float(move.get('x', 0.0)),
+            float(move.get('y', 0.0)),
+            float(move.get('yaw', 0.0)),
+            timeout_s=5.0,
+            max_linear_speed_mps=0.8,
+            max_angular_speed_rps=0.6,
+        )
+        if not success:
+            self.node.get_logger().error('Opening relative move failed')
+            return False
+
+        self._first_task_team_move_done = True
+        self.node.get_logger().info('Opening relative move completed')
+        return True
+
     def _clear_picked_object_from_costmap(self, task: dict, source_pick_id: str):
-        """Remove the picked object's marker group from the custom Nav2 obstacle layer."""
+        """Remove the picked object marker from the custom Nav2 obstacle layer.
+
+        Marker ID = pick_id - 1  (pick ids 1..8 → marker ids 0..7).
+        """
         pick_location = task.get('pick_location', {}) if isinstance(task.get('pick_location', {}), dict) else {}
-        marker_group_id = pick_location.get('marker_group_id')
+        pick_location_id = pick_location.get('id', source_pick_id)
 
-        marker_ids: List[int] = []
-        if marker_group_id is not None and marker_group_id != '':
-            try:
-                group_index = int(marker_group_id)
-            except (TypeError, ValueError):
-                self.node.get_logger().warn(
-                    f'Custom object removal skipped: marker_group_id is invalid ({marker_group_id!r})'
-                )
-                return
+        try:
+            marker_id = int(pick_location_id) - 1
+        except (TypeError, ValueError):
+            self.node.get_logger().warn(
+                f'Custom object removal skipped: pick_location_id is not numeric ({pick_location_id!r})'
+            )
+            return
 
-            group_size = 4
-            marker_ids = [group_index * group_size + offset for offset in range(group_size)]
-        else:
-            try:
-                marker_ids = [int(str(source_pick_id))]
-            except (TypeError, ValueError):
-                self.node.get_logger().warn(
-                    f'Custom object removal skipped: no marker_group_id and source_pick_id is not numeric ({source_pick_id!r})'
-                )
-                return
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.node.get_clock().now().to_msg()
+        marker.ns = self.custom_objects_marker_ns
+        marker.id = marker_id
+        marker.action = Marker.DELETE
 
         marker_array = MarkerArray()
-        stamp = self.node.get_clock().now().to_msg()
-        for object_id in marker_ids:
-            marker = Marker()
-            marker.header.frame_id = 'map'
-            marker.header.stamp = stamp
-            marker.ns = self.custom_objects_marker_ns
-            marker.id = object_id
-            marker.action = Marker.DELETE
-            marker_array.markers.append(marker)
+        marker_array.markers.append(marker)
 
-        self.custom_objects_pub.publish(marker_array)
+        republish_count = int(self.node.get_parameter('custom_objects_delete_republish_count').value)
+        republish_delay_sec = float(
+            self.node.get_parameter('custom_objects_delete_republish_delay_sec').value
+        )
+        republish_count = max(1, republish_count)
+        republish_delay_sec = max(0.0, republish_delay_sec)
+
+        for publish_index in range(republish_count):
+            for marker in marker_array.markers:
+                marker.header.stamp = self.node.get_clock().now().to_msg()
+            self.custom_objects_pub.publish(marker_array)
+            if publish_index < republish_count - 1 and republish_delay_sec > 0.0:
+                time.sleep(republish_delay_sec)
+
         self.node.get_logger().info(
-            f'Published custom object DELETE for ns={self.custom_objects_marker_ns!r} ids={marker_ids}'
+            'Published custom object DELETE for '
+            f'pick_location_id={pick_location_id!r} '
+            f'ns={self.custom_objects_marker_ns!r} id={marker_id} '
+            f'(republished {republish_count}x, delay={republish_delay_sec:.3f}s)'
         )
 
 
@@ -432,12 +523,57 @@ class PickPlaceHandler:
 
     def wait_for_pickability(self) -> Optional[ClusterPickability]:
         timeout = float(self.node.get_parameter('pickability_wait_sec').value)
+        confirm_sec = max(0.0, float(self.node.get_parameter('pickability_confirm_sec').value))
         deadline = self.node.get_clock().now() + Duration(seconds=timeout)
+        start_seq = int(self._pickability_seq)
+        stable_arms: Optional[Tuple[int, ...]] = None
+        stable_since = None
+        stable_pickability: Optional[ClusterPickability] = None
 
         while self.node.get_clock().now() < deadline and not self.node.stop_requested:
-            if self.latest_pickability is not None:
-                return self.latest_pickability
+            pickability = self.latest_pickability
+            if pickability is None:
+                time.sleep(0.05)
+                continue
+
+            # Require a fresh callback after entering the wait window.
+            if int(self._pickability_seq) <= start_seq:
+                time.sleep(0.05)
+                continue
+
+            current_arms = tuple(self.select_pick_arm_indices(pickability))
+            if not current_arms:
+                stable_arms = None
+                stable_since = None
+                stable_pickability = None
+                time.sleep(0.05)
+                continue
+
+            now = self.node.get_clock().now()
+            if current_arms != stable_arms:
+                stable_arms = current_arms
+                stable_since = now
+                stable_pickability = pickability
+                time.sleep(0.05)
+                continue
+
+            stable_pickability = pickability
+            if confirm_sec <= 0.0:
+                return stable_pickability
+
+            if stable_since is not None and (now - stable_since) >= Duration(seconds=confirm_sec):
+                return stable_pickability
+
             time.sleep(0.05)
+
+        pickability = self.latest_pickability
+        if pickability is not None:
+            self.node.get_logger().warn(
+                'wait_for_pickability timeout: '
+                f'is_pickable={bool(getattr(pickability, "is_pickable", False))} '
+                f'assigned_count={int(getattr(pickability, "assigned_count", 0))} '
+                f'seq_start={start_seq} seq_now={int(self._pickability_seq)}'
+            )
 
         return None
 
@@ -468,6 +604,54 @@ class PickPlaceHandler:
 
         self.node.get_logger().info(f'Alignment successful: {response.status_message}')
         return bool(response.success)
+
+    def publish_pick_reset_pose(self, task: dict) -> bool:
+        """Publish a hard-coded /initialpose reset mapped by pick id after alignment."""
+        pick_location = task.get('pick_location', {}) if isinstance(task.get('pick_location', {}), dict) else {}
+        pick_id = str(
+            task.get('source_pick_id')
+            or pick_location.get('id')
+            or ''
+        )
+        pose = self._pick_reset_pose_by_id.get(pick_id)
+        if not isinstance(pose, dict):
+            self.node.get_logger().warn(
+                f'No hard-coded reset pose for pick_id={pick_id}; skip map/odom reset after alignment'
+            )
+            return False
+
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.pose.pose.position.x = float(pose.get('x', 0.0))
+        msg.pose.pose.position.y = float(pose.get('y', 0.0))
+        msg.pose.pose.position.z = 0.0
+        theta = float(pose.get('theta', 0.0))
+        msg.pose.pose.orientation.z = math.sin(theta / 2.0)
+        msg.pose.pose.orientation.w = math.cos(theta / 2.0)
+        msg.pose.covariance[0] = 0.000025
+        msg.pose.covariance[7] = 0.000025
+        msg.pose.covariance[35] = 0.0003
+
+        self.pick_reset_pose_pub.publish(msg)
+        self.node.get_logger().info(
+            f'Published pick reset pose after alignment for pick_id={pick_id}: '
+            f'x={float(pose.get("x", 0.0)):.3f}, y={float(pose.get("y", 0.0)):.3f}, theta={theta:.3f}'
+        )
+        return True
+
+    def should_publish_pick_reset_pose(self, pickability: ClusterPickability) -> bool:
+        """Allow map/odom reset only when exactly 4 objects are pickable/assigned."""
+        assigned_count = int(getattr(pickability, 'assigned_count', 0))
+        if assigned_count == 4:
+            return True
+
+        # Fallback for robustness if assigned_count is not filled as expected.
+        assigned_arms = [
+            arm for arm in getattr(pickability, 'arms', [])
+            if bool(getattr(arm, 'assigned', False))
+        ]
+        return len(assigned_arms) == 4
 
     def execute_pick_sequence(self, arm_indices: List[int]) -> bool:
         """Execute the configured pick sequence for the selected arms."""
@@ -536,13 +720,18 @@ class PickPlaceHandler:
         )
 
     def _publish_dropped_object_marker(self, drop_id: str, drop_ref: dict, nav_goal: dict):
-        """Publish an ADD marker at the drop position after post-drop backup."""
+        """Publish an ADD marker at arm-tip pose (drop pose + X offset along heading)."""
         location = drop_ref.get('location') if isinstance(drop_ref, dict) else None
         if not isinstance(location, dict):
             location = nav_goal if isinstance(nav_goal, dict) else {}
 
-        x = float(location.get('x', 0.0))
-        y = float(location.get('y', 0.0))
+        base_x = float(location.get('x', 0.0))
+        base_y = float(location.get('y', 0.0))
+        base_theta = float(location.get('theta', 0.0))
+        arm_x_offset = float(self.node.get_parameter('drop_marker_arm_x_offset_m').value)
+
+        x = base_x + arm_x_offset * math.cos(base_theta)
+        y = base_y + arm_x_offset * math.sin(base_theta)
 
         marker = Marker()
         marker.header.frame_id = 'map'
@@ -554,7 +743,8 @@ class PickPlaceHandler:
         marker.pose.position.x = x
         marker.pose.position.y = y
         marker.pose.position.z = 0.0
-        marker.pose.orientation.w = 1.0
+        marker.pose.orientation.z = math.sin(base_theta / 2.0)
+        marker.pose.orientation.w = math.cos(base_theta / 2.0)
         marker.scale.x = 0.15
         marker.scale.y = 0.05
         marker.scale.z = 0.02
@@ -568,7 +758,8 @@ class PickPlaceHandler:
         marker_array.markers.append(marker)
         self.custom_objects_pub.publish(marker_array)
         self.node.get_logger().info(
-            f'Published custom object ADD marker for drop {drop_id} at x={x:.3f}, y={y:.3f}, id={marker.id}'
+            f'Published custom object ADD marker for drop {drop_id} at x={x:.3f}, y={y:.3f}, '
+            f'theta={base_theta:.3f}, arm_x_offset={arm_x_offset:.3f}, id={marker.id}'
         )
 
     @staticmethod
@@ -788,7 +979,7 @@ class PickPlaceHandler:
         task: dict,
         excluded_ids: Optional[set] = None
     ) -> Optional[Tuple[dict, dict]]:
-        """Select a feasible drop base pose not excluded by replanning."""
+        """Select drop pose directly from configured drop location (manager bypassed)."""
         excluded_ids = excluded_ids or set()
         drop_ref = task.get('drop_location')
         if drop_ref:
@@ -805,26 +996,16 @@ class PickPlaceHandler:
                 approaches = drop_ref.get('approach_positions', [])
                 location = approaches[0] if approaches else {'x': 0.0, 'y': 0.0, 'theta': 0.0}
 
-            nav_goal, diagnostics = self.drop_target_manager.select_navigation_goal(
-                drop_id=drop_id,
-                drop_location=location,
-            )
-            if nav_goal is None:
-                excluded_ids.add(drop_id)
-                task['excluded_drop_ids'] = sorted(list(excluded_ids))
-                self.node.get_logger().warn(
-                    f'Drop {drop_id} rejected by drop target manager: '
-                    f"tested={int(diagnostics.get('tested_candidates', 0))} "
-                    f"feasible={int(diagnostics.get('feasible_candidates', 0))} "
-                    f"rejects={diagnostics.get('reject_reasons', {})}"
-                )
-                continue
+            nav_goal = {
+                'x': float(location.get('x', 0.0)),
+                'y': float(location.get('y', 0.0)),
+                'theta': float(location.get('theta', 0.0)),
+            }
 
             task['target_drop_id'] = drop_id
             self.node.get_logger().info(
-                f'Drop {drop_id} selected by drop target manager: '
-                f"tested={int(diagnostics.get('tested_candidates', 0))} "
-                f"feasible={int(diagnostics.get('feasible_candidates', 0))}"
+                f"Drop {drop_id} selected from configured pose: "
+                f"x={nav_goal['x']:.3f}, y={nav_goal['y']:.3f}, theta={nav_goal['theta']:.3f}"
             )
             return nav_goal, drop_ref
 

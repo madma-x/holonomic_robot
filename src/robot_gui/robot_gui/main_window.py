@@ -310,18 +310,51 @@ class MainWindow(QMainWindow):
                 )
                 return
         self.local.match_ready = not self.local.match_ready
-        self.ros.publish_match_ready(self.local.match_ready)
         if self.local.match_ready:
             self.local.latch_armed = True
             self.local.latch_status = 'Armed (waiting latch removal)'
             self.ready_button.setText('Match Ready: ON')
-            self.ros.set_game_team_color(self.local.team_color)
-            self.ros.call_named_service('reset_pose')
-            self.feedback_label.setText('Ready armed: pose reset from game_state config; latch/manual start can begin match.')
+            future = self.ros.set_game_team_color(self.local.team_color)
+
+            def _after_team_color_set(fut):
+                try:
+                    result = fut.result()
+                except Exception as error:
+                    self.feedback_label.setText(f'Failed to set team color: {error}')
+                    self.local.match_ready = False
+                    self.ready_button.setText('Match Ready: OFF')
+                    return
+
+                if not result:
+                    self.feedback_label.setText('Failed to set team color: no response')
+                    self.local.match_ready = False
+                    self.ready_button.setText('Match Ready: OFF')
+                    return
+
+                results = result.results if hasattr(result, 'results') else result
+                first = results[0]
+                if not first.successful:
+                    reason = str(first.reason) if getattr(first, 'reason', '') else 'unknown reason'
+                    self.feedback_label.setText(f'Failed to set team color: {reason}')
+                    self.local.match_ready = False
+                    self.ready_button.setText('Match Ready: OFF')
+                    return
+
+                self.ros.publish_match_ready(True)
+                self.ros.call_named_service('reset_pose')
+                self.feedback_label.setText('Ready armed: pose reset from game_state config; latch/manual start can begin match.')
+
+            if future is None:
+                self.feedback_label.setText('Failed to set team color: service unavailable')
+                self.local.match_ready = False
+                self.ready_button.setText('Match Ready: OFF')
+            else:
+                future.add_done_callback(_after_team_color_set)
         else:
             self.local.latch_armed = False
             self.local.latch_status = 'Idle'
             self.ready_button.setText('Match Ready: OFF')
+            self.ros.publish_match_ready(False)
             self.feedback_label.setText('Ready disarmed: latch removal ignored.')
         self._refresh_local_labels()
 

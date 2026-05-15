@@ -3,13 +3,13 @@ task_planner:
     # Planning configuration
     replan_interval_sec: 5.0        # Re-evaluate priorities every 5s
     enable_task_interruption: true  # Allow interrupting current task
-    min_utility_threshold: 0.5      # Minimum utility to consider task
+    min_utility_threshold: 0.0      # Minimum utility to consider task
     
     # Base locations by team color
-    blue_base_location_x: 2.7
+    blue_base_location_x: 2.727761
     blue_base_location_y: 1.7
     blue_base_location_theta: 0.0
-    yellow_base_location_x: 0.2
+    yellow_base_location_x: 0.327239
     yellow_base_location_y: 1.7
     yellow_base_location_theta: 0.0
 

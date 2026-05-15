@@ -47,15 +47,9 @@ else
   exit 1
 fi
 
-echo "Configuring can0 at 1 Mbps..."
-if ip link show can0 >/dev/null 2>&1; then
-  run_privileged ip link set can0 down || true
-  run_privileged ip link set can0 type can bitrate 1000000
-  run_privileged ip link set can0 up
-else
-  echo "can0 not found; attempting to create it..."
-  run_privileged ip link add dev can0 type can bitrate 1000000
-  run_privileged ip link set can0 up
+echo "Verifying can0 is up (handled by can0.service at boot)..."
+if ! ip link show can0 2>/dev/null | grep -q "UP"; then
+  echo "Warning: can0 is not UP. Run: sudo systemctl start can0.service" >&2
 fi
 
 echo "Launching nav2_odom_only..."
