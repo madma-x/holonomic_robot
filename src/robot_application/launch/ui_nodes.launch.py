@@ -42,17 +42,17 @@ def generate_launch_description():
         #     arguments=['-d', rviz_config],
         #     output='screen',
         # ),
-        # Node(
-        #     package='aruco_manager',
-        #     executable='aruco_pose_debug_node.py',
-        #     name='aruco_pose_debug_ui',
-        #     output='screen',
-        #     parameters=[{
-        #         'camera_topic': camera_topic,
-        #         'tags_topic': tags_topic,
-        #         'pickability_topic': pickability_topic,
-        #         'show_window': True,
-        #     }],
-    #    )
+        Node(
+            package='aruco_manager',
+            executable='aruco_pose_debug_node.py',
+            name='aruco_pose_debug_ui',
+            output='screen',
+            parameters=[{
+                'camera_topic': camera_topic,
+                'tags_topic': tags_topic,
+                'pickability_topic': pickability_topic,
+                'show_window': True,
+            }],
+       )
 
     ])

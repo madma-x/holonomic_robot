@@ -71,6 +71,7 @@ class ArmSequenceBuilder:
             *self._build_pwm_steps(end_effectors, target='pick', parallel_group=1),
             *self._build_pump_steps(end_effectors, enable=True, parallel_group=2),
             *self._build_lift_steps(end_effectors, target='up', parallel_group=3),
+            *self._build_pwm_steps(end_effectors, target='stow', parallel_group=4),
         ]
 
     def build_swap_sequence(self, arm_indices: Iterable[int]) -> list:
@@ -136,6 +137,7 @@ class ArmSequenceBuilder:
             ]
         elif swap_effectors:
             return [
+                *self._build_pwm_steps(swap_effectors, target='pick', parallel_group=1),
                 *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
                 *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
                 *self._build_pump_steps(non_swap_effectors, enable=False, parallel_group=2),
@@ -147,9 +149,10 @@ class ArmSequenceBuilder:
             ]
         else:
             return [
-                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=2),
-                *self._build_pump_steps(end_effectors, enable=False, parallel_group=3),
-                *self._build_lift_steps(end_effectors, target='up', parallel_group=4),
+                *self._build_pwm_steps(non_swap_effectors, target='pick', parallel_group=1),
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
+                *self._build_pump_steps(end_effectors, enable=False, parallel_group=2),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=3),
             ]
 
     def _resolve_end_effectors(self, arm_indices: Iterable[int]) -> list[EndEffectorConfig]:

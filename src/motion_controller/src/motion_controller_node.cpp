@@ -43,6 +43,8 @@ public:
         this->declare_parameter<double>("rel_move_pos_tolerance", 0.01);
         this->declare_parameter<double>("rel_move_yaw_tolerance", 0.05);
         this->declare_parameter<double>("alignment_max_angular_velocity", 0.5);
+        this->declare_parameter<double>("alignment_loss_grace_sec", 0.5);
+        this->declare_parameter<bool>("alignment_enable_theta", true);
         this->declare_parameter<bool>("verbose_logging", false);
         this->declare_parameter<std::string>("cluster_topic", "/aruco_manager/cluster_pickability");
         this->declare_parameter<std::string>("odometry_topic", "/odom");
@@ -53,6 +55,8 @@ public:
         cluster_timeout_ms_ = this->get_parameter("cluster_timeout_ms").as_int();
         alignment_max_linear_velocity_ = this->get_parameter("alignment_max_linear_velocity").as_double();
         alignment_max_angular_velocity_ = this->get_parameter("alignment_max_angular_velocity").as_double();
+        alignment_loss_grace_sec_ = this->get_parameter("alignment_loss_grace_sec").as_double();
+        alignment_enable_theta_ = this->get_parameter("alignment_enable_theta").as_bool();
         pid_xy_max_velocity_ = this->get_parameter("pid_xy.max_velocity").as_double();
         pid_theta_max_angular_velocity_ = this->get_parameter("pid_theta.max_angular_velocity").as_double();
         pos_tolerance_ = this->get_parameter("pos_tolerance").as_double();
@@ -69,6 +73,9 @@ public:
         }
         if (final_stop_hold_ms_ < 0) {
             final_stop_hold_ms_ = 0;
+        }
+        if (alignment_loss_grace_sec_ < 0.0) {
+            alignment_loss_grace_sec_ = 0.0;
         }
         stop_hold_until_ = this->now();
 
@@ -200,6 +207,8 @@ private:
     PoseXY frozen_loss_target_{0.0, 0.0, 0.0};
     PoseXY frozen_loss_target_world_{0.0, 0.0, 0.0};
     bool frozen_loss_mode_ = false;
+    bool alignment_loss_active_ = false;
+    rclcpp::Time alignment_loss_start_time_;
 
     // Robot state (from odometry)
     struct RobotState {
@@ -212,6 +221,8 @@ private:
     double pos_tolerance_, ang_tolerance_;
     double alignment_max_linear_velocity_;
     double alignment_max_angular_velocity_;
+    double alignment_loss_grace_sec_;
+    bool alignment_enable_theta_;
     double pid_xy_max_velocity_;
     double pid_theta_max_angular_velocity_;
     double rel_move_pos_tolerance_default_;
@@ -265,33 +276,6 @@ private:
         latest_cluster_.msg = *msg;
         latest_cluster_.timestamp = this->now();
         latest_cluster_.received = true;
-
-        if (msg->sticky_active && msg->cluster_lost) {
-            if (!frozen_loss_mode_) {
-                // Pickability axes are swapped w.r.t. robot state axes.
-                frozen_loss_target_.x = msg->correction.y;
-                frozen_loss_target_.y = msg->correction.x;
-                frozen_loss_target_.theta = msg->correction.z;
-
-                // Freeze a world-frame target once: current odom + last error.
-                frozen_loss_target_world_.x = robot_state_.x + frozen_loss_target_.x;
-                frozen_loss_target_world_.y = robot_state_.y + frozen_loss_target_.y;
-                frozen_loss_target_world_.theta = robot_state_.theta + frozen_loss_target_.theta;
-                while (frozen_loss_target_world_.theta > M_PI) frozen_loss_target_world_.theta -= 2.0 * M_PI;
-                while (frozen_loss_target_world_.theta < -M_PI) frozen_loss_target_world_.theta += 2.0 * M_PI;
-                frozen_loss_mode_ = true;
-                last_confident_pose_ = frozen_loss_target_;
-                have_confident_pose_ = true;
-                if (verbose_logging_) {
-                    RCLCPP_WARN(this->get_logger(),
-                        "Sticky cluster lost (%u frames), freezing correction target",
-                        static_cast<unsigned int>(msg->lost_tracking_frames));
-                }
-            }
-            return;
-        }
-
-        frozen_loss_mode_ = false;
 
         // Update last confident pose when cluster is seen and is pickable
         if (msg->is_pickable) {
@@ -347,6 +331,8 @@ private:
                 ? static_cast<double>(request->alignment_threshold)
                 : pos_tolerance_;
         have_last_alignment_error_pose_ = false;
+        alignment_loss_active_ = false;
+        alignment_loss_start_time_ = this->now();
         stop_hold_until_ = this->now();
         
         // Keep a recent matching cluster sample if available
@@ -593,29 +579,25 @@ private:
         bool cluster_available = false;
         PoseXY error_pose{0.0, 0.0, 0.0};
 
-        if (frozen_loss_mode_) {
-            // In loss mode, compute fresh delta error against frozen world target.
-            error_pose.x = frozen_loss_target_world_.x - robot_state_.x;
-            error_pose.y = frozen_loss_target_world_.y - robot_state_.y;
-            error_pose.theta = frozen_loss_target_world_.theta - robot_state_.theta;
-            while (error_pose.theta > M_PI) error_pose.theta -= 2.0 * M_PI;
-            while (error_pose.theta < -M_PI) error_pose.theta += 2.0 * M_PI;
-            cluster_available = true;
-            if (verbose_logging_) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "Control loop using frozen loss target while sticky cluster is lost");
-            }
-        } else if (latest_cluster_.received) {
+        if (latest_cluster_.received) {
             auto age_ms = (this->now() - latest_cluster_.timestamp).nanoseconds() / 1e6;
             if (age_ms < cluster_timeout_ms_) {
-                // Correction is robot-frame error with swapped X/Y axes from pickability.
-                cluster_available = true;
-                error_pose.x = latest_cluster_.msg.correction.y;
-                error_pose.y = latest_cluster_.msg.correction.x;
-                error_pose.theta = latest_cluster_.msg.correction.z;
-                if (verbose_logging_) {
-                    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                        "Control loop using live cluster correction (age=%.1f ms)", age_ms);
+                const bool sticky_lost =
+                    latest_cluster_.msg.sticky_active && latest_cluster_.msg.cluster_lost;
+                if (!sticky_lost) {
+                    // Correction is robot-frame error with swapped X/Y axes from pickability.
+                    cluster_available = true;
+                    error_pose.x = latest_cluster_.msg.correction.y;
+                    error_pose.y = latest_cluster_.msg.correction.x;
+                    error_pose.theta = latest_cluster_.msg.correction.z;
+                    if (verbose_logging_) {
+                        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "Control loop using live cluster correction (age=%.1f ms)", age_ms);
+                    }
+                } else if (verbose_logging_) {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                        "Cluster temporarily lost during sticky tracking (lost_frames=%u)",
+                        static_cast<unsigned int>(latest_cluster_.msg.lost_tracking_frames));
                 }
             } else if (verbose_logging_) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -638,27 +620,46 @@ private:
             }
         }
 
-        // If cluster not available, use last confident pose
-        if (!cluster_available && have_confident_pose_) {
-            error_pose = last_confident_pose_;
-            if (verbose_logging_) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "Cluster lost, aligning with last confident error");
+        // No sticky-memory correction: on loss, hold still briefly and wait for tag recovery.
+        if (!cluster_available) {
+            if (!alignment_loss_active_) {
+                alignment_loss_active_ = true;
+                alignment_loss_start_time_ = this->now();
+                if (verbose_logging_) {
+                    RCLCPP_WARN(this->get_logger(),
+                        "Alignment target lost, entering %.2fs stop-and-wait window",
+                        alignment_loss_grace_sec_);
+                }
             }
-        } else if (!cluster_available && !have_confident_pose_) {
-            // No target available
+
+            auto stop_cmd = geometry_msgs::msg::Twist();
+            cmd_vel_pub_->publish(stop_cmd);
+
+            const auto loss_elapsed = (this->now() - alignment_loss_start_time_).seconds();
+            if (loss_elapsed <= alignment_loss_grace_sec_) {
+                return;
+            }
+
             session_complete_ = true;
             session_success_ = false;
-            session_message_ = "No cluster available and no last confident pose";
+            session_message_ = "Cluster lost for too long during alignment";
             RCLCPP_ERROR(this->get_logger(),
-                "Alignment failed: no cluster available and no last confident pose");
+                "Alignment failed: cluster unavailable for %.3fs (grace=%.3fs)",
+                loss_elapsed, alignment_loss_grace_sec_);
             return;
+        }
+
+        if (alignment_loss_active_) {
+            alignment_loss_active_ = false;
+            if (verbose_logging_) {
+                RCLCPP_INFO(this->get_logger(), "Cluster recovered, resuming alignment control");
+            }
         }
 
         // Use correction directly as robot-frame error.
         const double error_x = error_pose.x;
         const double error_y = error_pose.y;
-        const double error_theta = error_pose.theta;
+        const double error_theta = alignment_enable_theta_ ? error_pose.theta : 0.0;
         last_alignment_error_pose_ = error_pose;
         have_last_alignment_error_pose_ = true;
 
@@ -691,7 +692,7 @@ private:
         // motion that reduces the observed robot-frame offset.
         double cmd_vx = pid_x_->update(-error_x, dt);
         double cmd_vy = pid_y_->update(-error_y, dt);
-        double cmd_omega = pid_theta_->update(-error_theta, dt);
+        double cmd_omega = alignment_enable_theta_ ? pid_theta_->update(-error_theta, dt) : 0.0;
 
         if (alignment_max_linear_velocity_ > 0.0) {
             double linear_speed = std::hypot(cmd_vx, cmd_vy);
@@ -702,7 +703,7 @@ private:
             }
         }
 
-        if (alignment_max_angular_velocity_ > 0.0) {
+        if (alignment_enable_theta_ && alignment_max_angular_velocity_ > 0.0) {
             cmd_omega = std::clamp(cmd_omega,
                                    -alignment_max_angular_velocity_,
                                    alignment_max_angular_velocity_);

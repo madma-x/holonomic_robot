@@ -101,7 +101,7 @@ pick:
         priority: 1
         pose:
           x: 2.55
-          y: 1.2
+          y: 1.15
           theta: 0.0
 
   - id: 8
@@ -169,7 +169,7 @@ drop_locations:
     name: "Drop G"
     priority: 1
     pose:
-      x: 2.5
+      x: 2.4
       y: 0.8
       theta: 3.14
 
@@ -180,10 +180,10 @@ drop_locations:
       x: 2.7
       y: 0.8
       theta: 0.0
-  - id: 8
-    name: "Drop H"
+  - id: 9
+    name: "Drop I"
     priority: 1
     pose:
       x: 2.3
       y: 0.3
-      theta: 1.57
+      theta: -1.57

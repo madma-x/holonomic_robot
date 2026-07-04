@@ -7,6 +7,9 @@ game_state_manager:
     planner_stop_service: '/planner/stop'
     planner_reset_service: '/planner/reset'
     team_color: blue
+    end_match_arm_reset_enabled: true
+    end_match_arm_reset_timeout_sec: 30.0
+    execute_sequence_action_name: 'execute_sequence'
 
     # Initial pose by team color, published by /game/reset_pose
     blue_initial_pose_x: 2.727761

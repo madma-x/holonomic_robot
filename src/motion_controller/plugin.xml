@@ -1,0 +1,8 @@
+<library path="motion_controller_nav2_plugin">
+  <class
+    name="motion_controller::PurePursuitController"
+    type="motion_controller::PurePursuitController"
+    base_class_type="nav2_core::Controller">
+    <description>Holonomic pure pursuit controller producing vx, vy, wz with speed-coupled angular limiting.</description>
+  </class>
+</library>

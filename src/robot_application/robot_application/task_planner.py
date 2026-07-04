@@ -162,6 +162,7 @@ class TaskPlanner(Node):
                 mission_assignment_pub=self.mission_assignment_pub,
                 start_mission_executor=self._start_mission_executor,
                 wait_for_mission_executor_result=self._wait_for_mission_executor_result,
+                team_color_getter=lambda: self.team_color,
             ),
         }
         
@@ -626,6 +627,8 @@ class TaskPlanner(Node):
                     self.get_logger().info('Return-base task completed, requesting match stop')
                     if not self._request_stop_match():
                         self.get_logger().warn('Return-base completed but /game/stop_match request failed')
+                    if not self._stop_mission_executor():
+                        self.get_logger().warn('Return-base completed but stopping mission_executor failed')
                     self.planning_active = False
                     self.stop_requested = True
             else:

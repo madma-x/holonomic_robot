@@ -87,11 +87,13 @@ class ReturnBaseTaskAdapter(BaseTaskAdapter):
         mission_assignment_pub=None,
         start_mission_executor: Callable[[], bool] = None,
         wait_for_mission_executor_result: Callable[[str, float], bool] = None,
+        team_color_getter: Callable[[], str] = None,
     ):
         self._logger = logger
         self._mission_assignment_pub = mission_assignment_pub
         self._start_mission_executor = start_mission_executor
         self._wait_for_mission_executor_result = wait_for_mission_executor_result
+        self._team_color_getter = team_color_getter
 
     def execute(self, task: Task) -> bool:
         target_location = task.parameters.get('target_location', {})
@@ -113,6 +115,7 @@ class ReturnBaseTaskAdapter(BaseTaskAdapter):
             'task_id': task.task_id,
             'task_type': task.task_type.value,
             'task_name': task.name,
+            'team_color': self._get_team_color(),
             'target_pose': {
                 'x': float(target_location.get('x', 0.0)),
                 'y': float(target_location.get('y', 0.0)),
@@ -131,6 +134,12 @@ class ReturnBaseTaskAdapter(BaseTaskAdapter):
 
         timeout = max(120.0, float(task.time_estimate) + 60.0)
         return self._wait_for_mission_executor_result(task.task_id, timeout)
+
+    def _get_team_color(self) -> str:
+        if self._team_color_getter is None:
+            return 'blue'
+        value = str(self._team_color_getter() or 'blue').strip().lower()
+        return value if value in ('blue', 'yellow') else 'blue'
 
 
 class PickPlaceTaskAdapter(BaseTaskAdapter):
@@ -209,13 +218,34 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
         if not task_id:
             return
 
-        carry_object = bool(outcome.get('carry_object', False))
+        reason = str(outcome.get('outcome_reason', '')).upper()
+        raw_carry_object = outcome.get('carry_object')
         source_pick_id = str(outcome.get('source_pick_id', ''))
         active_arm_index = outcome.get('active_arm_index')
         active_arm_indices = outcome.get('active_arm_indices', [])
         selected_arm_tag_ids = outcome.get('selected_arm_tag_ids', {})
 
         task_obj = next((task for task in self._task_queue if task.task_id == task_id), None)
+        task_carry_before = bool(task_obj.parameters.get('carry_object', False)) if task_obj is not None else False
+        context_payload = self._task_context_by_id.get(task_id)
+        context_carry_before = bool(context_payload.get('carry_object', False)) if isinstance(context_payload, dict) else False
+
+        if raw_carry_object is None:
+            carry_object = task_carry_before or context_carry_before
+        else:
+            carry_object = bool(raw_carry_object)
+
+        # Drop-stage failures should keep carry_object=true when we were already
+        # carrying before this outcome, even if payload reports false.
+        drop_stage_reasons = {
+            'DROP_FULL',
+            'DROP_CLEAR_FAIL',
+            'NAV_FAIL',
+            'ACTUATION_FAIL',
+        }
+        if reason in drop_stage_reasons and not carry_object and (task_carry_before or context_carry_before):
+            carry_object = True
+
         if task_obj is not None:
             task_obj.parameters['carry_object'] = carry_object
             if source_pick_id:
@@ -227,7 +257,6 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
             if isinstance(selected_arm_tag_ids, dict):
                 task_obj.parameters['selected_arm_tag_ids'] = dict(selected_arm_tag_ids)
 
-        context_payload = self._task_context_by_id.get(task_id)
         if isinstance(context_payload, dict):
             context_payload['carry_object'] = carry_object
             if source_pick_id:
@@ -241,15 +270,23 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
 
     def handle_replan_required(self, outcome: Dict[str, Any]) -> bool:
         reason = str(outcome.get('outcome_reason', '')).upper()
-        carry_object = bool(outcome.get('carry_object', False))
         task_id = str(outcome.get('task_id', ''))
 
-        if reason != 'DROP_FULL' or not carry_object or not task_id:
+        if reason != 'DROP_FULL' or not task_id:
             return False
 
         original_payload = self._task_context_by_id.get(task_id)
         if not original_payload:
             return False
+
+        carry_object = bool(outcome.get('carry_object', original_payload.get('carry_object', False)))
+        if not carry_object:
+            # DROP_FULL should happen while carrying. If payload is inconsistent,
+            # force continuation as carry_object=True to keep replanning drop-only.
+            carry_object = True
+            self._logger.warn(
+                f'DROP_FULL outcome for {task_id} had carry_object=false; forcing drop continuation'
+            )
 
         failed_drop_id = str(outcome.get('target_drop_id', ''))
         excluded_ids = set(original_payload.get('excluded_drop_ids', []))

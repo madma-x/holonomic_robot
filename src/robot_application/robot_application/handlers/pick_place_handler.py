@@ -31,7 +31,6 @@ class PickPlaceHandler:
         self.latest_pickability: Optional[ClusterPickability] = None
         self._pickability_seq: int = 0
         self._cached_team_color: Optional[str] = None
-        self._first_task_team_move_done: bool = False
 
         self.node.declare_parameter('pickability_topic', '/cluster_pickability')
         self.node.declare_parameter('align_service_name', '/align_to_cluster')
@@ -92,15 +91,11 @@ class PickPlaceHandler:
         self._pick_reset_pose_by_id: Dict[str, Dict[str, float]] = {
             '1': {'x': 0.37239, 'y': 0.40, 'theta': 3.14},
             '2': {'x': 0.372239, 'y': 1.20, 'theta': 3.14},
-            '3': {'x': 1.45, 'y': 0.60, 'theta': 0.00},
-            '4': {'x': 1.85, 'y': 0.60, 'theta': 1.57},
-            '5': {'x': 2.60, 'y': 0.40, 'theta': 1.57},
-        }
-        # One-time opening move before the first pick-place task.
-        # Team colors are mirrored, so lateral offset sign is mirrored too.
-        self._first_task_team_relative_move: Dict[str, Dict[str, float]] = {
-            'blue': {'x': -0.2, 'y': -0.5, 'yaw': 0.0},
-            'yellow': {'x': -0.2, 'y': 0.5, 'yaw': 0.0},
+            '3': {'x': 1.1, 'y': 0.37229, 'theta': 1.57},
+            '5': {'x': 1.9, 'y': 0.37229, 'theta': 1.57},
+            '7': {'x': 2.62761, 'y': 1.2, 'theta': 0.0},
+            '8': {'x': 2.62761, 'y': 0.4, 'theta': 0.0},
+
         }
 
     def can_handle(self, task: dict) -> bool:
@@ -118,16 +113,6 @@ class PickPlaceHandler:
         selected_arm_tag_ids = self._task_selected_arm_tag_ids(task)
         pick_ref: Optional[dict] = None
         team_color = self.get_team_color()
-
-        if not self._run_first_task_team_relative_move(team_color, task):
-            return self._build_outcome(
-                task,
-                'FAILED',
-                'OPENING_REL_MOVE_FAIL',
-                carry_object,
-                source_pick_id=source_pick_id,
-                active_arm_indices=active_arm_indices,
-            )
 
         self.node.get_logger().info(
             'PickPlace execute() start: '
@@ -177,6 +162,7 @@ class PickPlaceHandler:
                 pickability = self.wait_for_pickability()
                 if pickability is None:
                     self.node.get_logger().warn('Step 6: pickability check failed or timed out')
+                    self._clear_pick_marker_on_failure(task, source_pick_id, 'pickability timeout')
                     self.lower_pick_priority(task, pick_ref, 'not pickable')
                     return self._build_outcome(
                         task,
@@ -198,6 +184,7 @@ class PickPlaceHandler:
                 active_arm_indices = self.select_pick_arm_indices(pickability)
                 if not active_arm_indices:
                     self.node.get_logger().warn('Step 6: no arm is assigned to a pickable object')
+                    self._clear_pick_marker_on_failure(task, source_pick_id, 'no assigned arm')
                     self.lower_pick_priority(task, pick_ref, 'no assigned arm')
                     return self._build_outcome(
                         task,
@@ -238,6 +225,7 @@ class PickPlaceHandler:
                 self.node.get_logger().info(f'Step 7: calling align_to_cluster for cluster_id={cluster_id}')
                 if not self.align_to_cluster(cluster_id):
                     self.node.get_logger().error('Step 7: alignment failed')
+                    self._clear_pick_marker_on_failure(task, source_pick_id, 'alignment failed')
                     self.lower_pick_priority(task, pick_ref, 'alignment failed')
                     return self._build_outcome(task, 'FAILED', 'ALIGN_FAIL', False, source_pick_id=source_pick_id)
 
@@ -253,6 +241,11 @@ class PickPlaceHandler:
                 )
                 if not self.execute_pick_sequence(active_arm_indices):
                     self.node.get_logger().error('Step 8: pick sequence failed')
+                    if not self.node.move_relative(-0.12, 0.0, 0.0):
+                        self.node.get_logger().warn(
+                            'Step 8b: post-pick-fail backup (0.12m) failed, continuing failure handling'
+                        )
+                    self._clear_pick_marker_on_failure(task, source_pick_id, 'actuation failed')
                     self.lower_pick_priority(task, pick_ref, 'actuation failed')
                     return self._build_outcome(
                         task,
@@ -266,6 +259,7 @@ class PickPlaceHandler:
                 self.node.get_logger().info('Step 8: pick sequence succeeded')
                 self._clear_picked_object_from_costmap(task, source_pick_id)
                 carry_object = True
+                task['carry_object'] = True
             finally:
                 self.node.get_logger().info('Step 9: disabling sticky arm-tag assignment')
                 self._set_sticky_assignment(False)
@@ -399,38 +393,6 @@ class PickPlaceHandler:
             selected_arm_tag_ids=selected_arm_tag_ids,
         )
 
-    def _run_first_task_team_relative_move(self, team_color: str, task: dict) -> bool:
-        if self._first_task_team_move_done:
-            return True
-
-        normalized_color = str(team_color).strip().lower()
-        if normalized_color not in self._first_task_team_relative_move:
-            normalized_color = 'blue'
-
-        move = self._first_task_team_relative_move[normalized_color]
-        self.node.get_logger().info(
-            'Opening relative move before first task: '
-            f"task_id={task.get('task_id', 'unknown')} team={normalized_color} "
-            f"x={float(move.get('x', 0.0)):.3f} y={float(move.get('y', 0.0)):.3f} "
-            f"yaw={float(move.get('yaw', 0.0)):.3f}"
-        )
-
-        success = self.node.move_relative(
-            float(move.get('x', 0.0)),
-            float(move.get('y', 0.0)),
-            float(move.get('yaw', 0.0)),
-            timeout_s=5.0,
-            max_linear_speed_mps=0.8,
-            max_angular_speed_rps=0.6,
-        )
-        if not success:
-            self.node.get_logger().error('Opening relative move failed')
-            return False
-
-        self._first_task_team_move_done = True
-        self.node.get_logger().info('Opening relative move completed')
-        return True
-
     def _clear_picked_object_from_costmap(self, task: dict, source_pick_id: str):
         """Remove the picked object marker from the custom Nav2 obstacle layer.
 
@@ -476,6 +438,13 @@ class PickPlaceHandler:
             f'pick_location_id={pick_location_id!r} '
             f'ns={self.custom_objects_marker_ns!r} id={marker_id} '
             f'(republished {republish_count}x, delay={republish_delay_sec:.3f}s)'
+        )
+
+    def _clear_pick_marker_on_failure(self, task: dict, source_pick_id: str, reason: str) -> None:
+        """Best-effort marker delete for failed picks to avoid repeated obstruction loops."""
+        self._clear_picked_object_from_costmap(task, source_pick_id)
+        self.node.get_logger().warn(
+            f'Cleared pick marker after pick-stage failure ({reason}) to avoid planner deadlock'
         )
 
 
@@ -746,7 +715,7 @@ class PickPlaceHandler:
         marker.pose.orientation.z = math.sin(base_theta / 2.0)
         marker.pose.orientation.w = math.cos(base_theta / 2.0)
         marker.scale.x = 0.15
-        marker.scale.y = 0.05
+        marker.scale.y = 0.20
         marker.scale.z = 0.02
         marker.color.r = 1.0
         marker.color.g = 0.45

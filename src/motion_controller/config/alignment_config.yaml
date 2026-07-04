@@ -4,17 +4,18 @@ motion_controller_node:
     control_loop_rate: 50.0
     
     # Cluster tracking
-    cluster_timeout_ms: 500  # If no update for 500ms, use last_confident_pose
+    cluster_timeout_ms: 500  # Consider cluster sample stale after this age
+    alignment_loss_grace_sec: 0.5  # On tag loss: stop robot, wait up to this, then fail alignment
     
     # Single-loop PID gains for XY position correction
     # Input: position error (meters) → Output: velocity command (m/s)
     pid_xy:
       kp: 1.8         # proportional gain (m/s per meter error)
-      ki: 0.0         # integral gain (m/s per meter-second integrated error)
+      ki: 0.3         # integral gain — corrects steady-state wheel imbalance / Y drift during X moves
       kd: 0.0          # derivative gain (m/s per meter/s error rate)
       
       # Limits
-      max_integral_error: 0.5      # max m/s from integral term (anti-windup)
+      max_integral_error: 0.2      # anti-windup cap (keep small so integral doesn't over-correct)
       max_velocity: 1.5      # max linear velocity output (m/s)
 
     # Extra cap applied only during tag alignment (kept separate from relative move)
@@ -33,6 +34,7 @@ motion_controller_node:
     
     # Alignment convergence criteria
     pos_tolerance: 0.01      # meters, XY error must be below this
+    alignment_enable_theta: false   # disable yaw correction/convergence for visual alignment
     ang_tolerance: 0.05      # radians, theta error must be below this
     alignment_max_angular_velocity: 0.5   # rad/s cap used only during tag alignment
 

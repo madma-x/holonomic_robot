@@ -3,7 +3,10 @@
   <BehaviorTree ID="MainTree">
     <PipelineSequence name="PlanAndFollowThroughPosesNoFallback">
       <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
-      <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+      <ReactiveSequence name="FollowPathIfValid">
+        <IsPathValid path="{path}"/>
+        <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+      </ReactiveSequence>
     </PipelineSequence>
   </BehaviorTree>
 </root>
