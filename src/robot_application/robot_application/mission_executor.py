@@ -49,7 +49,10 @@ class MissionExecutor(MissionBase):
 
         if tasks:
             self.task_queue.extend(tasks)
-            self.get_logger().info(f'Queued {len(tasks)} task(s) for execution')
+            types = ', '.join(t.get('task_type', '?') for t in tasks)
+            self.get_logger().info(
+                f'Queued {len(tasks)} task(s): [{types}]  queue_depth={len(self.task_queue)}'
+            )
 
     def load_mission_config(self):
         """MissionExecutor has no static mission file to load."""
@@ -86,12 +89,19 @@ class MissionExecutor(MissionBase):
                 self.state = MissionState.FAILED
                 return
 
-            self.get_logger().info(f"Executing task_id={task.get('task_id', 'unknown')}")
+            task_id = task.get('task_id', '?')
+            task_type = task.get('task_type', '?')
+            self.get_logger().info(f'Executing {task_type}  task_id={task_id}')
             handler_result = handler.execute(task)
             outcome = self._normalize_outcome(task, handler_result)
             self._publish_outcome(outcome)
 
             outcome_status = str(outcome.get('status', 'FAILED')).upper()
+            outcome_reason = str(outcome.get('outcome_reason', '')).upper()
+            self.get_logger().info(
+                f'Outcome {task_type}  task_id={task_id}  '
+                f'status={outcome_status}  reason={outcome_reason}'
+            )
             if outcome_status == 'REPLAN_REQUIRED':
                 self.state = MissionState.RUNNING
                 continue

@@ -24,7 +24,7 @@ class FloorImagePublisher(Node):
         
         # Load image
         try:
-            pkg_dir = get_package_share_directory('holonomic_robot_bringup')
+            pkg_dir = get_package_share_directory('robot_application')
             image_path = os.path.join(pkg_dir, 'images', 'floor_marking.png')
         except:
             image_path = 'images/floor_marking.png'

@@ -14,7 +14,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # Get package directories
-    bringup_dir = get_package_share_directory('holonomic_robot_bringup')
+    bringup_dir = get_package_share_directory('robot_application')
     description_dir = get_package_share_directory('holonomic_robot_description')
     app_dir = get_package_share_directory('robot_application')
 
@@ -45,7 +45,7 @@ def generate_launch_description():
         ),
 
         Node(
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='static_joint_publisher',
             name='static_joint_publisher',
             output='screen'
@@ -207,7 +207,7 @@ def generate_launch_description():
             name='game_state_manager',
             output='screen',
             parameters=[
-                os.path.join(app_dir, 'config', 'game_state.yaml')
+                os.path.join(app_dir, 'config', 'robot_application.yaml')
             ]
         ),
 
@@ -218,7 +218,7 @@ def generate_launch_description():
             name='task_planner',
             output='screen',
             parameters=[
-                os.path.join(app_dir, 'config', 'task_planner.yaml')
+                os.path.join(app_dir, 'config', 'robot_application.yaml')
             ]
         ),
 
@@ -229,7 +229,7 @@ def generate_launch_description():
             name='mission_executor',
             output='screen',
             parameters=[
-                os.path.join(app_dir, 'config', 'mission_controller.yaml')
+                os.path.join(app_dir, 'config', 'robot_application.yaml')
             ]
         ),
 

@@ -176,4 +176,4 @@ if __name__ == '__main__':
     generate_polygon_map(polygon, rectangles=rectangles, resolution=0.01, output_dir=output_dir)
 
     print("\nTo use this map:")
-    print("  ros2 launch holonomic_robot_bringup full_navigation.launch.py use_amcl:=true")
+    print("  ros2 launch robot_application full_navigation.launch.py use_amcl:=true")

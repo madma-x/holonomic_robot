@@ -197,7 +197,13 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
         assignment_msg = String()
         assignment_msg.data = json.dumps(payload)
         self._mission_assignment_pub.publish(assignment_msg)
-        self._logger.info(f'Dispatched task to mission_executor: {task.task_id}')
+
+        carry = task.parameters.get('carry_object', False)
+        available = sum(1 for d in drop_candidates if self._world_state.is_drop_available(str(d.get('id', ''))))
+        self._logger.info(
+            f'[adapter] MOVE_OBJECT dispatched: task={task.task_id} pick={pick_id} '
+            f'drops={available}/{len(drop_candidates)} available carry={carry}'
+        )
 
         timeout = max(15.0, float(task.time_estimate) + 25.0)
         return self._wait_for_mission_executor_result(task.task_id, timeout)
@@ -210,6 +216,7 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
             task_queue=self._task_queue,
             task_context_by_id=self._task_context_by_id,
             task_pick_id_getter=self._task_pick_id_getter,
+            logger=self._logger,
         )
 
     def _sync_task_retry_state_from_outcome(self, outcome: Dict[str, Any]) -> None:
@@ -247,6 +254,11 @@ class PickPlaceTaskAdapter(BaseTaskAdapter):
             carry_object = True
 
         if task_obj is not None:
+            prev_carry = task_obj.parameters.get('carry_object', False)
+            if carry_object != prev_carry:
+                self._logger.info(
+                    f'[adapter] task {task_id}: carry_object {prev_carry} → {carry_object} (reason={reason})'
+                )
             task_obj.parameters['carry_object'] = carry_object
             if source_pick_id:
                 task_obj.parameters['source_pick_id'] = source_pick_id

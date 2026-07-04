@@ -1,0 +1,64 @@
+game_state_manager:
+  ros__parameters:
+    # Match configuration
+    match_duration_sec: 85.0
+    auto_start: false
+    planner_start_service: '/planner/start'
+    planner_stop_service: '/planner/stop'
+    planner_reset_service: '/planner/reset'
+    team_color: blue
+    end_match_arm_reset_enabled: true
+    end_match_arm_reset_timeout_sec: 30.0
+    execute_sequence_action_name: 'execute_sequence'
+
+    # Initial pose by team color, published by /game/reset_pose
+    blue_initial_pose_x: 2.727761
+    blue_initial_pose_y: 1.7
+    blue_initial_pose_theta: 0.0
+    yellow_initial_pose_x: 0.272239
+    yellow_initial_pose_y: 1.7
+    yellow_initial_pose_theta: 3.14
+
+    # Phase thresholds (seconds remaining)
+    early_phase_threshold: 30.0
+    mid_phase_threshold: 30.0
+    late_phase_threshold: 25.0
+
+task_planner:
+  ros__parameters:
+    # Planning configuration
+    replan_interval_sec: 5.0
+    enable_task_interruption: true
+    min_utility_threshold: 0.0
+
+    # Base locations by team color
+    blue_base_location_x: 2.75
+    blue_base_location_y: 1.79
+    blue_base_location_theta: 0.0
+    yellow_base_location_x: 0.25
+    yellow_base_location_y: 1.79
+    yellow_base_location_theta: 0.0
+
+    # Team color selected by GUI / runtime parameter update
+    team_color: blue
+
+    # Task execution limits
+    max_task_attempts: 3
+    task_timeout_multiplier: 1.5
+
+mission_executor:
+  ros__parameters:
+    task_assignment_topic: /planner/task_assignment
+    align_threshold: 0.005
+    blue_return_base_relative_move_x: -0.2
+    blue_return_base_relative_move_y: 0.2
+    blue_return_base_relative_move_theta: 0.0
+    yellow_return_base_relative_move_x: 0.2
+    yellow_return_base_relative_move_y: 0.2
+    yellow_return_base_relative_move_theta: 0.0
+    post_nav_rotate_timeout_s: 10.0
+    post_nav_rotate_pos_tolerance_m: 0.05
+    post_nav_rotate_yaw_tolerance_rad: 0.05
+    post_nav_rotate_max_angular_speed_rps: 5.0
+    custom_objects_delete_republish_count: 3
+    custom_objects_delete_republish_delay_sec: 0.05

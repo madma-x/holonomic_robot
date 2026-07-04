@@ -14,11 +14,13 @@ class PickPlaceOutcomeProcessor:
         task_queue,
         task_context_by_id: Dict[str, Dict[str, Any]],
         task_pick_id_getter: Callable[[Any], str],
+        logger=None,
     ) -> Dict[str, Any]:
         status = str(outcome.get('status', '')).upper()
         reason = str(outcome.get('outcome_reason', '')).upper()
         source_pick_id = str(outcome.get('source_pick_id', ''))
         target_drop_id = str(outcome.get('target_drop_id', ''))
+        task_id = str(outcome.get('task_id', ''))
 
         result = {
             'needs_replan': False,
@@ -27,12 +29,18 @@ class PickPlaceOutcomeProcessor:
         }
 
         if status == 'FAILED' and reason == 'PICK_EMPTY' and source_pick_id:
+            tasks_before = len(task_queue)
             world_state.mark_pick_empty(source_pick_id)
             task_queue[:] = [
                 task for task in task_queue
                 if task_pick_id_getter(task) != source_pick_id
             ]
-            task_id = str(outcome.get('task_id', ''))
+            removed = tasks_before - len(task_queue)
+            if logger:
+                logger.info(
+                    f'[outcome] task {task_id}: pick {source_pick_id} empty — '
+                    f'dropped {removed} queued task(s), replanning'
+                )
             if task_id and task_id in task_context_by_id:
                 del task_context_by_id[task_id]
             result['replan_tasks'] = True
@@ -40,6 +48,10 @@ class PickPlaceOutcomeProcessor:
 
         if status == 'REPLAN_REQUIRED' and reason == 'DROP_FULL' and target_drop_id:
             world_state.mark_drop_full(target_drop_id)
+            if logger:
+                logger.info(
+                    f'[outcome] task {task_id}: drop {target_drop_id} full — replan triggered'
+                )
             result['needs_replan'] = True
             return result
 
@@ -48,7 +60,11 @@ class PickPlaceOutcomeProcessor:
                 world_state.mark_pick_empty(source_pick_id)
             if target_drop_id:
                 world_state.mark_drop_occupied(target_drop_id)
-            task_id = str(outcome.get('task_id', ''))
+            if logger:
+                logger.info(
+                    f'[outcome] task {task_id}: completed — '
+                    f'pick {source_pick_id or "?"} → drop {target_drop_id or "?"}'
+                )
             if task_id and task_id in task_context_by_id:
                 del task_context_by_id[task_id]
 

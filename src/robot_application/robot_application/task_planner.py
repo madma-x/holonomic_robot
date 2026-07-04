@@ -84,7 +84,7 @@ class TaskPlanner(Node):
         self.current_task: Optional[Task] = None
         self.completed_tasks: List[Task] = []
         self.failed_tasks: List[Task] = []
-        self.world_state = WorldStateManager()
+        self.world_state = WorldStateManager(logger=self.get_logger())
         self.task_composer = PickPlaceSeasonTaskComposer()
         self.recent_outcomes = set()
         self.last_mission_outcome: Optional[Dict[str, Any]] = None

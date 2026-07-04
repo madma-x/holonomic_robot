@@ -40,7 +40,7 @@ def generate_launch_description():
     
     # Static Joint Publisher - publishes joint states for wheels
     static_joint_publisher_node = Node(
-        package='holonomic_robot_bringup',
+        package='robot_application',
         executable='static_joint_publisher',
         name='static_joint_publisher',
         output='screen',
@@ -49,7 +49,7 @@ def generate_launch_description():
     
     # Fake Optical Flow Odometry Node
     fake_optical_flow_node = Node(
-        package='holonomic_robot_bringup',
+        package='robot_application',
         executable='fake_optical_flow',
         name='fake_optical_flow',
         output='screen',
@@ -58,7 +58,7 @@ def generate_launch_description():
     
     # Fake Lidar Publisher Node
     fake_lidar_node = Node(
-        package='holonomic_robot_bringup',
+        package='robot_application',
         executable='fake_lidar_publisher',
         name='fake_lidar_publisher',
         output='screen',
@@ -67,7 +67,7 @@ def generate_launch_description():
     
     # Environment Markers Node
     environment_markers_node = Node(
-        package='holonomic_robot_bringup',
+        package='robot_application',
         executable='environment_markers',
         name='environment_markers',
         output='screen',
@@ -76,7 +76,7 @@ def generate_launch_description():
 
         # Floor image publisher (shows your floor markings)
     floor_image_publisher_node = Node(
-        package='holonomic_robot_bringup',
+        package='robot_application',
         executable='floor_image_publisher',
         name='floor_image_publisher',
         output='screen'

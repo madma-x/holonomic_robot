@@ -11,8 +11,9 @@ from ament_index_python.packages import get_package_share_directory
 class WorldStateManager:
     """Owns pick/drop catalog loading and runtime occupancy state."""
 
-    def __init__(self, package_name: str = 'robot_application'):
+    def __init__(self, package_name: str = 'robot_application', logger=None):
         self.package_name = package_name
+        self._logger = logger
         self.pick_locations_catalog: Dict[str, Dict[str, Any]] = {}
         self.drop_locations_catalog: Dict[str, Dict[str, Any]] = {}
         self.pick_state: Dict[str, Dict[str, Any]] = {}
@@ -127,23 +128,34 @@ class WorldStateManager:
 
     def mark_pick_empty(self, pick_id: str):
         if pick_id not in self.pick_state:
+            if self._logger:
+                self._logger.warn(f'[world_state] mark_pick_empty: unknown pick_id={pick_id!r}')
             return
         self.pick_state[pick_id]['empty'] = True
         self.pick_state[pick_id]['last_update'] = time.time()
         self.empty_pick_locations.add(pick_id)
+        if self._logger:
+            self._logger.info(f'[world_state] pick {pick_id} marked empty')
 
     def mark_drop_full(self, drop_id: str):
         drop = self.drop_state.get(drop_id)
         if drop is None:
+            if self._logger:
+                self._logger.warn(f'[world_state] mark_drop_full: unknown drop_id={drop_id!r}')
             return
-        drop['occupancy'] = int(drop.get('capacity', 1))
+        capacity = int(drop.get('capacity', 1))
+        drop['occupancy'] = capacity
         drop['is_full'] = True
         drop['last_update'] = time.time()
         self.occupied_drop_locations.add(drop_id)
+        if self._logger:
+            self._logger.info(f'[world_state] drop {drop_id} marked full (capacity={capacity})')
 
     def mark_drop_occupied(self, drop_id: str):
         drop = self.drop_state.get(drop_id)
         if drop is None:
+            if self._logger:
+                self._logger.warn(f'[world_state] mark_drop_occupied: unknown drop_id={drop_id!r}')
             return
 
         capacity = max(1, int(drop.get('capacity', 1)))
@@ -154,8 +166,12 @@ class WorldStateManager:
 
         if drop['is_full']:
             self.occupied_drop_locations.add(drop_id)
+            if self._logger:
+                self._logger.info(f'[world_state] drop {drop_id} full ({occupancy}/{capacity})')
         else:
             self.occupied_drop_locations.discard(drop_id)
+            if self._logger:
+                self._logger.info(f'[world_state] drop {drop_id} occupied ({occupancy}/{capacity})')
 
     @staticmethod
     def distance_between_locations(from_location: Dict[str, float], to_location: Dict[str, float]) -> float:

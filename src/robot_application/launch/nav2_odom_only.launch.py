@@ -13,7 +13,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    bringup_dir = get_package_share_directory('holonomic_robot_bringup')
+    bringup_dir = get_package_share_directory('robot_application')
     description_dir = get_package_share_directory('holonomic_robot_description')
 
     urdf_file  = os.path.join(description_dir, 'urdf', 'holonomic_robot.urdf')
@@ -42,7 +42,7 @@ def generate_launch_description():
         ),
 
         Node(
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='static_joint_publisher',
             name='static_joint_publisher',
             output='screen'

@@ -16,7 +16,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
     # Get package directories
-    bringup_dir = get_package_share_directory('holonomic_robot_bringup')
+    bringup_dir = get_package_share_directory('robot_application')
     description_dir = get_package_share_directory('holonomic_robot_description')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
     
@@ -61,7 +61,7 @@ def generate_launch_description():
         
         # Static joint publisher (for wheels)
         Node(
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='static_joint_publisher',
             name='static_joint_publisher',
             output='screen'
@@ -69,7 +69,7 @@ def generate_launch_description():
         
         # Fake optical flow (with drift)
         Node(
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='fake_optical_flow',
             name='fake_optical_flow',
             output='screen'
@@ -77,7 +77,7 @@ def generate_launch_description():
         
         # Fake lidar
         Node(
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='fake_lidar_publisher',
             name='fake_lidar_publisher',
             output='screen'
@@ -85,7 +85,7 @@ def generate_launch_description():
         
         # Environment markers
         Node(
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='environment_markers',
             name='environment_markers',
             output='screen'
@@ -116,7 +116,7 @@ def generate_launch_description():
         # ParticleCloud to PoseArray converter for RViz
         Node(
             condition=IfCondition(use_amcl),
-            package='holonomic_robot_bringup',
+            package='robot_application',
             executable='particle_cloud_converter',
             name='particle_cloud_converter',
             output='screen'
