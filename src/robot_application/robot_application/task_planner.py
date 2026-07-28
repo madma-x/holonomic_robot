@@ -9,28 +9,32 @@ Simplified architecture:
 
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
 from rcl_interfaces.msg import SetParametersResult
-from std_msgs.msg import String, Float32, Int32
+from rclpy.parameter_client import AsyncParameterClient
+from std_msgs.msg import String, Float32, Int32, Bool
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import Point, PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import Odometry
 import threading
 import time
-import os
-import yaml
 import json
-from typing import List, Optional, Dict, Any, Tuple
-from ament_index_python.packages import get_package_share_directory
+from typing import List, Optional, Dict, Any
 
 from robot_application.task_definitions import (
     Task, TaskType, TaskStatus,
-    create_return_base_task, create_pick_place_task,
     early_game_priority, mid_game_priority,
     late_game_priority, endgame_priority
 )
+from robot_application.season_task_composers import (
+    PickPlaceSeasonTaskComposer,
+)
+from robot_application.task_adapters import (
+    GotoPoseTaskAdapter,
+    PickPlaceTaskAdapter,
+    ReturnBaseTaskAdapter,
+)
 from robot_application.game_state_manager import GamePhase
-from robot_application.mission_base import MissionBase
+from robot_application.world_state_manager import WorldStateManager
 
 
 class TaskPlanner(Node):
@@ -63,6 +67,9 @@ class TaskPlanner(Node):
         self.declare_parameter('mission_executor_assignment_topic', '/planner/task_assignment')
         self.declare_parameter('mission_executor_status_topic', '/mission_executor/mission_status')
         self.declare_parameter('mission_executor_start_service', '/mission_executor/start_mission')
+        self.declare_parameter('mission_executor_stop_service', '/mission_executor/stop_mission')
+        self.declare_parameter('game_stop_match_service', '/game/stop_match')
+        self.declare_parameter('game_state_manager_node_name', '/game_state_manager')
         self.declare_parameter('team_color', 'blue')
         
         # Get parameters
@@ -77,15 +84,12 @@ class TaskPlanner(Node):
         self.current_task: Optional[Task] = None
         self.completed_tasks: List[Task] = []
         self.failed_tasks: List[Task] = []
-        self.empty_pick_locations = set()
-        self.occupied_drop_locations = set()
-        self.pick_locations_catalog: Dict[str, Dict[str, Any]] = {}
-        self.drop_locations_catalog: Dict[str, Dict[str, Any]] = {}
-        self.pick_state: Dict[str, Dict[str, Any]] = {}
-        self.drop_state: Dict[str, Dict[str, Any]] = {}
+        self.world_state = WorldStateManager(logger=self.get_logger())
+        self.task_composer = PickPlaceSeasonTaskComposer()
         self.recent_outcomes = set()
         self.last_mission_outcome: Optional[Dict[str, Any]] = None
         self.task_context_by_id: Dict[str, Dict[str, Any]] = {}
+        self.task_adapters = {}
         
         # Game state tracking
         self.time_remaining = 180.0
@@ -95,6 +99,8 @@ class TaskPlanner(Node):
         self.match_active = False
         self.robot_position = Point()
         self.mission_executor_status = 'IDLE'
+        self.tasks_initialized = False  # Track if task list has been created
+        self.interrupted_task_ids = set()
         
         # Subscribers for game state
         self.time_sub = self.create_subscription(
@@ -104,7 +110,13 @@ class TaskPlanner(Node):
         self.phase_sub = self.create_subscription(
             String, '/game/phase', self.phase_callback, 10)
         self.pose_sub = self.create_subscription(
-            PoseStamped, '/odom', self.pose_callback, 10)
+            Odometry, '/odom', self.pose_callback, 10)
+        self.match_ready_sub = self.create_subscription(
+            Bool, '/game/match_ready', self.match_ready_callback, 10)
+        
+        # Parameter client for getting team_color from game_state_manager
+        game_state_manager_node = self.get_parameter('game_state_manager_node_name').value
+        self._game_state_params = AsyncParameterClient(self, str(game_state_manager_node))
         
         # Publishers
         self.current_task_pub = self.create_publisher(String, '/planner/current_task', 10)
@@ -112,6 +124,8 @@ class TaskPlanner(Node):
         assignment_topic = self.get_parameter('mission_executor_assignment_topic').value
         status_topic = self.get_parameter('mission_executor_status_topic').value
         start_service = self.get_parameter('mission_executor_start_service').value
+        stop_service = self.get_parameter('mission_executor_stop_service').value
+        stop_match_service = self.get_parameter('game_stop_match_service').value
 
         self.mission_assignment_pub = self.create_publisher(String, assignment_topic, 10)
         self.mission_executor_status_sub = self.create_subscription(
@@ -121,6 +135,36 @@ class TaskPlanner(Node):
             10
         )
         self.mission_executor_start_client = self.create_client(Trigger, start_service)
+        self.mission_executor_stop_client = self.create_client(Trigger, stop_service)
+        self.game_stop_match_client = self.create_client(Trigger, stop_match_service)
+
+        # Task adapters: keep planner generic and delegate task-type specifics.
+        self.task_adapters = {
+            TaskType.MOVE_OBJECT: PickPlaceTaskAdapter(
+                logger=self.get_logger(),
+                mission_assignment_pub=self.mission_assignment_pub,
+                world_state=self.world_state,
+                task_context_by_id=self.task_context_by_id,
+                task_queue=self.task_queue,
+                task_pick_id_getter=self._task_pick_id,
+                task_drop_candidates_getter=self._task_drop_candidates,
+                start_mission_executor=self._start_mission_executor,
+                wait_for_mission_executor_result=self._wait_for_mission_executor_result,
+            ),
+            TaskType.GOTO_POSE: GotoPoseTaskAdapter(
+                logger=self.get_logger(),
+                mission_assignment_pub=self.mission_assignment_pub,
+                start_mission_executor=self._start_mission_executor,
+                wait_for_mission_executor_result=self._wait_for_mission_executor_result,
+            ),
+            TaskType.RETURN_BASE: ReturnBaseTaskAdapter(
+                logger=self.get_logger(),
+                mission_assignment_pub=self.mission_assignment_pub,
+                start_mission_executor=self._start_mission_executor,
+                wait_for_mission_executor_result=self._wait_for_mission_executor_result,
+                team_color_getter=lambda: self.team_color,
+            ),
+        }
         
         # Services
         self.start_planning_srv = self.create_service(
@@ -143,10 +187,7 @@ class TaskPlanner(Node):
         self.status_timer = self.create_timer(1.0, self.publish_status)
         self.add_on_set_parameters_callback(self._on_parameters_changed)
         
-        # Initialize default tasks
-        self.initialize_default_tasks()
-        
-        self.get_logger().info('Task planner initialized (simplified, Nav2-integrated)')
+        self.get_logger().info('Task planner initialized (simplified, Nav2-integrated). Waiting for team selection to build task list.')
 
     def _normalize_team_color(self, value: Any) -> str:
         normalized = str(value).strip().lower()
@@ -176,6 +217,35 @@ class TaskPlanner(Node):
             f'Team color set to {self.team_color}; base=({self.base_location["x"]:.3f}, '
             f'{self.base_location["y"]:.3f}, {self.base_location["theta"]:.3f})'
         )
+        
+        # Initialize task list on first team selection (initial pose chosen)
+        if not self.tasks_initialized:
+            self.initialize_default_tasks()
+            self.tasks_initialized = True
+            self.get_logger().info(f'Task list created for {self.team_color} team')
+
+    def _reinitialize_task_list(self, reason: str) -> bool:
+        """Clear planner task state and rebuild the task list for the current team."""
+        if self.planning_active:
+            self.get_logger().warn(
+                f'Ignoring task list reinitialization while planning is active ({reason})'
+            )
+            return False
+
+        self.current_task = None
+        self.task_queue.clear()
+        self.completed_tasks.clear()
+        self.failed_tasks.clear()
+        self.recent_outcomes.clear()
+        self.last_mission_outcome = None
+        self.task_context_by_id.clear()
+        self.mission_executor_status = 'IDLE'
+        self.interrupted_task_ids.clear()
+
+        self.initialize_default_tasks()
+        self.tasks_initialized = True
+        self.get_logger().info(f'Task list initialized for {self.team_color} team ({reason})')
+        return True
 
     def _on_parameters_changed(self, params):
         relevant = {
@@ -216,190 +286,85 @@ class TaskPlanner(Node):
     
     
     def initialize_default_tasks(self):
-        """Initialize default task library with pick-and-place tasks.
-
-        - Picks are ordered by descending priority.
-        - Each pick is linked to the closest drop location.
-        """
-        pick_locations, drop_locations = self._load_pick_drop_locations()
-
-        self.pick_locations_catalog = {str(pick['id']): pick for pick in pick_locations}
-        self.drop_locations_catalog = {str(drop['id']): drop for drop in drop_locations}
-        self._initialize_world_state(pick_locations, drop_locations)
-
-        sorted_picks = sorted(pick_locations, key=lambda pick: pick.get('priority', 0), reverse=True)
-
-        for pick in sorted_picks:
-            linked_drop = min(
-                drop_locations,
-                key=lambda drop: self._distance_between_locations(
-                    pick.get('location', {}),
-                    drop.get('location', {})
-                )
-            )
-
-            pick_drop_task = create_pick_place_task(
-                task_id=f"pick_place_{pick['id']}",
-                pick_location=pick,
-                drop_location=linked_drop
-            )
-            self.add_task(pick_drop_task)
-
-        # Return to base (always available)
-        self.add_task(create_return_base_task(self.base_location))
-        
-        self.get_logger().info(f'Initialized {len(self.task_queue)} default tasks')
-
-    def _load_pick_drop_locations(self):
-        """Load pick/drop location catalog from YAML and normalize schema."""
-        config_path = None
-        try:
-            package_share = get_package_share_directory('robot_application')
-            config_path = os.path.join(package_share, 'config', 'pick_drop_locations.yaml')
-            with open(config_path, 'r', encoding='utf-8') as config_file:
-                config = yaml.safe_load(config_file) or {}
-        except Exception:
-            config_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), '..', 'config', 'pick_drop_locations.yaml')
-            )
-            with open(config_path, 'r', encoding='utf-8') as config_file:
-                config = yaml.safe_load(config_file) or {}
-
-        pick_locations_raw = config.get('pick_locations', config.get('pick', []))
-        drop_locations_raw = config.get('drop_locations', config.get('drop', []))
-
-        pick_locations = self._normalize_locations(pick_locations_raw)
-        drop_locations = self._normalize_locations(drop_locations_raw)
-
-        if not pick_locations or not drop_locations:
-            raise RuntimeError(f'pick_drop_locations.yaml is missing picks or drops: {config_path}')
-
+        """Initialize the default task set via the current season composer."""
+        pick_locations, drop_locations = self.world_state.reload_catalog_and_state()
+        self.task_composer = PickPlaceSeasonTaskComposer()
         self.get_logger().info(
             f'Loaded pick/drop catalog: {len(pick_locations)} picks, {len(drop_locations)} drops'
         )
-        return pick_locations, drop_locations
 
-    def _normalize_locations(self, locations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Normalize pick/drop entries using prioritized approach positions.
+        for task in self.task_composer.compose_initial_tasks(
+            world_state=self.world_state,
+            base_location=self.base_location,
+        ):
+            self.add_task(task)
 
-        Expected YAML shape per entry:
-        - `id`
-        - `name`
-        - `priority`
-        - `approach_positions`
+        self._log_initial_task_list()
+        
+        self.get_logger().info(f'Initialized {len(self.task_queue)} default tasks')
 
-        Each approach can provide pose either as:
-        - `{id, priority, pose: {x, y, theta}}`
-        - `{id, priority, x, y, theta}`
+    def _log_initial_task_list(self):
+        """Log the initial task queue with pose details for debugging planner setup."""
+        if not self.task_queue:
+            self.get_logger().info('Initial task list is empty')
+            return
 
-        The entry `location` is derived from the first prioritized approach pose.
-        """
-        normalized = []
-        for location in locations:
-            approach_positions = []
-            for approach in location.get('approach_positions', []):
-                pose = approach.get('pose', approach)
-                approach_positions.append({
-                    'id': approach.get('id'),
-                    'priority': approach.get('priority', 1),
-                    'x': float(pose.get('x', 0.0)),
-                    'y': float(pose.get('y', 0.0)),
-                    'theta': float(pose.get('theta', 0.0))
-                })
-
-            approach_positions = sorted(
-                approach_positions,
-                key=lambda approach: int(approach.get('priority', 1))
+        lines = ['Initial task list:']
+        for index, task in enumerate(self.task_queue, start=1):
+            lines.append(
+                f'  {index}. id={task.task_id} type={task.task_type.value} '
+                f'name={task.name} priority={task.base_priority}'
             )
-            normalized.append({
-                'id': location.get('id'),
-                'name': location.get('name', location.get('id', 'location')),
-                'priority': int(location.get('priority', 0)),
-                'capacity': int(location.get('capacity', 1)),
-                'approach_positions': approach_positions
-            })
 
-        return normalized
+            pick_location = task.parameters.get('pick_location')
+            if isinstance(pick_location, dict) and pick_location:
+                lines.append(
+                    f'     pick={self._format_location_summary(pick_location)} '
+                    f'approaches={self._format_approach_positions(pick_location)}'
+                )
 
-    def _initialize_world_state(self, pick_locations: List[Dict[str, Any]], drop_locations: List[Dict[str, Any]]):
-        self.pick_state = {
-            str(pick['id']): {
-                'empty': False,
-                'last_update': time.time()
-            }
-            for pick in pick_locations
-        }
+            drop_location = task.parameters.get('drop_location')
+            if isinstance(drop_location, dict) and drop_location:
+                lines.append(
+                    f'     drop={self._format_location_summary(drop_location)} '
+                    f'approaches={self._format_approach_positions(drop_location)}'
+                )
 
-        self.drop_state = {
-            str(drop['id']): {
-                'occupancy': 0,
-                'capacity': int(drop.get('capacity', 1)),
-                'is_full': False,
-                'last_known_color': 'unknown',
-                'color_confidence': 0.0,
-                'last_update': time.time()
-            }
-            for drop in drop_locations
-        }
+            target_location = task.parameters.get('target_location')
+            if isinstance(target_location, dict) and target_location:
+                lines.append(f'     target_pose={self._format_pose(target_location)}')
 
-    def is_drop_available(self, drop_id: str) -> bool:
-        drop = self.drop_state.get(drop_id)
-        if drop is None:
-            return False
-        return not bool(drop.get('is_full', False))
+        self.get_logger().info('\n'.join(lines))
 
-    def mark_pick_empty(self, pick_id: str):
-        if pick_id not in self.pick_state:
-            return
-        self.pick_state[pick_id]['empty'] = True
-        self.pick_state[pick_id]['last_update'] = time.time()
-        self.empty_pick_locations.add(pick_id)
+    def _format_location_summary(self, location: Dict[str, Any]) -> str:
+        location_id = str(location.get('id', 'unknown'))
+        location_name = str(location.get('name', location_id))
+        return f'{location_name}({location_id})'
 
-    def mark_drop_full(self, drop_id: str):
-        drop = self.drop_state.get(drop_id)
-        if drop is None:
-            return
-        drop['occupancy'] = int(drop.get('capacity', 1))
-        drop['is_full'] = True
-        drop['last_update'] = time.time()
-        self.occupied_drop_locations.add(drop_id)
+    def _format_approach_positions(self, location: Dict[str, Any]) -> str:
+        approaches = location.get('approach_positions', [])
+        if not isinstance(approaches, list) or not approaches:
+            return '[]'
 
-    def mark_drop_occupied(self, drop_id: str):
-        """Increment drop occupancy after a successful place and track full/empty state."""
-        drop = self.drop_state.get(drop_id)
-        if drop is None:
-            return
+        formatted = []
+        for approach in approaches:
+            if not isinstance(approach, dict):
+                continue
+            approach_id = str(approach.get('id', 'approach'))
+            formatted.append(f'{approach_id}:{self._format_pose(approach)}')
+        return '[' + ', '.join(formatted) + ']'
 
-        capacity = max(1, int(drop.get('capacity', 1)))
-        occupancy = min(capacity, int(drop.get('occupancy', 0)) + 1)
-        drop['occupancy'] = occupancy
-        drop['is_full'] = occupancy >= capacity
-        drop['last_update'] = time.time()
-
-        if drop['is_full']:
-            self.occupied_drop_locations.add(drop_id)
-        else:
-            self.occupied_drop_locations.discard(drop_id)
+    def _format_pose(self, pose: Dict[str, Any]) -> str:
+        x = float(pose.get('x', 0.0))
+        y = float(pose.get('y', 0.0))
+        theta = float(pose.get('theta', 0.0))
+        return f'(x={x:.3f}, y={y:.3f}, theta={theta:.3f})'
 
     def _task_pick_id(self, task: Task) -> str:
-        pick_location = task.parameters.get('pick_location', {})
-        if isinstance(pick_location, dict):
-            return str(pick_location.get('id', ''))
-        return ''
+        return self.world_state.task_pick_id(task.parameters)
 
     def _task_drop_candidates(self, task: Task) -> List[Dict[str, Any]]:
-        primary_drop = task.parameters.get('drop_location')
-        if isinstance(primary_drop, dict) and primary_drop:
-            return [primary_drop]
-        return []
-
-    def _distance_between_locations(self, from_location: Dict[str, float], to_location: Dict[str, float]) -> float:
-        """Compute planar distance between two {x, y, theta} dict locations."""
-        from_x = float(from_location.get('x', 0.0))
-        from_y = float(from_location.get('y', 0.0))
-        to_x = float(to_location.get('x', 0.0))
-        to_y = float(to_location.get('y', 0.0))
-        return ((from_x - to_x) ** 2 + (from_y - to_y) ** 2) ** 0.5
+        return self.world_state.task_drop_candidates(task.parameters)
     
 
 
@@ -426,14 +391,61 @@ class TaskPlanner(Node):
     
     def phase_callback(self, msg: String):
         """Update game phase."""
+        previous_phase = self.current_phase
         try:
             self.current_phase = GamePhase[msg.data]
         except KeyError:
-            pass
+            return
 
-    def pose_callback(self, msg: PoseStamped):
+        if previous_phase == self.current_phase:
+            return
+
+        if not self.planning_active:
+            return
+
+        if self.current_phase in (GamePhase.LATE, GamePhase.ENDGAME):
+            if self.current_task and self.current_task.task_type != TaskType.RETURN_BASE:
+                self.get_logger().warn(
+                    f'Phase changed to {self.current_phase.name}; aborting current task '
+                    'to return to base'
+                )
+                self.interrupt_current_task()
+            self.replan_tasks()
+
+    def pose_callback(self, msg: Odometry):
         """Update robot pose estimate used by utility functions."""
-        self.robot_position = msg.pose.position
+        self.robot_position = msg.pose.pose.position
+    
+    def match_ready_callback(self, msg: Bool):
+        """Initialize task list when match ready signal received."""
+        if msg.data:
+            # Match is ready, get team_color from game_state_manager and (re)initialize tasks
+            try:
+                self.get_logger().info('Match ready signal received, fetching team_color from game_state_manager...')
+                if not self._game_state_params.wait_for_services(timeout_sec=1.0):
+                    self.get_logger().warn('Could not reach game_state_manager to get team_color')
+                    return
+                
+                future = self._game_state_params.get_parameters(['team_color'])
+                future.add_done_callback(self._on_team_color_fetched)
+            except Exception as e:
+                self.get_logger().error(f'Error fetching team_color: {e}')
+    
+    def _on_team_color_fetched(self, future):
+        """Callback when team_color parameter is retrieved from game_state_manager."""
+        try:
+            result = future.result()
+            if result and len(result.values) > 0:
+                team_color_param = result.values[0]
+                team_color = str(team_color_param.string_value).strip().lower()
+                if team_color in ('blue', 'yellow'):
+                    self.team_color = team_color
+                    self.base_location = self._get_base_location_for_team(self.team_color)
+                    self._reinitialize_task_list('match_ready signal')
+                else:
+                    self.get_logger().warn(f'Invalid team_color from game_state_manager: {team_color}')
+        except Exception as e:
+            self.get_logger().error(f'Error processing team_color result: {e}')
     
     def replan_tasks(self):
         """Re-evaluate and re-prioritize task queue."""
@@ -442,6 +454,7 @@ class TaskPlanner(Node):
         
         # Calculate utility for all available tasks
         task_utilities = []
+        all_available_task_utilities = []
         for task in self.task_queue:
             if not task.is_available():
                 continue
@@ -460,9 +473,17 @@ class TaskPlanner(Node):
                 task.priority_function = endgame_priority
             
             utility = task.calculate_utility(self.time_remaining, self.current_score, self)
+            all_available_task_utilities.append((task, utility))
             
             if utility >= self.min_utility_threshold:
                 task_utilities.append((task, utility))
+
+        if not task_utilities and all_available_task_utilities:
+            self.get_logger().warn(
+                f'No task met min_utility_threshold={self.min_utility_threshold:.3f}; '
+                'falling back to best available tasks below threshold'
+            )
+            task_utilities = all_available_task_utilities
         
         # Sort by utility (highest first)
         task_utilities.sort(key=lambda x: x[1], reverse=True)
@@ -492,18 +513,25 @@ class TaskPlanner(Node):
         if self.planning_active:
             response.success = False
             response.message = 'Planning already active'
-        else:
-            self.planning_active = True
-            self.stop_requested = False
-            
-            # Start planning thread
-            self.planning_thread = threading.Thread(target=self.planning_loop)
-            self.planning_thread.daemon = True
-            self.planning_thread.start()
-            
-            response.success = True
-            response.message = 'Strategic planning started'
-            self.get_logger().info(response.message)
+            return response
+        
+        if not self.tasks_initialized:
+            response.success = False
+            response.message = 'Cannot start planning: initial pose (team color) not selected. Please select blue or yellow.'
+            self.get_logger().warn(response.message)
+            return response
+        
+        self.planning_active = True
+        self.stop_requested = False
+        
+        # Start planning thread
+        self.planning_thread = threading.Thread(target=self.planning_loop)
+        self.planning_thread.daemon = True
+        self.planning_thread.start()
+        
+        response.success = True
+        response.message = 'Strategic planning started'
+        self.get_logger().info(response.message)
         
         return response
     
@@ -521,15 +549,15 @@ class TaskPlanner(Node):
         return response
 
     def reset_planning_callback(self, request, response):
-        """Reset planner state and reinitialize default tasks."""
+        """Reset planner state and wait for match ready signal."""
         self._reset_to_default_state()
         response.success = True
-        response.message = f'Planner reset. Queue size: {len(self.task_queue)}'
+        response.message = 'Planner reset. Task list cleared. Waiting for match ready signal with team selection.'
         self.get_logger().info(response.message)
         return response
 
     def _reset_to_default_state(self):
-        """Reset planner internals and load default tasks for a fresh match."""
+        """Reset planner internals and prepare for match startup."""
         self.planning_active = False
         self.stop_requested = True
         self.current_task = None
@@ -537,19 +565,16 @@ class TaskPlanner(Node):
         self.task_queue = []
         self.completed_tasks = []
         self.failed_tasks = []
-        self.empty_pick_locations = set()
-        self.occupied_drop_locations = set()
-        self.pick_locations_catalog = {}
-        self.drop_locations_catalog = {}
-        self.pick_state = {}
-        self.drop_state = {}
         self.recent_outcomes = set()
         self.last_mission_outcome = None
         self.task_context_by_id = {}
         self.mission_executor_status = 'IDLE'
+        self.interrupted_task_ids = set()
 
+        # Mark tasks as uninitialized so they will be created when match_ready is signaled
+        self.tasks_initialized = False
         self.base_location = self._get_base_location_for_team(self.team_color)
-        self.initialize_default_tasks()
+        self.get_logger().info('Planner reset. Waiting for match ready signal to initialize task list.')
     
     def replan_callback(self, request, response):
         """Force immediate replanning."""
@@ -586,10 +611,26 @@ class TaskPlanner(Node):
             success = self.execute_task(self.current_task)
             
             # Update task status
+            if self.current_task.status == TaskStatus.CANCELED:
+                self.get_logger().warn(f'Task canceled: {self.current_task.name}')
+                if self.current_task in self.task_queue:
+                    self.task_queue.remove(self.current_task)
+                self.current_task = None
+                time.sleep(0.1)
+                continue
+
             if success:
                 self.current_task.status = TaskStatus.COMPLETED
                 self.completed_tasks.append(self.current_task)
                 self.get_logger().info(f'Task completed: {self.current_task.name}')
+                if self.current_task.task_type == TaskType.RETURN_BASE:
+                    self.get_logger().info('Return-base task completed, requesting match stop')
+                    if not self._request_stop_match():
+                        self.get_logger().warn('Return-base completed but /game/stop_match request failed')
+                    if not self._stop_mission_executor():
+                        self.get_logger().warn('Return-base completed but stopping mission_executor failed')
+                    self.planning_active = False
+                    self.stop_requested = True
             else:
                 if self.current_task.attempts >= self.current_task.max_attempts:
                     self.current_task.status = TaskStatus.FAILED
@@ -603,7 +644,12 @@ class TaskPlanner(Node):
             
             # Remove from queue if completed or failed
             if self.current_task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
-                self.task_queue.remove(self.current_task)
+                if self.current_task in self.task_queue:
+                    self.task_queue.remove(self.current_task)
+                else:
+                    self.get_logger().warn(
+                        f'Task {self.current_task.task_id} already removed from queue before terminal update'
+                    )
             
             self.current_task = None
             
@@ -616,60 +662,31 @@ class TaskPlanner(Node):
         """Interrupt currently executing task."""
         if self.current_task:
             self.current_task.status = TaskStatus.CANCELED
+            self.interrupted_task_ids.add(self.current_task.task_id)
             self.get_logger().warn(f'Task interrupted: {self.current_task.name}')
-            # In real implementation, would cancel active action goals
+            if not self._stop_mission_executor():
+                self.get_logger().warn('Failed to stop mission_executor during task interruption')
     
 
     def execute_task(self, task: Task) -> bool:
         """Execute task by dispatching to mission implementation."""
         self.get_logger().info(f'Executing {task.task_type.value}: {task.name}')
 
-        if task.task_type == TaskType.MOVE_OBJECT:
-            return self._execute_move_object_task(task)
-        elif task.task_type == TaskType.RETURN_BASE:
-            return self._execute_return_base_task(task)
+        # If this task_id was interrupted earlier, clear stale interruption state
+        # before a fresh dispatch attempt.
+        self.interrupted_task_ids.discard(task.task_id)
 
+        adapter = self.task_adapters.get(task.task_type)
+        if adapter is not None:
+            return adapter.execute(task)
+
+        self.get_logger().warn(f'No task adapter configured for {task.task_type.value}; treating as completed')
         return True
-
-    def _execute_move_object_task(self, task: Task) -> bool:
-        """Send task to mission executor and wait for outcome."""
-        full_drop_ids = [drop_id for drop_id in self.drop_state if not self.is_drop_available(drop_id)]
-        pick_id = self._task_pick_id(task)
-        drop_candidates = self._task_drop_candidates(task)
-        initial_drop_id = str(drop_candidates[0].get('id', '')) if drop_candidates else ''
-
-        payload = {
-            'name': task.name,
-            'task_id': task.task_id,
-            'task_type': task.task_type.value,
-            'pick_location': task.parameters.get('pick_location', []),
-            'drop_location': task.parameters.get('drop_location', []),
-            'drop_positions': drop_candidates,
-            'source_pick_id': pick_id,
-            'target_drop_id': initial_drop_id,
-            'excluded_drop_ids': [],
-            'full_drop_ids': full_drop_ids,
-            'priority': task.base_priority,
-            'carry_object': bool(task.parameters.get('carry_object', False)),
-        }
-
-        self.task_context_by_id[task.task_id] = payload
-
-        assignment_msg = String()
-        assignment_msg.data = json.dumps(payload)
-        self.mission_assignment_pub.publish(assignment_msg)
-        self.get_logger().info(f'Dispatched task to mission_executor: {task.task_id}')
-
-        start_ok = self._start_mission_executor()
-        if not start_ok:
-            self.get_logger().error('Failed to start mission_executor mission')
-            return False
-
-        timeout = max(15.0, float(task.time_estimate) + 25.0)
-        return self._wait_for_mission_executor_result(timeout)
 
     def _start_mission_executor(self) -> bool:
         """Call mission_executor start_mission service."""
+        self.mission_executor_status = 'STARTING'
+
         if not self.mission_executor_start_client.wait_for_service(timeout_sec=2.0):
             return False
 
@@ -683,8 +700,49 @@ class TaskPlanner(Node):
         if response.success:
             return True
 
-        # Mission might already be running and able to consume assignment.
-        return 'already running' in response.message.lower()
+        # Mission might already be active and able to consume the queued assignment.
+        response_message = response.message.lower()
+        return (
+            'already running' in response_message
+            or 'thread still active' in response_message
+        )
+
+    def _stop_mission_executor(self) -> bool:
+        """Call mission_executor stop_mission service."""
+        if not self.mission_executor_stop_client.wait_for_service(timeout_sec=1.0):
+            return False
+
+        future = self.mission_executor_stop_client.call_async(Trigger.Request())
+        if not self._wait_for_future(future, timeout_sec=2.0):
+            return False
+
+        response = future.result()
+        if response is None:
+            return False
+
+        if response.success:
+            self.mission_executor_status = 'IDLE'
+        return bool(response.success)
+
+    def _request_stop_match(self) -> bool:
+        """Call /game/stop_match to finish the match after return-base completion."""
+        if not self.game_stop_match_client.wait_for_service(timeout_sec=2.0):
+            return False
+
+        future = self.game_stop_match_client.call_async(Trigger.Request())
+        if not self._wait_for_future(future, timeout_sec=3.0):
+            return False
+
+        response = future.result()
+        if response is None:
+            return False
+
+        if not response.success:
+            self.get_logger().warn(f'/game/stop_match failed: {response.message}')
+            return False
+
+        self.get_logger().info(f'/game/stop_match succeeded: {response.message}')
+        return True
 
     def _wait_for_future(self, future, timeout_sec: float, poll_interval: float = 0.05) -> bool:
         """Wait for an async future without re-entering the spinning executor."""
@@ -695,30 +753,59 @@ class TaskPlanner(Node):
             time.sleep(poll_interval)
         return future.done()
 
-    def _wait_for_mission_executor_result(self, timeout_sec: float) -> bool:
-        """Wait for mission state transition to COMPLETED/FAILED."""
+    def _wait_for_mission_executor_result(self, expected_task_id: str, timeout_sec: float) -> bool:
+        """Wait for a terminal mission outcome for the dispatched task."""
         deadline = time.time() + timeout_sec
+        baseline_outcome_seq = self._mission_outcome_sequence(self.last_mission_outcome)
         saw_running = (self.mission_executor_status == 'RUNNING')
 
         while time.time() < deadline and not self.stop_requested:
             status = self.mission_executor_status
             if status == 'RUNNING':
                 saw_running = True
-            if status == 'REPLAN_REQUIRED':
-                outcome = self.last_mission_outcome or {}
-                if self._handle_replan_required_outcome(outcome):
-                    self.mission_executor_status = 'RUNNING'
-                    continue
+
+            if expected_task_id in self.interrupted_task_ids and status == 'IDLE' and saw_running:
+                self.interrupted_task_ids.discard(expected_task_id)
                 return False
-            if status == 'COMPLETED':
+
+            outcome = self.last_mission_outcome or {}
+            outcome_task_id = str(outcome.get('task_id', ''))
+            outcome_seq = self._mission_outcome_sequence(outcome)
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id:
+                status = str(outcome.get('status', status)).upper()
+                self.mission_executor_status = status
+
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'REPLAN_REQUIRED':
+                adapter = self._adapter_for_outcome(outcome)
+                if adapter and adapter.handle_replan_required(outcome):
+                    self.mission_executor_status = 'RUNNING'
+                    baseline_outcome_seq = outcome_seq
+                    continue
+                self.interrupted_task_ids.discard(expected_task_id)
+                return False
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'COMPLETED':
+                self.interrupted_task_ids.discard(expected_task_id)
                 return True
-            if status == 'FAILED':
+            if outcome_seq > baseline_outcome_seq and outcome_task_id == expected_task_id and status == 'FAILED':
+                self.interrupted_task_ids.discard(expected_task_id)
                 return False
             time.sleep(0.1)
 
         if saw_running:
-            self.get_logger().warn('Mission executor timed out waiting for terminal outcome')
+            self.get_logger().warn(
+                f'Mission executor timed out waiting for task_id={expected_task_id}; stopping active mission to prevent overlap'
+            )
+            self._stop_mission_executor()
+            self.interrupted_task_ids.discard(expected_task_id)
         return False
+
+    def _mission_outcome_sequence(self, outcome: Optional[Dict[str, Any]]) -> int:
+        if not isinstance(outcome, dict):
+            return 0
+        try:
+            return int(outcome.get('outcome_seq', 0))
+        except (TypeError, ValueError):
+            return 0
 
     def mission_executor_status_callback(self, msg: String):
         """Track mission state from mission_executor node."""
@@ -745,100 +832,22 @@ class TaskPlanner(Node):
             self.last_mission_outcome = outcome
             status = str(outcome.get('status', 'UNKNOWN')).upper()
             self.mission_executor_status = status
-            self._apply_outcome_to_world_state(outcome)
+            adapter = self._adapter_for_outcome(outcome)
+            processing_result = adapter.process_outcome(outcome) if adapter else {}
+            if processing_result.get('replan_tasks', False):
+                self.replan_tasks()
             return
 
         self.mission_executor_status = raw
 
-    def _apply_outcome_to_world_state(self, outcome: Dict[str, Any]):
-        status = str(outcome.get('status', '')).upper()
-        reason = str(outcome.get('outcome_reason', '')).upper()
-        source_pick_id = str(outcome.get('source_pick_id', ''))
-        target_drop_id = str(outcome.get('target_drop_id', ''))
-
-        if status == 'FAILED' and reason == 'PICK_EMPTY' and source_pick_id:
-            self.mark_pick_empty(source_pick_id)
-            self.task_queue = [
-                task for task in self.task_queue
-                if self._task_pick_id(task) != source_pick_id
-            ]
-            task_id = str(outcome.get('task_id', ''))
-            if task_id and task_id in self.task_context_by_id:
-                del self.task_context_by_id[task_id]
-            self.replan_tasks()
-            return
-
-        if status == 'REPLAN_REQUIRED' and reason == 'DROP_FULL' and target_drop_id:
-            self.mark_drop_full(target_drop_id)
-            return
-
-        if status == 'COMPLETED':
-            if source_pick_id:
-                self.mark_pick_empty(source_pick_id)
-            if target_drop_id:
-                self.mark_drop_occupied(target_drop_id)
-            task_id = str(outcome.get('task_id', ''))
-            if task_id and task_id in self.task_context_by_id:
-                del self.task_context_by_id[task_id]
-
-    def _handle_replan_required_outcome(self, outcome: Dict[str, Any]) -> bool:
-        reason = str(outcome.get('outcome_reason', '')).upper()
-        carry_object = bool(outcome.get('carry_object', False))
-        task_id = str(outcome.get('task_id', ''))
-
-        if reason != 'DROP_FULL' or not carry_object or not task_id:
-            return False
-
-        original_payload = self.task_context_by_id.get(task_id)
-        if not original_payload:
-            return False
-
-        failed_drop_id = str(outcome.get('target_drop_id', ''))
-        excluded_ids = set(original_payload.get('excluded_drop_ids', []))
-        if failed_drop_id:
-            excluded_ids.add(failed_drop_id)
-
-        candidate_drops = list(original_payload.get('drop_positions', []))
-        next_drop = None
-        for drop in sorted(candidate_drops, key=lambda item: int(item.get('priority', 999))):
-            drop_id = str(drop.get('id', ''))
-            if drop_id in excluded_ids:
-                continue
-            if self.is_drop_available(drop_id):
-                next_drop = drop
-                break
-
-        if next_drop is None:
-            return False
-
-        continuation_payload = dict(original_payload)
-        continuation_payload['carry_object'] = True
-        continuation_payload['source_pick_id'] = str(outcome.get('source_pick_id', continuation_payload.get('source_pick_id', '')))
-        continuation_payload['target_drop_id'] = str(next_drop.get('id', ''))
-        continuation_payload['active_arm_index'] = outcome.get(
-            'active_arm_index',
-            continuation_payload.get('active_arm_index')
-        )
-        continuation_payload['active_arm_indices'] = outcome.get(
-            'active_arm_indices',
-            continuation_payload.get('active_arm_indices', [])
-        )
-        continuation_payload['excluded_drop_ids'] = sorted(list(excluded_ids))
-        continuation_payload['full_drop_ids'] = [drop_id for drop_id in self.drop_state if not self.is_drop_available(drop_id)]
-        continuation_payload['drop_positions'] = [next_drop] + [
-            drop for drop in candidate_drops
-            if str(drop.get('id', '')) != str(next_drop.get('id', ''))
-        ]
-        continuation_payload['object_color_before'] = str(outcome.get('object_color_before', continuation_payload.get('object_color_before', 'unknown')))
-
-        self.task_context_by_id[task_id] = continuation_payload
-        assignment_msg = String()
-        assignment_msg.data = json.dumps(continuation_payload)
-        self.mission_assignment_pub.publish(assignment_msg)
-        self.get_logger().info(
-            f'Replanned drop for {task_id}: previous={failed_drop_id}, next={continuation_payload["target_drop_id"]}'
-        )
-        return True
+    def _adapter_for_outcome(self, outcome: Dict[str, Any]):
+        task_type_value = str(outcome.get('task_type', '')).strip().lower()
+        if not task_type_value:
+            return self.task_adapters.get(TaskType.MOVE_OBJECT)
+        for task_type, adapter in self.task_adapters.items():
+            if task_type.value == task_type_value:
+                return adapter
+        return None
     
     def publish_status(self):
         """Publish planner status."""

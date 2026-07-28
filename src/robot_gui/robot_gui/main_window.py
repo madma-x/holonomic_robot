@@ -126,7 +126,10 @@ class MainWindow(QMainWindow):
         self.reset_ui_button.clicked.connect(self._reset_local_state)
 
         self.reset_pose_button = QPushButton('Reset Position')
-        self.reset_pose_button.clicked.connect(self.ros.reset_to_initial_position)
+        self.reset_pose_button.clicked.connect(lambda: self.ros.call_named_service('reset_pose'))
+
+        self.reset_odom_button = QPushButton('Reset Odometry')
+        self.reset_odom_button.clicked.connect(self.ros.reset_odom)
 
         self.latch_state_label = QLabel('Latch: Idle')
 
@@ -143,7 +146,8 @@ class MainWindow(QMainWindow):
         setup_layout.addWidget(self.ready_button, 2, 0, 1, 2)
         setup_layout.addWidget(self.reset_ui_button, 3, 0, 1, 2)
         setup_layout.addWidget(self.reset_pose_button, 4, 0, 1, 2)
-        setup_layout.addWidget(self.latch_state_label, 5, 0, 1, 2)
+        setup_layout.addWidget(self.reset_odom_button, 5, 0, 1, 2)
+        setup_layout.addWidget(self.latch_state_label, 6, 0, 1, 2)
         controls_page_layout.addWidget(setup_box)
 
         self._apply_team_selection_state()
@@ -156,7 +160,7 @@ class MainWindow(QMainWindow):
         self.start_btn = QPushButton('Start Match')
         self.stop_btn = QPushButton('Stop Match')
 
-        self.start_btn.clicked.connect(lambda: self.ros.call_named_service('start_match'))
+        self.start_btn.clicked.connect(self._force_start_match)
         self.stop_btn.clicked.connect(self._confirm_stop_match)
 
         match_controls_layout.addWidget(self.start_btn, 0, 0)
@@ -288,6 +292,7 @@ class MainWindow(QMainWindow):
     def _set_team(self, value: str):
         self.local.team_color = value
         self._apply_team_selection_state()
+        self.ros.set_game_team_color(value)
         self.feedback_label.setText(f'Team set to {value}.')
 
     def _apply_team_selection_state(self):
@@ -300,16 +305,60 @@ class MainWindow(QMainWindow):
         self.feedback_label.setText(f'Strategy set to {value}.')
 
     def _toggle_ready(self):
+        # Block enabling Match Ready when the system is not safe
+        if not self.local.match_ready:
+            snap = self.ros.snapshot()
+            if snap.safety_state != 'SAFE_ON':
+                self.feedback_label.setText(
+                    f'Cannot arm Match Ready: system is not safe ({snap.safety_state}).'
+                )
+                return
         self.local.match_ready = not self.local.match_ready
         if self.local.match_ready:
             self.local.latch_armed = True
             self.local.latch_status = 'Armed (waiting latch removal)'
             self.ready_button.setText('Match Ready: ON')
-            self.feedback_label.setText('Ready armed: latch removal will start match in future GPIO mode.')
+            future = self.ros.set_game_team_color(self.local.team_color)
+
+            def _after_team_color_set(fut):
+                try:
+                    result = fut.result()
+                except Exception as error:
+                    self.feedback_label.setText(f'Failed to set team color: {error}')
+                    self.local.match_ready = False
+                    self.ready_button.setText('Match Ready: OFF')
+                    return
+
+                if not result:
+                    self.feedback_label.setText('Failed to set team color: no response')
+                    self.local.match_ready = False
+                    self.ready_button.setText('Match Ready: OFF')
+                    return
+
+                results = result.results if hasattr(result, 'results') else result
+                first = results[0]
+                if not first.successful:
+                    reason = str(first.reason) if getattr(first, 'reason', '') else 'unknown reason'
+                    self.feedback_label.setText(f'Failed to set team color: {reason}')
+                    self.local.match_ready = False
+                    self.ready_button.setText('Match Ready: OFF')
+                    return
+
+                self.ros.publish_match_ready(True)
+                self.ros.call_named_service('reset_pose')
+                self.feedback_label.setText('Ready armed: pose reset from game_state config; latch/manual start can begin match.')
+
+            if future is None:
+                self.feedback_label.setText('Failed to set team color: service unavailable')
+                self.local.match_ready = False
+                self.ready_button.setText('Match Ready: OFF')
+            else:
+                future.add_done_callback(_after_team_color_set)
         else:
             self.local.latch_armed = False
             self.local.latch_status = 'Idle'
             self.ready_button.setText('Match Ready: OFF')
+            self.ros.publish_match_ready(False)
             self.feedback_label.setText('Ready disarmed: latch removal ignored.')
         self._refresh_local_labels()
 
@@ -317,17 +366,34 @@ class MainWindow(QMainWindow):
         """Future GPIO hook: only start match when ready latch is armed."""
         if not self.local.match_ready:
             self.local.latch_status = 'Latch removed while not ready (ignored)'
-            self.feedback_label.setText('Latch removal ignored because Match Ready is OFF.')
+            self.ros._set_feedback('Latch removal ignored because Match Ready is OFF.')
             self._refresh_local_labels()
             return
 
-        self.local.latch_status = 'Latch removed -> starting match'
-        self.feedback_label.setText('Latch removed while armed: sending match start.')
+        self._dispatch_match_start('Latch removed -> starting match', 'Latch removed while armed: sending match start.')
+
+    def _force_start_match(self):
+        if not self.local.match_ready:
+            self.local.latch_status = 'Manual start blocked (ready required)'
+            self.ros._set_feedback('Turn Match Ready ON before forcing match start.')
+            self._refresh_local_labels()
+            return
+
+        self._dispatch_match_start('Manual override -> starting match', 'Manual start override: sending match start without latch.')
+
+    def _dispatch_match_start(self, latch_status: str, feedback: str):
+        self.local.match_ready = False
+        self.ros.publish_match_ready(False)
+        self.local.latch_armed = False
+        self.local.latch_status = latch_status
+        self.ready_button.setText('Match Ready: OFF')
+        self.ros._set_feedback(feedback)
         self._refresh_local_labels()
         self.ros.call_named_service('start_match')
 
     def _reset_local_state(self):
         self.local = LocalState()
+        self.ros.publish_match_ready(False)
         self._apply_team_selection_state()
         self.strategy_combo.setCurrentText(self.local.strategy)
         self.ready_button.setText('Match Ready: OFF')
@@ -368,6 +434,9 @@ class MainWindow(QMainWindow):
             self.safety_value.setStyleSheet('color: #8a6a00; font-weight: 700;')
 
         self.match_active_value.setText(str(snap.match_active))
+        if snap.match_ready != self.local.match_ready:
+            self.local.match_ready = snap.match_ready
+            self.ready_button.setText('Match Ready: ON' if snap.match_ready else 'Match Ready: OFF')
         self.current_task_value.setText(snap.current_task)
         self.queue_size_value.setText(str(snap.queue_size))
         self.mission_status_value.setText(snap.mission_status)

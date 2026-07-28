@@ -1,0 +1,291 @@
+"""
+gpio_manager.py — Match-start latch trigger node.
+
+This node only monitors a MicroPython latch input over serial and calls
+`/game/start_match` when the configured latch edge is detected.
+
+Safety authority is intentionally NOT handled here.
+"""
+
+import threading
+import time
+from typing import Optional
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
+
+try:
+    import serial
+    _SERIAL_AVAILABLE = True
+except ImportError:
+    _SERIAL_AVAILABLE = False
+
+
+class GpioManagerNode(Node):
+    def __init__(self):
+        super().__init__('gpio_manager')
+
+        self.declare_parameter('start_latch_enabled', True)
+        self.declare_parameter('start_latch_port', '/dev/ttyACM0')
+        self.declare_parameter('start_latch_baudrate', 115200)
+        self.declare_parameter('start_latch_pin', 28)
+        self.declare_parameter('start_latch_pullup', True)
+        self.declare_parameter('start_latch_trigger_value', 0)
+        self.declare_parameter('start_latch_debounce_ms', 50)
+        self.declare_parameter('start_latch_retrigger_lockout_ms', 1500)
+        self.declare_parameter('start_latch_reconnect_sec', 1.0)
+        self.declare_parameter('start_match_service', '/game/start_match')
+        self.declare_parameter('match_active_topic', '/game/match_active')
+        self.declare_parameter('match_ready_topic', '/game/match_ready')
+
+        self._start_latch_enabled = self.get_parameter('start_latch_enabled').value
+        self._start_latch_port = self.get_parameter('start_latch_port').value
+        self._start_latch_baudrate = self.get_parameter('start_latch_baudrate').value
+        self._start_latch_pin_num = self.get_parameter('start_latch_pin').value
+        self._start_latch_pullup = self.get_parameter('start_latch_pullup').value
+        self._start_latch_trigger_value = int(
+            self.get_parameter('start_latch_trigger_value').value
+        )
+        self._start_latch_debounce_ms = self.get_parameter('start_latch_debounce_ms').value
+        self._start_latch_retrigger_lockout_ms = self.get_parameter(
+            'start_latch_retrigger_lockout_ms'
+        ).value
+        self._start_latch_reconnect_sec = float(
+            self.get_parameter('start_latch_reconnect_sec').value
+        )
+        self._start_match_service = self.get_parameter('start_match_service').value
+        self._match_active_topic = self.get_parameter('match_active_topic').value
+        self._match_ready_topic = self.get_parameter('match_ready_topic').value
+
+        self._last_start_latch_edge_time = 0.0
+        self._last_start_latch_value: Optional[bool] = None
+        self._match_active = False
+        self._match_ready = False
+        self._pending_start_future = None
+        self._last_start_request_time = 0.0
+
+        self._start_latch_ok = False
+        self._start_latch_serial = None
+        self._last_reconnect_attempt_time = 0.0
+
+        self._start_match_client = self.create_client(
+            Trigger,
+            str(self._start_match_service),
+        )
+        self.create_subscription(
+            Bool,
+            str(self._match_active_topic),
+            self._match_active_cb,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            str(self._match_ready_topic),
+            self._match_ready_cb,
+            10,
+        )
+
+        self._init_start_latch()
+
+        if self._start_latch_enabled:
+            self._start_latch_thread = threading.Thread(
+                target=self._start_latch_monitor_loop,
+                daemon=True,
+            )
+            self._start_latch_thread.start()
+            if not self._start_latch_ok:
+                self.get_logger().warn(
+                    'Start latch unavailable at startup — background reconnect is active.'
+                )
+
+    def _init_start_latch(self):
+        if not self._start_latch_enabled:
+            return
+
+        if not _SERIAL_AVAILABLE:
+            self.get_logger().warn('pyserial not installed. Start latch disabled.')
+            return
+
+        try:
+            self._start_latch_serial = serial.Serial(
+                str(self._start_latch_port),
+                int(self._start_latch_baudrate),
+                timeout=0.2,
+                write_timeout=0.2,
+            )
+            time.sleep(0.3)
+            self._start_latch_serial.reset_input_buffer()
+
+            pull_mode = 'machine.Pin.PULL_UP' if self._start_latch_pullup else 'None'
+            self._micropython_write_line('import machine')
+            self._micropython_write_line(
+                f'_latch_pin=machine.Pin({int(self._start_latch_pin_num)}, machine.Pin.IN, {pull_mode})'
+            )
+
+            self._last_start_latch_value = self._micropython_read_latch_value()
+            self._start_latch_ok = True
+            self.get_logger().info(
+                f'Start latch ready via MicroPython on {self._start_latch_port} '
+                f'GPIO {self._start_latch_pin_num} — '
+                f'initial level {self._last_start_latch_value}'
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Start latch MicroPython init failed: {exc}')
+            self._start_latch_ok = False
+
+    def _start_latch_monitor_loop(self):
+        while rclpy.ok() and self._start_latch_enabled:
+            try:
+                if not self._start_latch_ok:
+                    self._attempt_start_latch_reconnect()
+                    time.sleep(0.1)
+                    continue
+
+                current_value = self._micropython_read_latch_value()
+                if current_value is None:
+                    time.sleep(0.02)
+                    continue
+
+                previous_value = self._last_start_latch_value
+                self._last_start_latch_value = current_value
+                now = time.monotonic()
+
+                if (
+                    previous_value is not None
+                    and previous_value is False
+                    and current_value is True
+                ):
+                    if (
+                        (now - self._last_start_latch_edge_time) * 1000
+                        >= self._start_latch_debounce_ms
+                    ):
+                        self._last_start_latch_edge_time = now
+                        self._try_start_match_from_latch()
+
+                time.sleep(0.02)
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(f'Start latch monitor error: {exc}')
+                self._mark_latch_disconnected()
+                time.sleep(0.1)
+
+    def _mark_latch_disconnected(self):
+        self._start_latch_ok = False
+        try:
+            if self._start_latch_serial is not None:
+                self._start_latch_serial.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._start_latch_serial = None
+
+    def _attempt_start_latch_reconnect(self):
+        now = time.monotonic()
+        if self._start_latch_reconnect_sec > 0.0:
+            if (now - self._last_reconnect_attempt_time) < self._start_latch_reconnect_sec:
+                return
+        self._last_reconnect_attempt_time = now
+        self.get_logger().warn(
+            f'Attempting start latch reconnect on {self._start_latch_port}...'
+        )
+        self._init_start_latch()
+
+    def _micropython_write_line(self, line: str):
+        self._start_latch_serial.write((line + '\r\n').encode('utf-8'))
+        time.sleep(0.03)
+        if self._start_latch_serial.in_waiting:
+            self._start_latch_serial.read(self._start_latch_serial.in_waiting)
+
+    def _micropython_read_latch_value(self):
+        self._start_latch_serial.reset_input_buffer()
+        self._start_latch_serial.write(b'print(_latch_pin.value())\r\n')
+
+        deadline = time.monotonic() + 0.2
+        buffer = ''
+        while time.monotonic() < deadline:
+            waiting = self._start_latch_serial.in_waiting
+            if waiting:
+                buffer += self._start_latch_serial.read(waiting).decode('utf-8', errors='ignore')
+                for line in reversed(buffer.splitlines()):
+                    token = line.strip()
+                    if token in ('0', '1'):
+                        return token == '1'
+            time.sleep(0.01)
+        return None
+
+    def _match_active_cb(self, msg: Bool):
+        self._match_active = bool(msg.data)
+
+    def _match_ready_cb(self, msg: Bool):
+        self._match_ready = bool(msg.data)
+
+    def _is_match_ready(self) -> bool:
+        return self._match_ready and (not self._match_active)
+
+    def _try_start_match_from_latch(self):
+        now = time.monotonic()
+        if (
+            self._start_latch_retrigger_lockout_ms > 0
+            and (now - self._last_start_request_time) * 1000
+            < self._start_latch_retrigger_lockout_ms
+        ):
+            self.get_logger().info('Start latch ignored: retrigger lockout active')
+            return
+
+        if not self._is_match_ready():
+            self.get_logger().info(
+                f'Start latch falling edge ignored: match not ready '
+                f'(match_ready={self._match_ready}, match_active={self._match_active})'
+            )
+            return
+
+        if self._pending_start_future is not None and not self._pending_start_future.done():
+            self.get_logger().info('Start latch ignored: start request already in progress')
+            return
+
+        if not self._start_match_client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warn(
+                f'Start latch trigger: service unavailable {self._start_match_service}'
+            )
+            return
+
+        self.get_logger().info('Start latch falling edge detected: requesting match start')
+        self._last_start_request_time = now
+        self._pending_start_future = self._start_match_client.call_async(Trigger.Request())
+        self._pending_start_future.add_done_callback(self._on_start_match_response)
+
+    def _on_start_match_response(self, future):
+        try:
+            result = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Start latch trigger failed: {exc}')
+            return
+
+        if result is None:
+            self.get_logger().warn('Start latch trigger: no response from start_match service')
+            return
+
+        if result.success:
+            self.get_logger().info(f'Start latch trigger accepted: {result.message}')
+        else:
+            self.get_logger().warn(f'Start latch trigger rejected: {result.message}')
+
+    def destroy_node(self):
+        try:
+            if self._start_latch_serial is not None:
+                self._start_latch_serial.close()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f'Error while closing latch serial: {exc}')
+        return super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GpioManagerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

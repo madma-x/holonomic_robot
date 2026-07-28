@@ -14,7 +14,7 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_topic', default_value='/camera/image_raw'),
         DeclareLaunchArgument('tags_topic', default_value='/findeeznuts/detected_tags'),
         DeclareLaunchArgument('pickability_topic', default_value='/cluster_pickability'),
-        DeclareLaunchArgument('show_window', default_value='false'),
+        DeclareLaunchArgument('show_window', default_value='true'),
 
         Node(
             package='aruco_manager',

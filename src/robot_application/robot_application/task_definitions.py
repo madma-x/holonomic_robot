@@ -10,6 +10,7 @@ class TaskType(Enum):
     """Types of tasks the robot can perform."""
     FLIP_OBJECT = "flip_object"
     MOVE_OBJECT = "move_object"
+    GOTO_POSE = "goto_pose"
     RETURN_BASE = "return_base"
     MOVE_THERMOMETER = "move_thermometer"
 
@@ -102,6 +103,9 @@ class Task:
 def early_game_priority(time_remaining: float, current_score: int, 
                        game_state: Any, task: Task) -> float:
     """Priority function for early game (>60s): Focus on high-value tasks."""
+    if task.task_type == TaskType.RETURN_BASE:
+        return 0.0
+
     base_utility = (task.base_points * task.success_probability) / task.time_estimate
     
     # Bonus for high-value tasks
@@ -118,6 +122,9 @@ def early_game_priority(time_remaining: float, current_score: int,
 def mid_game_priority(time_remaining: float, current_score: int, 
                      game_state: Any, task: Task) -> float:
     """Priority function for mid game (30-60s): Balanced approach."""
+    if task.task_type == TaskType.RETURN_BASE:
+        return 0.0
+
     base_utility = (task.base_points * task.success_probability) / task.time_estimate
     
     # If behind in score, take more risks
@@ -132,6 +139,9 @@ def mid_game_priority(time_remaining: float, current_score: int,
 def late_game_priority(time_remaining: float, current_score: int, 
                       game_state: Any, task: Task) -> float:
     """Priority function for late game (10-30s): Quick wins."""
+    if task.task_type == TaskType.RETURN_BASE:
+        return 5000.0
+
     # Heavily favor quick tasks
     time_penalty = task.time_estimate / time_remaining
     base_utility = (task.base_points * task.success_probability) / (task.time_estimate ** 1.5)
@@ -177,8 +187,35 @@ def create_return_base_task(base_location: Dict[str, float]) -> Task:
         success_probability=0.98,
         base_priority=10,  # Highest priority in endgame
         priority_function=endgame_priority,
+        max_attempts=math.inf,
         parameters={
             'target_location': base_location
+        }
+    )
+
+
+def create_goto_pose_task(
+    target_location: Dict[str, float],
+    *,
+    task_id: str = "goto_pose_1",
+    name: str = "Go To Pose",
+) -> Task:
+    """Create a navigation-only goto-pose task."""
+    return Task(
+        task_id=task_id,
+        task_type=TaskType.GOTO_POSE,
+        name=name,
+        description="Navigate to a target pose",
+        base_points=0.0,
+        time_estimate=8.0,
+        success_probability=0.98,
+        base_priority=8,
+        parameters={
+            'target_location': {
+                'x': float(target_location.get('x', 0.0)),
+                'y': float(target_location.get('y', 0.0)),
+                'theta': float(target_location.get('theta', 0.0)),
+            }
         }
     )
 

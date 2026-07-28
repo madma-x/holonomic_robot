@@ -59,15 +59,19 @@ def generate_launch_description():
         executable='game_state_manager.py',
         name='game_state_manager',
         output='screen',
-        parameters=[{
-            'match_duration_sec': LaunchConfiguration('match_duration_sec'),
-            'auto_start': LaunchConfiguration('auto_start'),
-            'early_phase_threshold': 60.0,
-            'mid_phase_threshold': 30.0,
-            'late_phase_threshold': 10.0
-        }]
+        parameters=[
+            PathJoinSubstitution([
+                FindPackageShare('robot_application'),
+                'config',
+                'robot_application.yaml'
+            ]),
+            {
+                'match_duration_sec': LaunchConfiguration('match_duration_sec'),
+                'auto_start': LaunchConfiguration('auto_start'),
+            }
+        ]
     )
-    
+
     # Task planner node
     task_planner_node = Node(
         package='robot_application',
@@ -78,7 +82,7 @@ def generate_launch_description():
             PathJoinSubstitution([
                 FindPackageShare('robot_application'),
                 'config',
-                'task_planner.yaml'
+                'robot_application.yaml'
             ]),
             {
                 'replan_interval_sec': LaunchConfiguration('replan_interval_sec')
@@ -95,7 +99,7 @@ def generate_launch_description():
             PathJoinSubstitution([
                 FindPackageShare('robot_application'),
                 'config',
-                'mission_controller.yaml'
+                'robot_application.yaml'
             ]),
             {
                 'mock_navigation': LaunchConfiguration('mock_navigation'),
@@ -104,15 +108,15 @@ def generate_launch_description():
         ]
     )
 
-    alignment_node = Node(
+    motion_controller_node = Node(
         condition=IfCondition(LaunchConfiguration('launch_alignment')),
-        package='aruco_alignment',
-        executable='alignment_node',
-        name='alignment_node',
+        package='motion_controller',
+        executable='motion_controller_node',
+        name='motion_controller_node',
         output='screen',
         parameters=[
             PathJoinSubstitution([
-                FindPackageShare('aruco_alignment'),
+                FindPackageShare('motion_controller'),
                 'config',
                 'alignment_config.yaml'
             ]),
@@ -133,5 +137,5 @@ def generate_launch_description():
         game_state_node,
         task_planner_node,
         mission_executor_node,
-        alignment_node,
+        motion_controller_node,
     ])

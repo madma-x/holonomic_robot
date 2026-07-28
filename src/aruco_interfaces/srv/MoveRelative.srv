@@ -1,0 +1,18 @@
+# Request: move target in robot frame
+float32 target_x_m                # target distance in X direction (meters)
+float32 target_y_m                # target distance in Y direction (meters)
+float32 target_yaw_rad            # target final heading change (radians, can be 0 for position-only)
+float32 pos_tolerance_m           # position convergence tolerance (meters)
+float32 yaw_tolerance_rad         # yaw convergence tolerance (radians)
+float32 timeout_s                 # max time to complete move (seconds, 0 = no limit)
+float32 max_linear_speed_mps      # max linear velocity during move (m/s)
+float32 max_angular_speed_rps     # max angular velocity during move (rad/s)
+---
+# Response: move result
+bool success                       # true if converged within tolerances
+float32 final_x_m                 # actual distance traveled in X (meters)
+float32 final_y_m                 # actual distance traveled in Y (meters)
+float32 final_yaw_rad             # actual heading change achieved (radians)
+float32 residual_distance_m       # remaining error magnitude at stop (meters)
+float32 residual_yaw_rad          # remaining angle error at stop (radians)
+string status_message             # diagnostic info (CONVERGED, TIMEOUT, ABORTED, etc.)

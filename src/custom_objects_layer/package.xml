@@ -4,7 +4,7 @@
   <version>0.0.1</version>
   <description>Custom Nav2 costmap layer for runtime removable objects.</description>
 
-  <maintainer email="ovoleur@localhost">ovoleur</maintainer>
+  <maintainer email="ovoleur@example.com">ovoleur</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
@@ -16,5 +16,6 @@
 
   <export>
     <build_type>ament_cmake</build_type>
+    <costmap_2d plugin="${prefix}/plugin.xml"/>
   </export>
 </package>

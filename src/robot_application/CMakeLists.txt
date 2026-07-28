@@ -17,7 +17,11 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/game_state_manager.py
   scripts/mission_executor.py
+  scripts/odom_theta_monitor.py
+  scripts/safety_arm_reset.py
   scripts/task_planner.py
+  scripts/run_arm_sequence.py
+  scripts/custom_object_delete_test
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -29,10 +33,14 @@ install(DIRECTORY launch/
 install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config)
 
-# Install behavior tree XML files
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees")
-  install(DIRECTORY behavior_trees/
-    DESTINATION share/${PROJECT_NAME}/behavior_trees)
+# Install maps
+install(DIRECTORY maps/
+  DESTINATION share/${PROJECT_NAME}/maps)
+
+# Install images
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/images")
+  install(DIRECTORY images/
+    DESTINATION share/${PROJECT_NAME}/images)
 endif()
 
 if(BUILD_TESTING)

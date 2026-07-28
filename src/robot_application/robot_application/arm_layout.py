@@ -14,13 +14,12 @@ class LiftGroupConfig:
     group_index: int
     lift_servo_id: int
     member_arm_indices: tuple[int, int]
-    down_angle_deg: float
+    down_pick_angle_deg: float
+    down_place_angle_deg: float
+    down_reset_deg: float
     up_angle_deg: float
     speed_deg_s: float
-    pusher_pwm_channel: int
-    pusher_push_deg: float
-    pusher_stow_deg: float
-    pusher_settle_sec: float
+    down_swap_angle_deg: float
 
 
 @dataclass(frozen=True)
@@ -34,9 +33,10 @@ class EndEffectorConfig:
     pwm_place_deg: float
     pwm_stow_deg: float
     pwm_settle_sec: float
+    pwm_reset_deg: float
 
 
-ARM_SELECTION_PRIORITY = (0, 1, 2, 3)
+ARM_SELECTION_PRIORITY = (3, 2, 1, 0)
 
 
 # Shared lift groups.
@@ -45,25 +45,23 @@ LIFT_GROUPS: dict[int, LiftGroupConfig] = {
         group_index=0,
         lift_servo_id=1,
         member_arm_indices=(0, 1),
-        down_angle_deg=90.0,
-        up_angle_deg=0.0,
-        speed_deg_s=50.0,
-        pusher_pwm_channel=4,
-        pusher_push_deg=45.0,
-        pusher_stow_deg=0.0,
-        pusher_settle_sec=0.5,
+        down_pick_angle_deg=164.0,
+        down_place_angle_deg=155.0,
+        down_swap_angle_deg=170.0,
+        down_reset_deg=140.0,
+        up_angle_deg=85.0,
+        speed_deg_s=100.0,
     ),
     1: LiftGroupConfig(
         group_index=1,
         lift_servo_id=2,
         member_arm_indices=(2, 3),
-        down_angle_deg=90.0,
-        up_angle_deg=0.0,
-        speed_deg_s=50.0,
-        pusher_pwm_channel=5,
-        pusher_push_deg=45.0,
-        pusher_stow_deg=0.0,
-        pusher_settle_sec=0.5,
+        down_pick_angle_deg=159.0,
+        down_place_angle_deg=150.0,
+        down_swap_angle_deg=165.0,
+        down_reset_deg=135.0,
+        up_angle_deg=80.0,
+        speed_deg_s=100.0,
     ),
 }
 
@@ -75,10 +73,11 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         group_index=0,
         pump_id=0,
         pwm_channel=0,
-        pwm_pick_deg=0.0,
-        pwm_swap_deg=90.0,
-        pwm_place_deg=0.0,
-        pwm_stow_deg=0.0,
+        pwm_pick_deg=180.0,
+        pwm_swap_deg=40.0,
+        pwm_place_deg=180.0,
+        pwm_stow_deg=130.0,
+        pwm_reset_deg=90.0,
         pwm_settle_sec=0.5,
     ),
     1: EndEffectorConfig(
@@ -86,10 +85,11 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         group_index=0,
         pump_id=1,
         pwm_channel=1,
-        pwm_pick_deg=0.0,
-        pwm_swap_deg=90.0,
-        pwm_place_deg=0.0,
-        pwm_stow_deg=0.0,
+        pwm_pick_deg=180.0,
+        pwm_swap_deg=40.0,
+        pwm_place_deg=180.0,
+        pwm_stow_deg=130.0,
+        pwm_reset_deg=90.0,
         pwm_settle_sec=0.5,
     ),
     2: EndEffectorConfig(
@@ -97,10 +97,11 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         group_index=1,
         pump_id=2,
         pwm_channel=2,
-        pwm_pick_deg=0.0,
-        pwm_swap_deg=90.0,
-        pwm_place_deg=0.0,
-        pwm_stow_deg=0.0,
+        pwm_pick_deg=180.0,
+        pwm_swap_deg=40.0,
+        pwm_place_deg=180.0,
+        pwm_stow_deg=130.0,
+        pwm_reset_deg=90.0,
         pwm_settle_sec=0.5,
     ),
     3: EndEffectorConfig(
@@ -108,10 +109,11 @@ END_EFFECTORS: dict[int, EndEffectorConfig] = {
         group_index=1,
         pump_id=3,
         pwm_channel=3,
-        pwm_pick_deg=0.0,
-        pwm_swap_deg=90.0,
-        pwm_place_deg=0.0,
-        pwm_stow_deg=0.0,
+        pwm_pick_deg=185.0,
+        pwm_swap_deg=40.0,
+        pwm_place_deg=180.0,
+        pwm_stow_deg=130.0,
+        pwm_reset_deg=90.0,
         pwm_settle_sec=0.5,
     ),
 }

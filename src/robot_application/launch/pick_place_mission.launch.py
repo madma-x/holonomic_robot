@@ -15,7 +15,7 @@ def generate_launch_description():
         default_value=PathJoinSubstitution([
             FindPackageShare('robot_application'),
             'config',
-            'mission_controller.yaml'
+            'robot_application.yaml'
         ]),
         description='Path to mission controller config file'
     )

@@ -1,17 +1,32 @@
 """Base class for mission implementations."""
 
+import math
 import time
+from typing import Tuple
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
+from action_msgs.msg import GoalStatus
 from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import String, Float32
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import ComputePathToPose
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 import threading
 from enum import Enum
+
+try:
+    from aruco_interfaces.srv import MoveRelative
+    HAS_MOVE_RELATIVE = True
+except ImportError:
+    MoveRelative = None
+    HAS_MOVE_RELATIVE = False
 
 try:
     from robot_actuators.action import MoveServo, ControlPump, ExecuteSequence
@@ -52,22 +67,54 @@ class MissionBase(Node):
         self.declare_parameter('nav_timeout_sec', 120.0)
         self.declare_parameter('servo_timeout_sec', 10.0)
         self.declare_parameter('pump_timeout_sec', 30.0)
+        self.declare_parameter('sequence_failed_servo_retry_attempts', 3)
         self.declare_parameter('enable_recovery', True)
         self.declare_parameter('max_recovery_attempts', 3)
         self.declare_parameter('mock_navigation', False)
         self.declare_parameter('mock_actuators', not HAS_ROBOT_ACTUATORS)
+        self.declare_parameter('planner_timeout_sec', 8.0)
+        self.declare_parameter('post_drop_back_distance_m', 0.15)
+        self.declare_parameter('post_drop_back_timeout_s', 4.0)
+        self.declare_parameter('post_drop_back_max_linear_speed_mps', 0.15)
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('post_nav_rotate_timeout_s', 5.0)
+        self.declare_parameter('post_nav_rotate_yaw_tolerance_rad', 0.02)
+        self.declare_parameter('post_nav_rotate_max_angular_speed_rps', 5.0)
+        self.declare_parameter('post_nav_rotate_pos_tolerance_m', 0.02)
         
         # Get parameters
         self.nav_timeout = self.get_parameter('nav_timeout_sec').value
         self.servo_timeout = self.get_parameter('servo_timeout_sec').value
         self.pump_timeout = self.get_parameter('pump_timeout_sec').value
+        self.sequence_failed_servo_retry_attempts = int(
+            self.get_parameter('sequence_failed_servo_retry_attempts').value
+        )
         self.enable_recovery = self.get_parameter('enable_recovery').value
         self.max_recovery_attempts = self.get_parameter('max_recovery_attempts').value
         self.mock_navigation = self.get_parameter('mock_navigation').value
         self.mock_actuators = self.get_parameter('mock_actuators').value
+        self.planner_timeout = self.get_parameter('planner_timeout_sec').value
+        self.post_drop_back_distance_m = self.get_parameter('post_drop_back_distance_m').value
+        self.post_drop_back_timeout_s = self.get_parameter('post_drop_back_timeout_s').value
+        self.post_drop_back_max_linear_speed_mps = self.get_parameter('post_drop_back_max_linear_speed_mps').value
+        self.odom_topic = str(self.get_parameter('odom_topic').value)
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.odom_frame = str(self.get_parameter('odom_frame').value)
+        self.post_nav_rotate_timeout_s = float(self.get_parameter('post_nav_rotate_timeout_s').value)
+        self.post_nav_rotate_pos_tolerance_m = float(self.get_parameter('post_nav_rotate_pos_tolerance_m').value)
+        self.post_nav_rotate_yaw_tolerance_rad = float(self.get_parameter('post_nav_rotate_yaw_tolerance_rad').value)
+        self.post_nav_rotate_max_angular_speed_rps = float(self.get_parameter('post_nav_rotate_max_angular_speed_rps').value)
+
+        self._latest_odom_yaw_rad = None
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Action clients
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.compute_path_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         if HAS_ROBOT_ACTUATORS and not self.mock_actuators:
             self.servo_client = ActionClient(self, MoveServo, 'move_servo')
             self.pump_client = ActionClient(self, ControlPump, 'control_pump')
@@ -80,6 +127,11 @@ class MissionBase(Node):
                 self.get_logger().warn('MissionBase running with mock actuators enabled')
             else:
                 self.get_logger().warn('robot_actuators package unavailable; actuator actions disabled')
+
+        if HAS_MOVE_RELATIVE:
+            self.move_relative_client = self.create_client(MoveRelative, 'move_relative')
+        else:
+            self.move_relative_client = None
         
         # Services
         self.load_srv = self.create_service(
@@ -99,6 +151,13 @@ class MissionBase(Node):
         
         # Status timer
         self.status_timer = self.create_timer(1.0, self.publish_status)
+
+        self.create_subscription(
+            Odometry,
+            self.odom_topic,
+            self._odom_callback,
+            10,
+        )
         
         self.get_logger().info(f'{mission_name} mission initialized')
     
@@ -204,9 +263,45 @@ class MissionBase(Node):
                 return True
             time.sleep(poll_interval)
         return future.done()
+
+    @staticmethod
+    def _yaw_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> float:
+        return math.atan2(
+            2.0 * (qw * qz + qx * qy),
+            1.0 - 2.0 * (qy * qy + qz * qz),
+        )
+
+    @staticmethod
+    def _wrap_angle(angle_rad: float) -> float:
+        return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+    def _odom_callback(self, msg: Odometry):
+        q = msg.pose.pose.orientation
+        self._latest_odom_yaw_rad = self._yaw_from_quaternion(q.x, q.y, q.z, q.w)
+
+    def _map_to_odom_yaw_rad(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.odom_frame,
+                rclpy.time.Time(),
+            )
+        except TransformException:
+            return None
+
+        q = transform.transform.rotation
+        return self._yaw_from_quaternion(q.x, q.y, q.z, q.w)
+
+    def _current_heading_rad(self) -> float:
+        if self._latest_odom_yaw_rad is not None:
+            map_to_odom_yaw = self._map_to_odom_yaw_rad()
+            if map_to_odom_yaw is not None:
+                return self._wrap_angle(float(map_to_odom_yaw) + float(self._latest_odom_yaw_rad))
+            return float(self._latest_odom_yaw_rad)
+        return 0.0
     
     def navigate_to_pose(self, x: float, y: float, theta: float) -> bool:
-        """Navigate to a pose using Nav2."""
+        """Navigate to x/y with Nav2, then rotate to target theta via MoveRelative."""
         if self.mock_navigation:
             self.get_logger().info(
                 f'[MOCK] Navigating to: x={x:.2f}, y={y:.2f}, theta={theta:.2f}'
@@ -222,11 +317,10 @@ class MissionBase(Node):
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = x
         goal_msg.pose.pose.position.y = y
-        
-        # Convert theta to quaternion (simplified for z-axis rotation)
-        import math
-        goal_msg.pose.pose.orientation.z = math.sin(theta / 2.0)
-        goal_msg.pose.pose.orientation.w = math.cos(theta / 2.0)
+
+        # Let Nav2 handle only x/y; orientation is finalized with MoveRelative.
+        goal_msg.pose.pose.orientation.z = 0.0
+        goal_msg.pose.pose.orientation.w = 1.0
         
         self.get_logger().info(f'Navigating to: x={x:.2f}, y={y:.2f}, theta={theta:.2f}')
         
@@ -245,11 +339,121 @@ class MissionBase(Node):
             self.get_logger().error('Navigation timeout')
             return False
         
-        if result_future.result() is not None:
-            self.get_logger().info('Navigation succeeded')
+        wrapped_result = result_future.result()
+        if wrapped_result is None:
+            self.get_logger().error('Navigation failed without result')
+            return False
+
+        status = wrapped_result.status
+        if status != GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().error(f'Navigation failed with status={status}')
+            return False
+
+        nav_result = wrapped_result.result
+        if hasattr(nav_result, 'error_code') and int(nav_result.error_code) != 0:
+            self.get_logger().error(
+                f'Navigation failed with error_code={int(nav_result.error_code)}'
+            )
+            return False
+
+        current_theta = self._current_heading_rad()
+        delta_theta = float(theta) - current_theta
+        
+        # Normalize to shortest rotation path [-π, π]
+        while delta_theta > math.pi:
+            delta_theta -= 2.0 * math.pi
+        while delta_theta < -math.pi:
+            delta_theta += 2.0 * math.pi
+        
+        if abs(delta_theta) <= self.post_nav_rotate_yaw_tolerance_rad:
+            self.get_logger().info(
+                f'Navigation succeeded; rotation skipped (delta={delta_theta:.3f}rad)'
+            )
             return True
-        self.get_logger().error('Navigation failed without result')
-        return False
+
+        self.get_logger().info(
+            f'Navigation succeeded; applying post-nav rotation delta_theta={delta_theta:.3f}rad '
+            f'(goal={float(theta):.3f}, current={current_theta:.3f})'
+        )
+        rotate_ok = self.move_relative(
+            0.0,
+            0.0,
+            delta_theta,
+            pos_tolerance_m=self.post_nav_rotate_pos_tolerance_m,
+            yaw_tolerance_rad=self.post_nav_rotate_yaw_tolerance_rad,
+            timeout_s=self.post_nav_rotate_timeout_s,
+            max_linear_speed_mps=0.0,
+            max_angular_speed_rps=self.post_nav_rotate_max_angular_speed_rps,
+        )
+        if not rotate_ok:
+            self.get_logger().error('Post-navigation rotation failed')
+            return False
+
+        return True
+
+    def compute_path_to_pose(
+        self,
+        x: float,
+        y: float,
+        theta: float,
+        planner_id: str = ''
+    ) -> Tuple[bool, float, str]:
+        """Compute a path to pose and return (ok, path_length_m, reason)."""
+        if self.mock_navigation:
+            return True, 0.0, 'mock_navigation'
+
+        if not self.compute_path_client.wait_for_server(timeout_sec=2.0):
+            return False, float('inf'), 'planner_server_unavailable'
+
+        goal = ComputePathToPose.Goal()
+        goal.goal = PoseStamped()
+        goal.goal.header.frame_id = 'map'
+        goal.goal.header.stamp = self.get_clock().now().to_msg()
+        goal.goal.pose.position.x = float(x)
+        goal.goal.pose.position.y = float(y)
+        goal.goal.pose.orientation.z = math.sin(float(theta) / 2.0)
+        goal.goal.pose.orientation.w = math.cos(float(theta) / 2.0)
+        goal.planner_id = str(planner_id)
+        goal.use_start = False
+
+        send_goal_future = self.compute_path_client.send_goal_async(goal)
+        if not self._wait_for_future(send_goal_future, timeout_sec=3.0):
+            return False, float('inf'), 'planner_goal_timeout'
+
+        goal_handle = send_goal_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            return False, float('inf'), 'planner_goal_rejected'
+
+        result_future = goal_handle.get_result_async()
+        if not self._wait_for_future(result_future, timeout_sec=float(self.planner_timeout)):
+            return False, float('inf'), 'planner_result_timeout'
+
+        wrapped_result = result_future.result()
+        if wrapped_result is None:
+            return False, float('inf'), 'planner_no_result'
+
+        if wrapped_result.status != GoalStatus.STATUS_SUCCEEDED:
+            return False, float('inf'), f'planner_status_{int(wrapped_result.status)}'
+
+        action_result = wrapped_result.result
+        if hasattr(action_result, 'error_code') and int(action_result.error_code) != 0:
+            return False, float('inf'), f'planner_error_{int(action_result.error_code)}'
+
+        path = getattr(action_result, 'path', None)
+        poses = list(getattr(path, 'poses', [])) if path is not None else []
+        if len(poses) < 2:
+            return False, float('inf'), 'planner_empty_path'
+
+        length = 0.0
+        previous = poses[0].pose.position
+        for pose_stamped in poses[1:]:
+            current = pose_stamped.pose.position
+            dx = float(current.x) - float(previous.x)
+            dy = float(current.y) - float(previous.y)
+            length += math.hypot(dx, dy)
+            previous = current
+
+        return True, float(length), 'ok'
     
     def move_servo(self, servo_id: int, angle: float, speed: float = 30.0) -> bool:
         """Move servo to target angle."""
@@ -392,7 +596,120 @@ class MissionBase(Node):
             self.get_logger().error(
                 f'Sequence failed at step {res.result.failed_step}: {res.result.message}'
             )
+            failed_step = int(res.result.failed_step)
+            if (
+                0 <= failed_step < len(steps)
+                and getattr(steps[failed_step], 'step_type', None) == ActuatorStep.MOVE_SERVO
+            ):
+                retry_attempts = max(0, int(self.sequence_failed_servo_retry_attempts))
+                if retry_attempts > 0:
+                    step = steps[failed_step]
+                    self.get_logger().warn(
+                        f'Retrying failed MOVE_SERVO step {failed_step} '
+                        f'(servo={step.servo_id}, target={step.target_deg:.1f}deg) '
+                        f'up to {retry_attempts} time(s)'
+                    )
+                    for attempt in range(1, retry_attempts + 1):
+                        if self.move_servo(
+                            servo_id=int(step.servo_id),
+                            angle=float(step.target_deg),
+                            speed=float(step.speed_deg_s),
+                        ):
+                            self.get_logger().info(
+                                f'MOVE_SERVO retry succeeded on attempt {attempt}/{retry_attempts}'
+                            )
+                            return True
+                        self.get_logger().warn(
+                            f'MOVE_SERVO retry failed on attempt {attempt}/{retry_attempts}'
+                        )
         return bool(res.result.success)
+
+    def move_relative(
+        self,
+        target_x_m: float,
+        target_y_m: float,
+        target_yaw_rad: float,
+        pos_tolerance_m: float = 0.02,
+        yaw_tolerance_rad: float = 0.05,
+        timeout_s: float = 6.0,
+        max_linear_speed_mps: float = 0.2,
+        max_angular_speed_rps: float = 0.5,
+    ) -> bool:
+        """Move robot relative to current frame using motion_controller service."""
+        if self.mock_navigation:
+            self.get_logger().info(
+                f'[MOCK] move_relative x={target_x_m:.3f} y={target_y_m:.3f} yaw={target_yaw_rad:.3f}'
+            )
+            return True
+
+        if self.move_relative_client is None:
+            self.get_logger().error('MoveRelative service client unavailable')
+            return False
+
+        if not self.move_relative_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error('MoveRelative service not available')
+            return False
+
+        request = MoveRelative.Request()
+        request.target_x_m = float(target_x_m)
+        request.target_y_m = float(target_y_m)
+        request.target_yaw_rad = float(target_yaw_rad)
+        request.pos_tolerance_m = float(pos_tolerance_m)
+        request.yaw_tolerance_rad = float(yaw_tolerance_rad)
+        request.timeout_s = float(timeout_s)
+        request.max_linear_speed_mps = float(max_linear_speed_mps)
+        request.max_angular_speed_rps = float(max_angular_speed_rps)
+
+        future = self.move_relative_client.call_async(request)
+        if not self._wait_for_future(future, timeout_sec=max(2.0, timeout_s + 1.0)):
+            self.get_logger().error('MoveRelative service call timed out')
+            return False
+
+        response = future.result()
+        if response is None:
+            self.get_logger().error('MoveRelative returned no response')
+            return False
+
+        if not response.success:
+            self.get_logger().warn(f'MoveRelative failed: {response.status_message}')
+        else:
+            self.get_logger().info(f'MoveRelative succeeded: {response.status_message}')
+        return bool(response.success)
+
+    def move_back_straight_after_drop(
+        self,
+        distance_m: float | None = None,
+        timeout_s: float | None = None,
+        max_linear_speed_mps: float | None = None,
+    ) -> bool:
+        """Move straight backward after a drop using the relative move service."""
+        retreat_distance_m = abs(
+            float(distance_m if distance_m is not None else self.post_drop_back_distance_m)
+        )
+        retreat_timeout_s = float(
+            timeout_s if timeout_s is not None else self.post_drop_back_timeout_s
+        )
+        retreat_max_linear_speed_mps = abs(float(
+            max_linear_speed_mps
+            if max_linear_speed_mps is not None
+            else self.post_drop_back_max_linear_speed_mps
+        ))
+
+        if retreat_distance_m == 0.0:
+            self.get_logger().info('Post-drop move back skipped: distance is zero')
+            return True
+
+        self.get_logger().info(
+            'Post-drop move back: distance=%.3fm timeout=%.2fs max_linear_speed=%.3fm/s'
+            % (retreat_distance_m, retreat_timeout_s, retreat_max_linear_speed_mps)
+        )
+        return self.move_relative(
+            -retreat_distance_m,
+            0.0,
+            0.0,
+            timeout_s=retreat_timeout_s,
+            max_linear_speed_mps=retreat_max_linear_speed_mps,
+        )
 
     def call_service_async(self, service_name: str, srv_type):
         """Helper to call a service asynchronously."""

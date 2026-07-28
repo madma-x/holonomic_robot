@@ -30,19 +30,25 @@ private:
   {
     double x{0.0};
     double y{0.0};
+    double size_x{0.15};
+    double size_y{0.20};
+    double theta{0.0};
   };
 
   void markersCallback(const visualization_msgs::msg::MarkerArray::SharedPtr msg);
   std::string key(std::size_t ns_hash, int32_t id) const;
-  void drawRectangle(nav2_costmap_2d::Costmap2D & grid, double center_x, double center_y, unsigned char cost);
+  void drawRectangle(
+    nav2_costmap_2d::Costmap2D & grid,
+    double center_x, double center_y,
+    double size_x, double size_y,
+    double theta, unsigned char cost);
 
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr sub_;
   std::mutex mtx_;
   std::unordered_map<std::string, Obj> objects_;
+  std::unordered_map<std::string, Obj> prev_objects_;  // objects painted in the last updateCosts
   std::string topic_;
   int lethal_cost_{254};
-  double object_size_x_{0.15};
-  double object_size_y_{0.20};
 };
 
 }  // namespace custom_objects_layer

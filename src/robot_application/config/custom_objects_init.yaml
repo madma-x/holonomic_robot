@@ -1,0 +1,13 @@
+custom_objects_initializer:
+  ros__parameters:
+    topic: "/custom_objects"
+    frame_id: "map"
+    marker_ns: "custom_objects"
+
+    group_centers_x:     [0.175, 0.175, 1.15,   1.1,   1.9,   1.85,  2.825, 2.825]
+    group_centers_y:     [0.4,   1.2,   0.8,   0.175, 0.175, 0.8,   1.2,   0.4]
+    group_centers_theta: [0.0,   0.0,   1.57,  1.57,  1.57,  1.57,  0.0,   0.0]
+
+    object_size_x: 0.15
+    object_size_y: 0.20
+    object_height: 0.02

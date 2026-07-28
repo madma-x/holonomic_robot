@@ -67,9 +67,11 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
         return [
-            *self._build_lower_steps(end_effectors, use_place_pose=False),
+            *self._build_lift_steps(end_effectors, target='down_pick', parallel_group=1),
+            *self._build_pwm_steps(end_effectors, target='pick', parallel_group=1),
             *self._build_pump_steps(end_effectors, enable=True, parallel_group=2),
-            *self._build_raise_steps(end_effectors, parallel_group=3),
+            *self._build_lift_steps(end_effectors, target='up', parallel_group=3),
+            *self._build_pwm_steps(end_effectors, target='stow', parallel_group=4),
         ]
 
     def build_swap_sequence(self, arm_indices: Iterable[int]) -> list:
@@ -82,20 +84,18 @@ class ArmSequenceBuilder:
             return []
         return [
             *self._build_pwm_steps(swap_targets, target='swap', parallel_group=1),
-            *self._build_pwm_steps(swap_targets, target='stow', parallel_group=2),
         ]
 
     def build_place_sequence(
         self,
         arm_indices: Iterable[int],
-        push_arm_indices: Optional[Iterable[int]] = None,
+        swap_arm_indices: Optional[Iterable[int]] = None,
     ) -> list:
-        return self.build_drop_sequence(arm_indices, push_arm_indices=push_arm_indices)
+        return self.build_drop_sequence(arm_indices, swap_arm_indices=swap_arm_indices)
 
-    def build_drop_sequence(
+    def build_reset_sequence(
         self,
         arm_indices: Iterable[int],
-        push_arm_indices: Optional[Iterable[int]] = None,
     ) -> list:
         if not _HAS_ACTUATOR_STEP:
             raise RuntimeError('ActuatorStep message unavailable')
@@ -104,15 +104,56 @@ class ArmSequenceBuilder:
         if not end_effectors:
             return []
 
-        pusher_groups = self._resolve_pusher_groups(end_effectors, push_arm_indices)
-
         return [
-            *self._build_lower_steps(end_effectors, use_place_pose=True),
-            *self._build_pump_steps(end_effectors, enable=False, parallel_group=2),
-            *self._build_group_pusher_steps(pusher_groups, target='push', parallel_group=3),
-            *self._build_raise_steps(end_effectors, parallel_group=4),
-            *self._build_group_pusher_steps(pusher_groups, target='stow', parallel_group=4),
+            *self._build_lift_steps(end_effectors, target='up', parallel_group=1),
+            *self._build_pwm_steps(end_effectors, target='reset', parallel_group=2),
+            *self._build_pump_steps(end_effectors, enable=False, parallel_group=4),
         ]
+
+    def build_drop_sequence(
+        self,
+        arm_indices: Iterable[int],
+        swap_arm_indices: Optional[Iterable[int]] = None,
+    ) -> list:
+        if not _HAS_ACTUATOR_STEP:
+            raise RuntimeError('ActuatorStep message unavailable')
+
+        end_effectors = self._resolve_end_effectors(arm_indices)
+        if not end_effectors:
+            return []
+
+        swap_effectors = self._resolve_swap_end_effectors(end_effectors, swap_arm_indices)
+        non_swap_effectors = self._resolve_non_swap_end_effectors(
+            end_effectors,
+            swap_arm_indices,
+        )
+
+        if swap_effectors and not non_swap_effectors:
+            return [
+                *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
+                *self._build_pump_steps(swap_effectors, enable=False, parallel_group=6),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=7),
+            ]
+        elif swap_effectors:
+            return [
+                *self._build_pwm_steps(swap_effectors, target='pick', parallel_group=1),
+                *self._build_pwm_steps(swap_effectors, target='swap', parallel_group=1),
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
+                *self._build_pump_steps(non_swap_effectors, enable=False, parallel_group=2),
+                *self._build_lift_steps(end_effectors, target='down_reset', parallel_group=3),
+                *self._build_pwm_steps(non_swap_effectors, target='reset', parallel_group=4),
+                *self._build_lift_steps(end_effectors, target='down_swap', parallel_group=5),
+                *self._build_pump_steps(swap_effectors, enable=False, parallel_group=6),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=7),
+            ]
+        else:
+            return [
+                *self._build_pwm_steps(non_swap_effectors, target='pick', parallel_group=1),
+                *self._build_lift_steps(end_effectors, target='down_place', parallel_group=1),
+                *self._build_pump_steps(end_effectors, enable=False, parallel_group=2),
+                *self._build_lift_steps(end_effectors, target='up', parallel_group=3),
+            ]
 
     def _resolve_end_effectors(self, arm_indices: Iterable[int]) -> list[EndEffectorConfig]:
         unique_arm_indices = []
@@ -124,66 +165,53 @@ class ArmSequenceBuilder:
                 seen.add(normalized_arm_index)
         return [self.get_end_effector(arm_index) for arm_index in unique_arm_indices]
 
-    def _resolve_pusher_groups(
+    def _resolve_swap_end_effectors(
         self,
         end_effectors: list[EndEffectorConfig],
-        push_arm_indices: Optional[Iterable[int]],
-    ) -> list[LiftGroupConfig]:
-        if push_arm_indices is None:
+        swap_arm_indices: Optional[Iterable[int]],
+    ) -> list[EndEffectorConfig]:
+        if swap_arm_indices is None:
             return []
 
-        requested_group_indices = {
-            self.get_end_effector(arm_index).group_index
-            for arm_index in push_arm_indices
-        }
-        active_group_indices = {eff.group_index for eff in end_effectors}
+        requested = {int(arm_index) for arm_index in swap_arm_indices}
         return [
-            get_lift_group_config(group_index)
-            for group_index in sorted(requested_group_indices & active_group_indices)
+            end_effector
+            for end_effector in end_effectors
+            if end_effector.arm_index in requested
         ]
 
-    def _build_lower_steps(
+    def _resolve_non_swap_end_effectors(
         self,
         end_effectors: list[EndEffectorConfig],
-        use_place_pose: bool,
-    ) -> list:
-        steps = []
-        for lift_group in self._unique_groups(end_effectors):
-            steps.append(
-                self._make_move_step(
-                    lift_group.lift_servo_id,
-                    lift_group.down_angle_deg,
-                    lift_group.speed_deg_s,
-                    parallel_group=1,
-                )
-            )
-        target_name = 'place' if use_place_pose else 'pick'
-        steps.extend(self._build_pwm_steps(end_effectors, target=target_name, parallel_group=1))
-        return steps
+        swap_arm_indices: Optional[Iterable[int]],
+    ) -> list[EndEffectorConfig]:
+        if swap_arm_indices is None:
+            return list(end_effectors)
 
-    def _build_raise_steps(
+        requested = {int(arm_index) for arm_index in swap_arm_indices}
+        return [
+            end_effector
+            for end_effector in end_effectors
+            if end_effector.arm_index not in requested
+        ]
+
+    def _build_lift_steps(
         self,
         end_effectors: list[EndEffectorConfig],
+        target: str,
         parallel_group: int,
-        stow_end_effectors: Optional[list[EndEffectorConfig]] = None,
     ) -> list:
         steps = []
         for lift_group in self._unique_groups(end_effectors):
+            target_deg = self._lift_target_deg(lift_group, target)
             steps.append(
                 self._make_move_step(
                     lift_group.lift_servo_id,
-                    lift_group.up_angle_deg,
+                    target_deg,
                     lift_group.speed_deg_s,
                     parallel_group=parallel_group,
                 )
             )
-        steps.extend(
-            self._build_pwm_steps(
-                stow_end_effectors or end_effectors,
-                target='stow',
-                parallel_group=parallel_group,
-            )
-        )
         return steps
 
     def _build_pump_steps(
@@ -200,31 +228,6 @@ class ArmSequenceBuilder:
             )
             for end_effector in end_effectors
         ]
-
-    def _build_group_pusher_steps(
-        self,
-        lift_groups: list[LiftGroupConfig],
-        target: str,
-        parallel_group: int,
-    ) -> list:
-        steps = []
-        for lift_group in lift_groups:
-            if lift_group.pusher_pwm_channel < 0:
-                continue
-            pwm_target = (
-                lift_group.pusher_push_deg
-                if target == 'push'
-                else lift_group.pusher_stow_deg
-            )
-            steps.append(
-                self._make_pwm_servo_step(
-                    lift_group.pusher_pwm_channel,
-                    pwm_target,
-                    settle_sec=lift_group.pusher_settle_sec,
-                    parallel_group=parallel_group,
-                )
-            )
-        return steps
 
     def _build_pwm_steps(
         self,
@@ -265,7 +268,24 @@ class ArmSequenceBuilder:
             return end_effector.pwm_place_deg
         if target == 'stow':
             return end_effector.pwm_stow_deg
+        if target == 'reset':
+            return end_effector.pwm_reset_deg
         raise ValueError(f'Unknown PWM target {target}')
+
+    def _lift_target_deg(self, lift_group: LiftGroupConfig, target: str) -> float:
+        if target == 'down_pick':
+            return lift_group.down_pick_angle_deg
+        if target == 'down_place':
+            return lift_group.down_place_angle_deg
+        if target == 'up':
+            return lift_group.up_angle_deg
+        if target == 'down_reset':
+            return lift_group.down_reset_deg
+        if target == 'down_swap':
+            return lift_group.down_swap_angle_deg 
+        if target == 'approach':
+            return 150.0
+        raise ValueError(f'Unknown lift target {target}')
 
     def _make_move_step(
         self, servo_id: int, target_deg: float, speed_deg_s: float,

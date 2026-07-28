@@ -9,7 +9,8 @@ from std_msgs.msg import String
 
 from robot_application.mission_base import MissionBase, MissionState
 from robot_application.handlers.pick_place_handler import PickPlaceHandler
-
+from robot_application.handlers.return_base_handler import ReturnBaseHandler
+from robot_application.handlers.goto_pose_handler import GotoPoseHandler
 
 class MissionExecutor(MissionBase):
     """Centralized mission executor using in-process mission handlers."""
@@ -21,7 +22,7 @@ class MissionExecutor(MissionBase):
         assignment_topic = self.get_parameter('task_assignment_topic').value
 
         self.task_queue: List[dict] = []
-        self.handlers = [PickPlaceHandler(self)]
+        self.handlers = [PickPlaceHandler(self), ReturnBaseHandler(self), GotoPoseHandler(self)]
         self.outcome_seq = 0
 
         self.assignment_sub = self.create_subscription(
@@ -48,7 +49,10 @@ class MissionExecutor(MissionBase):
 
         if tasks:
             self.task_queue.extend(tasks)
-            self.get_logger().info(f'Queued {len(tasks)} task(s) for execution')
+            types = ', '.join(t.get('task_type', '?') for t in tasks)
+            self.get_logger().info(
+                f'Queued {len(tasks)} task(s): [{types}]  queue_depth={len(self.task_queue)}'
+            )
 
     def load_mission_config(self):
         """MissionExecutor has no static mission file to load."""
@@ -85,12 +89,19 @@ class MissionExecutor(MissionBase):
                 self.state = MissionState.FAILED
                 return
 
-            self.get_logger().info(f"Executing task_id={task.get('task_id', 'unknown')}")
+            task_id = task.get('task_id', '?')
+            task_type = task.get('task_type', '?')
+            self.get_logger().info(f'Executing {task_type}  task_id={task_id}')
             handler_result = handler.execute(task)
             outcome = self._normalize_outcome(task, handler_result)
             self._publish_outcome(outcome)
 
             outcome_status = str(outcome.get('status', 'FAILED')).upper()
+            outcome_reason = str(outcome.get('outcome_reason', '')).upper()
+            self.get_logger().info(
+                f'Outcome {task_type}  task_id={task_id}  '
+                f'status={outcome_status}  reason={outcome_reason}'
+            )
             if outcome_status == 'REPLAN_REQUIRED':
                 self.state = MissionState.RUNNING
                 continue
@@ -117,7 +128,7 @@ class MissionExecutor(MissionBase):
         elif isinstance(handler_result, bool):
             outcome = {
                 'status': 'COMPLETED' if handler_result else status,
-                'outcome_reason': 'PLACED' if handler_result else reason
+                'outcome_reason': 'DROPPED' if handler_result else reason
             }
         else:
             outcome = {
@@ -138,6 +149,10 @@ class MissionExecutor(MissionBase):
         outcome.setdefault('object_color_before', str(task.get('object_color_before', 'unknown')))
         outcome.setdefault('object_color_after', str(task.get('object_color_after', 'unknown')))
         normalized_status = str(outcome.get('status', 'FAILED')).upper()
+        normalized_reason = str(outcome.get('outcome_reason', '')).upper()
+        if normalized_reason == 'PLACED':
+            normalized_reason = 'DROPPED'
+        outcome['outcome_reason'] = normalized_reason
         if normalized_status not in allowed_statuses:
             normalized_status = 'FAILED'
             outcome['outcome_reason'] = 'INVALID_STATUS'

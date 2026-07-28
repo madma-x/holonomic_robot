@@ -9,7 +9,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     map_file = LaunchConfiguration('map',
         default=PathJoinSubstitution([
-            FindPackageShare('holonomic_robot_bringup'),
+            FindPackageShare('robot_application'),
             'maps',
             'polygon_map.yaml'
         ])

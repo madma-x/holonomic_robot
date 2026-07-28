@@ -11,6 +11,7 @@
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>robot_hw_interfaces</depend>
   <depend>std_srvs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>

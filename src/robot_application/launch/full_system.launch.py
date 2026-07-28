@@ -1,175 +1,335 @@
 #!/usr/bin/env python3
-"""Launch all application nodes for full autonomous operation."""
+"""
+Full system launch: Nav2 odom-only base + robot application nodes.
+Includes robot model, localization, Nav2 stack, sensors (lidar, CAN), and application logic.
+"""
 
+import os
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.substitutions import FindPackageShare
+from launch.actions import DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # argument for nav2 parameter file – defaults to robot_application's copy
-    nav2_params_file = LaunchConfiguration('nav2_params_file')
-    declare_nav2_params = DeclareLaunchArgument(
-        'nav2_params_file',
-        default_value=PathJoinSubstitution([
-            FindPackageShare('robot_application'),
-            'config',
-            'nav2_params_holonomic.yaml'
-        ]),
-        description='Full path to a YAML file with Nav2 parameters'
-    )
+    # Get package directories
+    bringup_dir = get_package_share_directory('robot_application')
+    description_dir = get_package_share_directory('holonomic_robot_description')
+    app_dir = get_package_share_directory('robot_application')
+    gui_dir = get_package_share_directory('robot_gui')
 
-    # map file argument (forwarded to map_server_launch)
-    map_file = LaunchConfiguration('map')
-    declare_map = DeclareLaunchArgument(
-        'map',
-        default_value=PathJoinSubstitution([
-            FindPackageShare('holonomic_robot_bringup'),
-            'maps',
-            'polygon_map.yaml'
-        ]),
-        description='Full path to a YAML file for the map_server'
-    )
+    # File paths
+    urdf_file = os.path.join(description_dir, 'urdf', 'holonomic_robot.urdf')
+    rviz_config = os.path.join(description_dir, 'rviz', 'robot_view.rviz')
+    gui_config = os.path.join(gui_dir, 'config', 'gui_config.yaml')
+    nav2_params = os.path.join(bringup_dir, 'config', 'nav2_params_odom_only.yaml')
+    custom_objects_init_params = os.path.join(bringup_dir, 'config', 'custom_objects_init.yaml')
+    map_file = os.path.join(bringup_dir, 'maps', 'map_cdf_no_obstacle.yaml')
 
-    # Setup CAN interface with 1Mbps bitrate
-    setup_can = ExecuteProcess(
-        cmd=['sudo', 'ip', 'link', 'set', 'can0', 'up', 'type', 'can', 'bitrate', '1000000'],
-        output='screen',
-        shell=False
-    )
+    with open(urdf_file, 'r') as f:
+        robot_description = f.read()
 
-    # Include CAN bridge launch
-    can_bridge_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('can_interface'),
-                'launch',
-                'can_bridge.launch.py'
-            ])
-        ])
-    )
+    use_sim_time = LaunchConfiguration('use_sim_time')
 
-    # Include map server + lifecycle manager (from this package)
-    map_server_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
+    motion_controller_stack_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
             PathJoinSubstitution([
                 FindPackageShare('robot_application'),
                 'launch',
-                'map_server_launch.py'
+                'motion_controller_stack.launch.py',
             ])
-        ]),
-        launch_arguments={'map': map_file, 'use_sim_time': 'false'}.items()
+        )
     )
 
-    # Include Nav2 bringup, pass the parameter file
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
+    gpio_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
             PathJoinSubstitution([
-                FindPackageShare('holonomic_robot_bringup'),
+                FindPackageShare('gpio_latte'),
                 'launch',
-                'navigation.launch.py'
+                'gpio_manager.launch.py',
             ])
-        ]),
-        launch_arguments={'params_file': nav2_params_file}.items()
-    )
-
-    # Include RPLIDAR sllidar_ros2 launch
-    rplidar_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('sllidar_ros2'),
-                'launch',
-                'sllidar_c1_launch.py'
-            ])
-        ])
-    )
-
-    # Lightweight lidar filter node (C++), runs before Nav2 so /scan_filtered exists
-    lidar_filter_node = Node(
-        package='lidar_filter',
-        executable='scan_filter',
-        name='lidar_scan_filter',
-        output='screen',
-        parameters=[{
-            'scan_in_topic': '/scan',
-            'scan_out_topic': '/scan_filtered',
-            'pose_topic': '/odom',
-            'map_topic': '/map'
-        }]
-    )
-
-    # Game state manager node
-    game_state_manager_node = Node(
-        package='robot_application',
-        executable='game_state_manager',
-        name='game_state_manager',
-        output='screen',
-        parameters=[
-            PathJoinSubstitution([
-                FindPackageShare('robot_application'),
-                'config',
-                'game_state.yaml'
-            ])
-        ]
-    )
-
-    # Task planner node
-    task_planner_node = Node(
-        package='robot_application',
-        executable='task_planner',
-        name='task_planner',
-        output='screen',
-        parameters=[
-            PathJoinSubstitution([
-                FindPackageShare('robot_application'),
-                'config',
-                'task_planner.yaml'
-            ])
-        ]
-    )
-
-    # Single mission executor node (dispatches to in-process handlers)
-    mission_executor_node = Node(
-        package='robot_application',
-        executable='mission_executor',
-        name='mission_executor',
-        output='screen',
-        parameters=[
-            PathJoinSubstitution([
-                FindPackageShare('robot_application'),
-                'config',
-                'mission_controller.yaml'
-            ])
-        ]
-    )
-
-    # RViz2 for real-time visualization
-    rviz_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        arguments=['-d', PathJoinSubstitution([
-            FindPackageShare('robot_application'),
-            'config',
-            'robot.rviz'
-        ])],
-        output='screen'
+        )
     )
 
     return LaunchDescription([
-        declare_nav2_params,
-        declare_map,
-        setup_can,
-        can_bridge_launch,
-        rplidar_launch,
-        lidar_filter_node,
-        map_server_launch,
-        nav2_launch,
-        game_state_manager_node,
-        task_planner_node,
-        mission_executor_node,
-        rviz_node
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+
+        # ── Robot model ──────────────────────────────────────────────────────
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{
+                'robot_description': robot_description,
+                'use_sim_time': use_sim_time
+            }]
+        ),
+
+        Node(
+            package='robot_application',
+            executable='static_joint_publisher',
+            name='static_joint_publisher',
+            output='screen'
+        ),
+
+        # ── odom→base_footprint TF (derived from hardware /odom topic) ────────
+        Node(
+            package='robot_application',
+            executable='odom_to_base_tf_broadcaster',
+            name='odom_to_base_tf_broadcaster',
+            output='screen',
+            parameters=[{
+                'odom_topic': '/odom',
+                'parent_frame': 'odom',
+                'child_frame': 'base_footprint',
+                'use_odom_stamp': False,
+            }]
+        ),
+
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map_odom_publisher',
+            arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
+        ),
+
+        Node(
+            package='robot_application',
+            executable='custom_objects_initializer',
+            name='custom_objects_initializer',
+            output='screen',
+            parameters=[custom_objects_init_params],
+        ),
+
+        # ── Map server + lifecycle manager ───────────────────────────────────
+        Node(
+            package='nav2_map_server',
+            executable='map_server',
+            name='map_server',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'yaml_filename': map_file
+            }]
+        ),
+
+        Node(
+            package='nav2_map_server',
+            executable='map_server',
+            name='filter_mask_server',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'yaml_filename': os.path.join(bringup_dir, 'maps', 'keepout_filter_mask.yaml'),
+                'topic_name': '/filter_mask',
+                'frame_id': 'map',
+            }]
+        ),
+
+        Node(
+            package='nav2_map_server',
+            executable='costmap_filter_info_server',
+            name='costmap_filter_info_server',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'type': 0,
+                'filter_info_topic': '/costmap_filter_info',
+                'mask_topic': '/filter_mask',
+                'base': 0.0,
+                'multiplier': 1.0,
+            }]
+        ),
+
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_localization',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'autostart': True,
+                'node_names': ['map_server', 'filter_mask_server', 'costmap_filter_info_server']
+            }]
+        ),
+
+        # ── Nav2 navigation nodes ────────────────────────────────────────────
+        Node(
+            package='nav2_controller',
+            executable='controller_server',
+            name='controller_server',
+            output='screen',
+            parameters=[nav2_params],
+            remappings=[
+                ('cmd_vel', 'cmd_vel'),
+            ]
+        ),
+
+        # Node(
+        #     package='nav2_smoother',
+        #     executable='smoother_server',
+        #     name='smoother_server',
+        #     output='screen',
+        #     parameters=[nav2_params]
+        # ),
+
+        Node(
+            package='nav2_planner',
+            executable='planner_server',
+            name='planner_server',
+            output='screen',
+            parameters=[nav2_params]
+        ),
+
+        Node(
+            package='nav2_behaviors',
+            executable='behavior_server',
+            name='behavior_server',
+            output='screen',
+            parameters=[nav2_params],
+            remappings=[
+                ('cmd_vel', 'cmd_vel'),
+            ]
+        ),
+
+        Node(
+            package='nav2_bt_navigator',
+            executable='bt_navigator',
+            name='bt_navigator',
+            output='screen',
+            parameters=[nav2_params]
+        ),
+
+        Node(
+            package='nav2_waypoint_follower',
+            executable='waypoint_follower',
+            name='waypoint_follower',
+            output='screen',
+            parameters=[nav2_params]
+        ),
+
+        # Node(
+        #     package='nav2_velocity_smoother',
+        #     executable='velocity_smoother',
+        #     name='velocity_smoother',
+        #     output='screen',
+        #     parameters=[nav2_params],
+        #     remappings=[
+        #         ('cmd_vel', 'cmd_vel_nav'),
+        #         ('cmd_vel_smoothed', 'cmd_vel'),
+        #     ]
+        # ),
+
+        Node(
+            package='nav2_collision_monitor',
+            executable='collision_monitor',
+            name='collision_monitor',
+            output='screen',
+            parameters=[nav2_params]
+        ),
+
+        # Lifecycle manager for navigation
+        Node(
+            package='nav2_lifecycle_manager',
+            executable='lifecycle_manager',
+            name='lifecycle_manager_navigation',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'autostart': True,
+                'node_names': [
+                    'controller_server',
+                    #'smoother_server',
+                    'planner_server',
+                    'behavior_server',
+                    'bt_navigator',
+                    'waypoint_follower',
+                    #'velocity_smoother',
+                    'collision_monitor',
+                ]
+            }]
+        ),
+
+        # ── SL Lidar C1 ──────────────────────────────────────────────────────
+        Node(
+            package='sllidar_ros2',
+            executable='sllidar_node',
+            name='sllidar_node',
+            parameters=[{
+                'channel_type': 'serial',
+                'serial_port': '/dev/ttyUSB0',
+                'serial_baudrate': 460800,
+                'frame_id': 'base_scan',
+                'inverted': False,
+                'angle_compensate': True,
+                'scan_mode': 'Standard',
+            }],
+            output='screen'
+        ),
+
+        # ── ArUco alignment stack (CAN bridge + manager + alignment + debug) ─
+        motion_controller_stack_launch,
+
+        # ──  GPIO latch start trigger) ─────────
+        gpio_launch,
+
+        # ── Robot Application Nodes ──────────────────────────────────────────
+
+        # Game state manager node
+        Node(
+            package='robot_application',
+            executable='game_state_manager.py',
+            name='game_state_manager',
+            output='screen',
+            parameters=[
+                os.path.join(app_dir, 'config', 'robot_application.yaml')
+            ]
+        ),
+
+        # Task planner node
+        Node(
+            package='robot_application',
+            executable='task_planner.py',
+            name='task_planner',
+            output='screen',
+            parameters=[
+                os.path.join(app_dir, 'config', 'robot_application.yaml')
+            ]
+        ),
+
+        # Mission executor node
+        Node(
+            package='robot_application',
+            executable='mission_executor.py',
+            name='mission_executor',
+            output='screen',
+            parameters=[
+                os.path.join(app_dir, 'config', 'robot_application.yaml')
+            ]
+        ),
+
+       # ── RViz ─────────────────────────────────────────────────────────────
+        # Node(
+        #     package='rviz2',
+        #     executable='rviz2',
+        #     name='rviz2',
+        #     arguments=['-d', rviz_config],
+        #     output='screen'
+        # ),
+
+        # Node(
+        #     package='robot_gui',
+        #     executable='robot_gui',
+        #     name='robot_gui',
+        #     parameters=[gui_config],
+        #     output='screen',
+        #     emulate_tty=True,
+        # ),
+        
     ])

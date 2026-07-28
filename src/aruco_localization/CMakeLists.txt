@@ -13,6 +13,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(aruco_interfaces REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 add_executable(localization_node src/localization_node.cpp)
 ament_target_dependencies(localization_node
@@ -23,6 +24,7 @@ ament_target_dependencies(localization_node
   tf2_ros
   tf2_geometry_msgs
   aruco_interfaces
+  nav_msgs
 )
 
 install(TARGETS localization_node

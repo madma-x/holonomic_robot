@@ -48,18 +48,20 @@ public:
     declare_parameter<std::vector<long int>>("object_tag_ids",    std::vector<long int>{});
     declare_parameter<std::vector<long int>>("localization_tag_ids", std::vector<long int>{});
     declare_parameter<double>("arm_y_origin",           0.0);   // y of arm[0] in robot frame
-    declare_parameter<double>("arm_x_origin",           0.0);   // x approach distance
+    declare_parameter<double>("arm_x_origin",           0.08);   // x approach distance
     declare_parameter<double>("max_assignment_distance", 0.5); // m — ignore tag if farther
-    declare_parameter<double>("consistency_threshold",   0.03); // m — max residual to be pickable
+    declare_parameter<double>("consistency_threshold",   0.005); // m — max residual to be pickable (~5 mm arm tolerance)
     declare_parameter<bool>("sticky_assignment",         false); // handler enables this only during pick window
     declare_parameter<double>("tracking_max_distance",   0.08); // m — association radius between frames
     declare_parameter<double>("tracking_timeout_sec",    0.6);  // s — drop stale tracks
     declare_parameter<double>("tracking_min_confidence", 0.6);  // [0,1] ignore unstable detections in tracker
     declare_parameter<double>("assignment_min_confidence", -1.0); // [0,1], <0 => use tracking_min_confidence
+    declare_parameter<int>("consistency_priority_min_tags", 1); // prefer consistent subsets for any match size (1/2/3 tags)
     declare_parameter<int>("assignment_switch_confirm_frames", 3); // frames — hysteresis before switching assignment
     declare_parameter<int>("sticky_loss_confirm_frames", 10); // frames — mark lost only after sustained disappearance
     declare_parameter<int>("sticky_stable_window_frames", 5); // frames — averaging window for frozen correction
     declare_parameter<double>("correction_x_bias", 0.05); // m — subtracted from tx to zero out systematic x error
+    declare_parameter<double>("correction_theta_bias", 0.0); // rad — added to fitted theta for calibration
 
     // Build arm poses
     double y0  = get_parameter("arm_y_origin").as_double();
@@ -94,6 +96,11 @@ public:
     latched_track_ids_.fill(-1);
   }
 
+  static int public_arm_index(int internal_arm_index)
+  {
+    return (NUM_ARMS - 1) - internal_arm_index;
+  }
+
 private:
   // ── helpers ────────────────────────────────────────────────────────────────
   double dist2d(double dx, double dy) { return std::sqrt(dx*dx + dy*dy); }
@@ -117,24 +124,12 @@ private:
       return;
     }
 
-    double sum_tx = 0.0;
-    double sum_ty = 0.0;
-    for (const auto& [arm_idx, tag_idx] : pairs) {
-      const auto& tp = msg->tags[tag_idx].tag_pose.position;
-      sum_tx += tp.x - arm_poses_[arm_idx].x;
-      sum_ty += tp.y - arm_poses_[arm_idx].y;
-    }
-
-    const double tx = sum_tx / pairs.size();
-    const double ty = sum_ty / pairs.size();
-
-    out_max_residual = 0.0;
-    for (const auto& [arm_idx, tag_idx] : pairs) {
-      const auto& tp = msg->tags[tag_idx].tag_pose.position;
-      const double rx = (tp.x - arm_poses_[arm_idx].x) - tx;
-      const double ry = (tp.y - arm_poses_[arm_idx].y) - ty;
-      out_max_residual = std::max(out_max_residual, dist2d(rx, ry));
-    }
+    // Use the same SE(2) rigid fit as the final is_pickable check so that
+    // outlier tags are rejected during assignment search, not only after.
+    double rig_tx, rig_ty, rig_theta;
+    std::vector<double> rig_residuals;
+    fit_rigid_correction(pairs, msg, rig_tx, rig_ty, rig_theta, rig_residuals);
+    out_max_residual = *std::max_element(rig_residuals.begin(), rig_residuals.end());
 
     out_is_consistent = (out_max_residual <= consist_thr);
   }
@@ -144,6 +139,7 @@ private:
     double current_cost,
     const aruco_interfaces::msg::DetectedTagArray::SharedPtr& msg,
     double consist_thr,
+    int consistency_priority_min_tags,
     AssignmentCandidate& best)
   {
     const int current_count = static_cast<int>(current_pairs.size());
@@ -156,7 +152,14 @@ private:
     const double eps = 1e-9;
     bool better = false;
 
-    if (current_count > best.matched_count) {
+    const bool current_priority =
+      current_is_consistent && (current_count >= consistency_priority_min_tags);
+    const bool best_priority =
+      best.is_consistent && (best.matched_count >= consistency_priority_min_tags);
+
+    if (current_priority != best_priority) {
+      better = current_priority;
+    } else if (current_count > best.matched_count) {
       better = true;
     } else if (current_count == best.matched_count) {
       if (current_is_consistent != best.is_consistent) {
@@ -184,13 +187,20 @@ private:
     const aruco_interfaces::msg::DetectedTagArray::SharedPtr& msg,
     double max_assign,
     double consist_thr,
+    int consistency_priority_min_tags,
     std::vector<bool>& used_tags,
     std::vector<std::pair<int, int>>& current_pairs,
     double current_cost,
     AssignmentCandidate& best)
   {
     if (arm_idx >= NUM_ARMS) {
-      update_best_candidate(current_pairs, current_cost, msg, consist_thr, best);
+      update_best_candidate(
+        current_pairs,
+        current_cost,
+        msg,
+        consist_thr,
+        consistency_priority_min_tags,
+        best);
       return;
     }
 
@@ -201,6 +211,7 @@ private:
       msg,
       max_assign,
       consist_thr,
+      consistency_priority_min_tags,
       used_tags,
       current_pairs,
       current_cost,
@@ -227,6 +238,7 @@ private:
         msg,
         max_assign,
         consist_thr,
+        consistency_priority_min_tags,
         used_tags,
         current_pairs,
         current_cost + distance,
@@ -240,7 +252,8 @@ private:
     const std::vector<size_t>& object_tag_indices,
     const aruco_interfaces::msg::DetectedTagArray::SharedPtr& msg,
     double max_assign,
-    double consist_thr)
+    double consist_thr,
+    int consistency_priority_min_tags)
   {
     AssignmentCandidate best;
     best.total_cost = std::numeric_limits<double>::infinity();
@@ -253,6 +266,7 @@ private:
       msg,
       max_assign,
       consist_thr,
+      consistency_priority_min_tags,
       used_tags,
       current_pairs,
       0.0,
@@ -556,6 +570,13 @@ private:
     if (switch_confirm_frames < 1) {
       switch_confirm_frames = 1;
     }
+    int consistency_priority_min_tags =
+      get_parameter("consistency_priority_min_tags").as_int();
+    if (consistency_priority_min_tags < 1) {
+      consistency_priority_min_tags = 1;
+    } else if (consistency_priority_min_tags > NUM_ARMS) {
+      consistency_priority_min_tags = NUM_ARMS;
+    }
     int sticky_loss_confirm_frames = get_parameter("sticky_loss_confirm_frames").as_int();
     if (sticky_loss_confirm_frames < 1) {
       sticky_loss_confirm_frames = 1;
@@ -611,10 +632,30 @@ private:
     result.total_tags = object_tag_indices.size();
     result.header = msg->header;
     result.cluster_id = 0;
+    result.majority_color = "none";
+
+    int count_blue_36 = 0;
+    int count_yellow_47 = 0;
+    for (size_t tag_idx : object_tag_indices) {
+      const uint32_t id = msg->tags[tag_idx].tag_id;
+      if (id == 36) {
+        count_blue_36 += 1;
+      } else if (id == 47) {
+        count_yellow_47 += 1;
+      }
+    }
+
+    if (count_blue_36 > count_yellow_47) {
+      result.majority_color = "blue";
+    } else if (count_yellow_47 > count_blue_36) {
+      result.majority_color = "yellow";
+    } else if ((count_blue_36 > 0) || (count_yellow_47 > 0)) {
+      result.majority_color = "equal";
+    }
 
     for (int a = 0; a < NUM_ARMS; ++a) {
       aruco_interfaces::msg::ArmAssignment aa;
-      aa.arm_index = a;
+      aa.arm_index = public_arm_index(a);
       aa.track_id = -1;
       aa.assigned = false;
       result.arms[a] = aa;
@@ -633,7 +674,12 @@ private:
           sticky_missing_frames_ = 0;
         } else {
           AssignmentCandidate instant_best =
-            compute_best_assignment(assignment_object_tag_indices, msg, max_assign, consist_thr);
+            compute_best_assignment(
+              assignment_object_tag_indices,
+              msg,
+              max_assign,
+              consist_thr,
+              consistency_priority_min_tags);
           best = instant_best;
           if (!best.pairs.empty()) {
             latch_assignment(best, msg, track_id_by_detection);
@@ -663,7 +709,12 @@ private:
       sticky_locked_assignment_ = false;
 
       AssignmentCandidate instant_best =
-        compute_best_assignment(assignment_object_tag_indices, msg, max_assign, consist_thr);
+        compute_best_assignment(
+          assignment_object_tag_indices,
+          msg,
+          max_assign,
+          consist_thr,
+          consistency_priority_min_tags);
 
       std::vector<std::pair<int, int>> active_pairs;
       const bool has_active_assignment =
@@ -682,6 +733,12 @@ private:
         AssignmentCandidate active_best;
         active_best.pairs = active_pairs;
         active_best.matched_count = static_cast<int>(active_pairs.size());
+        evaluate_candidate_geometry(
+          active_best.pairs,
+          msg,
+          active_best.max_residual,
+          active_best.is_consistent,
+          consist_thr);
 
         const auto instant_tracks =
           extract_assignment_track_ids(instant_best, track_id_by_detection);
@@ -694,7 +751,16 @@ private:
           pending_switch_frames_ = 0;
         } else {
           bool switch_preferred = false;
-          if (instant_best.matched_count > active_best.matched_count) {
+          const bool instant_priority =
+            instant_best.is_consistent &&
+            (instant_best.matched_count >= consistency_priority_min_tags);
+          const bool active_priority =
+            active_best.is_consistent &&
+            (active_best.matched_count >= consistency_priority_min_tags);
+
+          if (instant_priority != active_priority) {
+            switch_preferred = instant_priority;
+          } else if (instant_best.matched_count > active_best.matched_count) {
             switch_preferred = true;
           } else if (instant_best.matched_count == active_best.matched_count) {
             double instant_max_residual = std::numeric_limits<double>::infinity();
@@ -750,7 +816,7 @@ private:
 
     for (const auto& [arm_idx, tag_idx] : best.pairs) {
       auto& aa = result.arms[arm_idx];
-      aa.arm_index = arm_idx;
+      aa.arm_index = public_arm_index(arm_idx);
       aa.tag_id = msg->tags[tag_idx].tag_id;
       aa.tag_pose = msg->tags[tag_idx].tag_pose;
       if (tag_idx >= 0 && static_cast<size_t>(tag_idx) < track_id_by_detection.size()) {
@@ -769,9 +835,10 @@ private:
       fit_rigid_correction(best.pairs, msg, tx, ty, theta, residuals);
 
       double x_bias = get_parameter("correction_x_bias").as_double();
+      double theta_bias = get_parameter("correction_theta_bias").as_double();
       result.correction.x = tx + x_bias;
       result.correction.y = ty;
-      result.correction.z = theta;
+      result.correction.z = theta + theta_bias;
       result.correction_magnitude =
         static_cast<float>(dist2d(result.correction.x, result.correction.y));
 

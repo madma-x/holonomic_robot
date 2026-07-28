@@ -12,7 +12,9 @@ import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32, Int32, String
+from rclpy.parameter import Parameter
+from rclpy.parameter_client import AsyncParameterClient
+from std_msgs.msg import Bool, Empty, Float32, Int32, String
 from std_srvs.srv import Trigger
 
 from robot_hw_interfaces.msg import PumpState, SafetyState, ServoState
@@ -26,6 +28,7 @@ class GuiSnapshot:
     score: int = 0
     phase: str = "SETUP"
     match_active: bool = False
+    match_ready: bool = False
     current_task: str = "-"
     queue_size: int = 0
     mission_status: str = "UNKNOWN"
@@ -53,6 +56,8 @@ class RobotGuiRosInterface(Node):
 
         self.declare_parameter('game_start_service', '/game/start_match')
         self.declare_parameter('game_stop_service', '/game/stop_match')
+        self.declare_parameter('game_reset_pose_service', '/game/reset_pose')
+        self.declare_parameter('game_state_manager_node_name', '/game_state_manager')
         self.declare_parameter('planner_start_service', '/planner/start')
         self.declare_parameter('planner_stop_service', '/planner/stop')
         self.declare_parameter('planner_replan_service', '/planner/replan')
@@ -61,11 +66,13 @@ class RobotGuiRosInterface(Node):
         self.declare_parameter('initial_pose_x', 0.2)
         self.declare_parameter('initial_pose_y', 0.2)
         self.declare_parameter('initial_pose_yaw', 0.0)
+        self.declare_parameter('reset_odom_topic', '/reset_odom')
 
         self.declare_parameter('topic_time_remaining', '/game/time_remaining')
         self.declare_parameter('topic_score', '/game/score')
         self.declare_parameter('topic_phase', '/game/phase')
         self.declare_parameter('topic_match_active', '/game/match_active')
+        self.declare_parameter('topic_match_ready', '/game/match_ready')
         self.declare_parameter('topic_current_task', '/planner/current_task')
         self.declare_parameter('topic_queue_size', '/planner/queue_size')
         self.declare_parameter('topic_mission_status', '/mission_executor/mission_status')
@@ -86,16 +93,31 @@ class RobotGuiRosInterface(Node):
         self._servo_states: Dict[int, int] = {}
         self._pump_states: Dict[int, int] = {}
 
-        self._clients = {
+        self._service_clients = {
             'start_match': self.create_client(Trigger, str(self.get_parameter('game_start_service').value)),
             'stop_match': self.create_client(Trigger, str(self.get_parameter('game_stop_service').value)),
+            'reset_pose': self.create_client(Trigger, str(self.get_parameter('game_reset_pose_service').value)),
             'planner_start': self.create_client(Trigger, str(self.get_parameter('planner_start_service').value)),
             'planner_stop': self.create_client(Trigger, str(self.get_parameter('planner_stop_service').value)),
             'planner_replan': self.create_client(Trigger, str(self.get_parameter('planner_replan_service').value)),
         }
+        self._game_state_params = AsyncParameterClient(
+            self,
+            str(self.get_parameter('game_state_manager_node_name').value),
+        )
         self._initial_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped,
             str(self.get_parameter('initial_pose_topic').value),
+            10,
+        )
+        self._match_ready_pub = self.create_publisher(
+            Bool,
+            str(self.get_parameter('topic_match_ready').value),
+            10,
+        )
+        self._reset_odom_pub = self.create_publisher(
+            Empty,
+            str(self.get_parameter('reset_odom_topic').value),
             10,
         )
 
@@ -121,6 +143,12 @@ class RobotGuiRosInterface(Node):
             Bool,
             str(self.get_parameter('topic_match_active').value),
             self._active_cb,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter('topic_match_ready').value),
+            self._match_ready_cb,
             10,
         )
         self.create_subscription(
@@ -168,6 +196,7 @@ class RobotGuiRosInterface(Node):
                 score=self._snapshot.score,
                 phase=self._snapshot.phase,
                 match_active=self._snapshot.match_active,
+                match_ready=self._snapshot.match_ready,
                 current_task=self._snapshot.current_task,
                 queue_size=self._snapshot.queue_size,
                 mission_status=self._snapshot.mission_status,
@@ -182,7 +211,7 @@ class RobotGuiRosInterface(Node):
 
     def call_named_service(self, service_key: str):
         """Call a known Trigger service asynchronously."""
-        client = self._clients.get(service_key)
+        client = self._service_clients.get(service_key)
         if client is None:
             self._set_feedback(f'Unknown action: {service_key}')
             return
@@ -223,6 +252,60 @@ class RobotGuiRosInterface(Node):
         self._set_feedback(
             f'Initial pose published: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad'
         )
+
+    def reset_odom(self):
+        """Publish a trigger telling the odometry sensor (i2c_node) to zero itself."""
+        self._reset_odom_pub.publish(Empty())
+        self._set_feedback('Reset odom triggered.')
+
+    def set_game_team_color(self, team_color: str):
+        """Set game_state_manager team_color parameter from GUI selection."""
+        normalized = str(team_color).strip().lower()
+        if normalized not in ('blue', 'yellow'):
+            self._set_feedback(f'Invalid team color: {team_color}')
+            return None
+
+        if not self._game_state_params.wait_for_services(timeout_sec=0.2):
+            self._set_feedback('Service unavailable: game_state_manager team_color')
+            return None
+
+        param = Parameter('team_color', Parameter.Type.STRING, normalized)
+        future = self._game_state_params.set_parameters([param])
+        future.add_done_callback(lambda f: self._on_team_color_result(normalized, f))
+        self._set_feedback(f'Setting team_color={normalized} on game_state_manager...')
+        return future
+
+    def publish_match_ready(self, ready: bool):
+        """Publish operator match-ready state."""
+        msg = Bool()
+        msg.data = bool(ready)
+        self._match_ready_pub.publish(msg)
+
+        with self._lock:
+            self._snapshot.match_ready = bool(ready)
+            self._snapshot.last_update['match_ready'] = time.monotonic()
+
+        self._set_feedback(f'Match Ready published: {bool(ready)}')
+
+    def _on_team_color_result(self, team_color: str, future):
+        try:
+            result = future.result()
+        except Exception as error:  # noqa: BLE001
+            self._set_feedback(f'set team_color failed: {error}')
+            return
+
+        if not result:
+            self._set_feedback('set team_color failed: no response')
+            return
+
+        results = result.results if hasattr(result, 'results') else result
+        first = results[0]
+        if first.successful:
+            self._set_feedback(f'OK team_color set to {team_color}')
+            return
+
+        reason = str(first.reason) if getattr(first, 'reason', '') else 'unknown reason'
+        self._set_feedback(f'FAIL set team_color: {reason}')
 
     @property
     def poll_interval_ms(self) -> int:
@@ -270,6 +353,11 @@ class RobotGuiRosInterface(Node):
         with self._lock:
             self._snapshot.match_active = bool(msg.data)
         self._mark_update('match_active')
+
+    def _match_ready_cb(self, msg: Bool):
+        with self._lock:
+            self._snapshot.match_ready = bool(msg.data)
+        self._mark_update('match_ready')
 
     def _task_cb(self, msg: String):
         with self._lock:

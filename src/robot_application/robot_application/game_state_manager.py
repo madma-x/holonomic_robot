@@ -1,7 +1,10 @@
 """Game state management for competitive robotics."""
 
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from rcl_interfaces.msg import SetParametersResult
 from std_srvs.srv import Trigger, SetBool
 from std_msgs.msg import Float32, Int32, String, Bool
@@ -9,6 +12,17 @@ from geometry_msgs.msg import PoseStamped, Point, PoseWithCovarianceStamped
 import math
 import time
 from enum import Enum
+
+try:
+    from robot_actuators.action import ExecuteSequence
+    from robot_application.arm_layout import ARM_SELECTION_PRIORITY
+    from robot_application.arm_sequences import ArmSequenceBuilder
+    HAS_ARM_RESET_SUPPORT = True
+except ImportError:
+    ExecuteSequence = None
+    ARM_SELECTION_PRIORITY = []
+    ArmSequenceBuilder = None
+    HAS_ARM_RESET_SUPPORT = False
 
 
 class GamePhase(Enum):
@@ -43,6 +57,9 @@ class GameStateManager(Node):
         self.declare_parameter('yellow_initial_pose_x', 0.0)
         self.declare_parameter('yellow_initial_pose_y', 0.0)
         self.declare_parameter('yellow_initial_pose_theta', 0.0)
+        self.declare_parameter('end_match_arm_reset_enabled', True)
+        self.declare_parameter('end_match_arm_reset_timeout_sec', 30.0)
+        self.declare_parameter('execute_sequence_action_name', 'execute_sequence')
         
         # Get parameters
         self.match_duration = self.get_parameter('match_duration_sec').value
@@ -59,6 +76,25 @@ class GameStateManager(Node):
         self.base_position = Point()  # Home position
         self.objectives_completed = set()
         self._match_end_processed = False
+
+        self._end_match_arm_reset_enabled = bool(
+            self.get_parameter('end_match_arm_reset_enabled').value
+        )
+        self._end_match_arm_reset_timeout_sec = float(
+            self.get_parameter('end_match_arm_reset_timeout_sec').value
+        )
+        self._execute_sequence_action_name = str(
+            self.get_parameter('execute_sequence_action_name').value
+        )
+
+        self._arm_sequence_builder = ArmSequenceBuilder() if HAS_ARM_RESET_SUPPORT else None
+        self._sequence_client = None
+        if HAS_ARM_RESET_SUPPORT and self._end_match_arm_reset_enabled:
+            self._sequence_client = ActionClient(
+                self,
+                ExecuteSequence,
+                self._execute_sequence_action_name,
+            )
         
         # Publishers
         self.time_remaining_pub = self.create_publisher(Float32, '/game/time_remaining', 10)
@@ -67,12 +103,25 @@ class GameStateManager(Node):
         self.match_active_pub = self.create_publisher(Bool, '/game/match_active', 10)
         self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
 
+        self.planner_client_cb_group = ReentrantCallbackGroup()
         planner_start_service = self.get_parameter('planner_start_service').value
         planner_stop_service = self.get_parameter('planner_stop_service').value
         planner_reset_service = self.get_parameter('planner_reset_service').value
-        self.planner_start_client = self.create_client(Trigger, str(planner_start_service))
-        self.planner_stop_client = self.create_client(Trigger, str(planner_stop_service))
-        self.planner_reset_client = self.create_client(Trigger, str(planner_reset_service))
+        self.planner_start_client = self.create_client(
+            Trigger,
+            str(planner_start_service),
+            callback_group=self.planner_client_cb_group,
+        )
+        self.planner_stop_client = self.create_client(
+            Trigger,
+            str(planner_stop_service),
+            callback_group=self.planner_client_cb_group,
+        )
+        self.planner_reset_client = self.create_client(
+            Trigger,
+            str(planner_reset_service),
+            callback_group=self.planner_client_cb_group,
+        )
         
         
         # Services
@@ -100,6 +149,12 @@ class GameStateManager(Node):
     
     def start_match_callback(self, request, response):
         """Start match timer."""
+        if self.match_started:
+            response.success = True
+            response.message = 'Match already active'
+            self.get_logger().info('Ignoring duplicate /game/start_match while match is active')
+            return response
+
         planner_started, planner_message = self.start_match()
         response.success = planner_started
         response.message = (
@@ -109,6 +164,7 @@ class GameStateManager(Node):
     
     def stop_match_callback(self, request, response):
         """Stop match timer."""
+        self._execute_end_match_arm_reset()
         self._stop_match_state(mark_finished=True)
         self._stop_and_reset_planner()
         response.success = True
@@ -185,6 +241,9 @@ class GameStateManager(Node):
     
     def start_match(self):
         """Start the match and request planner execution."""
+        if self.match_started:
+            return False, 'Match already active'
+
         self.match_started = True
         self._match_end_processed = False
         self.match_start_time = time.time()
@@ -253,6 +312,61 @@ class GameStateManager(Node):
         self._match_end_processed = True
         self.current_phase = GamePhase.FINISHED if mark_finished else GamePhase.SETUP
 
+    def _execute_end_match_arm_reset(self) -> bool:
+        if not self._end_match_arm_reset_enabled:
+            return True
+
+        if not HAS_ARM_RESET_SUPPORT or self._arm_sequence_builder is None or self._sequence_client is None:
+            self.get_logger().warn('End-match arm reset requested but arm reset support is unavailable')
+            return False
+
+        try:
+            steps = self._arm_sequence_builder.build_reset_sequence(list(ARM_SELECTION_PRIORITY))
+        except RuntimeError as exc:
+            self.get_logger().error(f'End-match arm reset sequence build failed: {exc}')
+            return False
+
+        if not steps:
+            self.get_logger().warn('End-match arm reset returned empty sequence')
+            return False
+
+        if not self._sequence_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn(
+                f'End-match arm reset action server unavailable: {self._execute_sequence_action_name}'
+            )
+            return False
+
+        goal = ExecuteSequence.Goal()
+        goal.steps = steps
+        send_future = self._sequence_client.send_goal_async(goal)
+        if not self._wait_for_future(send_future, timeout_sec=5.0):
+            self.get_logger().error('End-match arm reset goal request timed out')
+            return False
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            self.get_logger().error('End-match arm reset goal rejected')
+            return False
+
+        result_future = goal_handle.get_result_async()
+        if not self._wait_for_future(result_future, timeout_sec=self._end_match_arm_reset_timeout_sec):
+            self.get_logger().error('End-match arm reset action timed out')
+            return False
+
+        wrapped = result_future.result()
+        if wrapped is None:
+            self.get_logger().error('End-match arm reset returned no result')
+            return False
+
+        if wrapped.result.success:
+            self.get_logger().info('End-match arm reset completed successfully')
+            return True
+
+        self.get_logger().warn(
+            f'End-match arm reset failed at step {wrapped.result.failed_step}: {wrapped.result.message}'
+        )
+        return False
+
     def _on_parameters_changed(self, params):
         for param in params:
             if param.name == 'team_color' and self.match_started:
@@ -282,6 +396,7 @@ class GameStateManager(Node):
         old_phase = self.current_phase
         if time_remaining <= 0:
             if not self._match_end_processed:
+                self._execute_end_match_arm_reset()
                 self._stop_match_state(mark_finished=True)
                 self._stop_and_reset_planner()
                 self.get_logger().info(f'Match finished! Final score: {self.current_score}')
@@ -343,12 +458,15 @@ class GameStateManager(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GameStateManager()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
