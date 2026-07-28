@@ -14,3 +14,17 @@ aruco_localization_node:
     broadcast_rate_hz: 10.0
     # Future-date map->odom TF slightly to avoid Nav2 lookup extrapolation.
     transform_tolerance_sec: 0.2
+    # Only accept ArUco corrections while the robot is below this speed (m/s).
+    speed_threshold_mps: 0.1
+    # Fraction of the remaining gap to the latest correction closed per
+    # broadcast tick (0-1). Lower = smoother/slower, higher = snappier.
+    correction_smoothing_alpha: 0.1
+    # Camera mounting offset from base_link (meters) and downward pitch (deg).
+    camera_offset_x: 0.12
+    camera_offset_y: 0.0
+    camera_offset_z: 0.30
+    camera_pitch_deg: 45.0
+    # Reject a correction implying a jump larger than this from the current
+    # best-estimate pose (guards against a bad tag detection / far-away tag).
+    max_pose_jump_m: 0.5
+    max_yaw_jump_rad: 0.5

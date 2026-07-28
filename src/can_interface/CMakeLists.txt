@@ -12,6 +12,7 @@ find_package(nav_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(robot_hw_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -31,6 +32,7 @@ ament_target_dependencies(can_node
   tf2
   tf2_ros
   std_srvs
+  robot_hw_interfaces
 )
 
 ament_target_dependencies(can_test_node
@@ -54,6 +56,7 @@ ament_export_dependencies(
   nav_msgs
   tf2
   tf2_ros
+  robot_hw_interfaces
   rosidl_default_runtime
 )
 
