@@ -19,6 +19,7 @@ robot_gui:
     initial_pose_x: 0.2
     initial_pose_y: 0.2
     initial_pose_yaw: 0.0
+    reset_odom_topic: "/reset_odom"
 
     topic_time_remaining: "/game/time_remaining"
     topic_score: "/game/score"

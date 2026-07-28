@@ -14,7 +14,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
-from std_msgs.msg import Bool, Float32, Int32, String
+from std_msgs.msg import Bool, Empty, Float32, Int32, String
 from std_srvs.srv import Trigger
 
 from robot_hw_interfaces.msg import PumpState, SafetyState, ServoState
@@ -66,6 +66,7 @@ class RobotGuiRosInterface(Node):
         self.declare_parameter('initial_pose_x', 0.2)
         self.declare_parameter('initial_pose_y', 0.2)
         self.declare_parameter('initial_pose_yaw', 0.0)
+        self.declare_parameter('reset_odom_topic', '/reset_odom')
 
         self.declare_parameter('topic_time_remaining', '/game/time_remaining')
         self.declare_parameter('topic_score', '/game/score')
@@ -112,6 +113,11 @@ class RobotGuiRosInterface(Node):
         self._match_ready_pub = self.create_publisher(
             Bool,
             str(self.get_parameter('topic_match_ready').value),
+            10,
+        )
+        self._reset_odom_pub = self.create_publisher(
+            Empty,
+            str(self.get_parameter('reset_odom_topic').value),
             10,
         )
 
@@ -246,6 +252,11 @@ class RobotGuiRosInterface(Node):
         self._set_feedback(
             f'Initial pose published: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad'
         )
+
+    def reset_odom(self):
+        """Publish a trigger telling the odometry sensor (i2c_node) to zero itself."""
+        self._reset_odom_pub.publish(Empty())
+        self._set_feedback('Reset odom triggered.')
 
     def set_game_team_color(self, team_color: str):
         """Set game_state_manager team_color parameter from GUI selection."""

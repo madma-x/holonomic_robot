@@ -128,6 +128,9 @@ class MainWindow(QMainWindow):
         self.reset_pose_button = QPushButton('Reset Position')
         self.reset_pose_button.clicked.connect(lambda: self.ros.call_named_service('reset_pose'))
 
+        self.reset_odom_button = QPushButton('Reset Odometry')
+        self.reset_odom_button.clicked.connect(self.ros.reset_odom)
+
         self.latch_state_label = QLabel('Latch: Idle')
 
         setup_layout.addWidget(QLabel('Team'), 0, 0)
@@ -143,7 +146,8 @@ class MainWindow(QMainWindow):
         setup_layout.addWidget(self.ready_button, 2, 0, 1, 2)
         setup_layout.addWidget(self.reset_ui_button, 3, 0, 1, 2)
         setup_layout.addWidget(self.reset_pose_button, 4, 0, 1, 2)
-        setup_layout.addWidget(self.latch_state_label, 5, 0, 1, 2)
+        setup_layout.addWidget(self.reset_odom_button, 5, 0, 1, 2)
+        setup_layout.addWidget(self.latch_state_label, 6, 0, 1, 2)
         controls_page_layout.addWidget(setup_box)
 
         self._apply_team_selection_state()
