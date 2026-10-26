@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><unit name="meter" meter="1"/><up_axis>Z_UP</up_axis></asset>
+  <library_images>
+    <image id="table_img" name="table_img"><init_from>table_2027.png</init_from></image>
+  </library_images>
+  <library_effects>
+    <effect id="table_fx">
+      <profile_COMMON>
+        <newparam sid="surf"><surface type="2D"><init_from>table_img</init_from></surface></newparam>
+        <newparam sid="samp"><sampler2D><source>surf</source></sampler2D></newparam>
+        <technique sid="common">
+          <lambert>
+            <emission><color>0.35 0.35 0.35 1</color></emission>
+            <diffuse><texture texture="samp" texcoord="UVMap"/></diffuse>
+          </lambert>
+        </technique>
+      </profile_COMMON>
+    </effect>
+  </library_effects>
+  <library_materials>
+    <material id="table_mat" name="table_mat"><instance_effect url="#table_fx"/></material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="plane" name="plane">
+      <mesh>
+        <source id="plane-pos">
+          <float_array id="plane-pos-array" count="12">0 0 0  3 0 0  3 2 0  0 2 0</float_array>
+          <technique_common><accessor source="#plane-pos-array" count="4" stride="3">
+            <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+          </accessor></technique_common>
+        </source>
+        <source id="plane-nrm">
+          <float_array id="plane-nrm-array" count="3">0 0 1</float_array>
+          <technique_common><accessor source="#plane-nrm-array" count="1" stride="3">
+            <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+          </accessor></technique_common>
+        </source>
+        <source id="plane-uv">
+          <float_array id="plane-uv-array" count="8">0 0  1 0  1 1  0 1</float_array>
+          <technique_common><accessor source="#plane-uv-array" count="4" stride="2">
+            <param name="S" type="float"/><param name="T" type="float"/>
+          </accessor></technique_common>
+        </source>
+        <vertices id="plane-vtx"><input semantic="POSITION" source="#plane-pos"/></vertices>
+        <triangles material="table_mat" count="2">
+          <input semantic="VERTEX" source="#plane-vtx" offset="0"/>
+          <input semantic="NORMAL" source="#plane-nrm" offset="1"/>
+          <input semantic="TEXCOORD" source="#plane-uv" offset="2" set="0"/>
+          <p>0 0 0  1 0 1  2 0 2   0 0 0  2 0 2  3 0 3</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="scene" name="scene">
+      <node id="table" name="table">
+        <instance_geometry url="#plane">
+          <bind_material><technique_common>
+            <instance_material symbol="table_mat" target="#table_mat">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+          </technique_common></bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#scene"/></scene>
+</COLLADA>

@@ -1,0 +1,63 @@
+# Eurobot / Coupe de France 2027 "The legend of Camelot" - table layout
+#
+# Map frame: origin at the table corner on the YELLOW end,
+#   x along the 3 m length (yellow end x=0 -> blue end x=3),
+#   y along the 2 m width (matches the "y" ruler of the top-view figure).
+# Units: metres, degrees for angles in this file.
+#
+# Positions were measured from the top-view figure of the rulebook (Fig. 8),
+# ~1 cm accuracy. Everything is declared for the YELLOW half; `mirror: true`
+# entries get a blue twin at x -> 3 - x.
+
+table:
+  length_x: 3.0
+  width_y: 2.0
+
+match_duration: 85.0
+
+# Box lying flat: length x width x height (m).
+box:
+  length: 0.32
+  width: 0.11
+  height: 0.11
+
+boxes_per_stack: 3
+
+# Pick stacks: one object holding `boxes_per_stack` boxes.
+# IDs shown in RViz: P1..P10 (pick, numbered along x then y), Y1..Y5 / B1..B5 (drop).
+# `approach`: sides the robot can grab from ("-y" = robot on the -y side).
+stacks:
+  - {name: hi_1, x: 0.75, y: 1.945, th: 0,  approach: ["-y"], mirror: true}
+  - {name: hi_2, x: 1.25, y: 1.945, th: 0,  approach: ["-y"], mirror: true}
+  - {name: lo_1, x: 0.75, y: 0.055, th: 0,  approach: ["+y"], mirror: true}
+  - {name: lo_2, x: 1.25, y: 0.055, th: 0,  approach: ["+y"], mirror: true}
+  - {name: mid_hi, x: 1.50, y: 1.50, th: 90, approach: ["-x", "+x"], mirror: false}
+  - {name: mid_lo, x: 1.50, y: 0.50, th: 90, approach: ["-x", "+x"], mirror: false}
+
+# Drop zones (rectangles, lx along their own axis rotated by th).
+# Each holds at most `zone_capacity` boxes, best as one stack of 3.
+# `approach_deg`: direction(s) from the zone centre to the robot.
+zone_capacity: 3
+zones:
+  - {name: strip_hi, x: 0.25, y: 1.60, lx: 0.40, ly: 0.20, th: 0,   approach_deg: [-90]}
+  - {name: strip_lo, x: 0.25, y: 0.40, lx: 0.40, ly: 0.20, th: 0,   approach_deg: [90]}
+  - {name: bridge,   x: 0.85, y: 1.00, lx: 0.40, ly: 0.20, th: 90,  approach_deg: [180]}
+  # diagonal grey bands between the circles (centre given by the team: 650, 650)
+  - {name: diag_hi,  x: 0.65, y: 1.35, lx: 0.40, ly: 0.20, th: -45, approach_deg: [-135]}
+  - {name: diag_lo,  x: 0.65, y: 0.65, lx: 0.40, ly: 0.20, th: 45,  approach_deg: [135]}
+
+# Start square (also the end-of-match zone unless end_zone is given).
+start_zone: {x: 0.25, y: 1.00, lx: 0.50, ly: 0.50, heading: 0.0}
+
+# Points. PLACEHOLDERS - replace with the 2027 rulebook figures.
+scoring:
+  box_in_zone: 3
+  full_stack_bonus: 6        # zone holding a stack of 3
+  robot_in_end_zone: 10      # robot fully inside its zone at the end
+  robot_partly_in_end_zone: 0
+
+decor_circles:
+  - {x: 0.50, y: 1.60, r: 0.10}
+  - {x: 0.85, y: 1.25, r: 0.10}
+  - {x: 0.85, y: 0.75, r: 0.10}
+  - {x: 0.50, y: 0.40, r: 0.10}

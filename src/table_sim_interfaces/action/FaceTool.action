@@ -1,0 +1,12 @@
+# Pick boxes from a stack, or drop the boxes held on a face into a zone.
+uint8 PICK=0
+uint8 DROP=1
+uint8 face        # 0, 1 or 2 (face 0 points along +x of base_footprint)
+uint8 mode        # PICK or DROP
+---
+bool success
+uint8 count       # boxes picked / dropped
+string message
+---
+string phase      # engaging | lifting | releasing
+float32 progress  # 0..1
