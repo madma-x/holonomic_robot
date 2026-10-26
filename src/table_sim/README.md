@@ -42,6 +42,15 @@ Restart: `ros2 service call /sim/reset std_srvs/srv/Trigger`.
 | `goal_driver` | `true`: click **2D Goal Pose** in RViz to drive our robot |
 | `rtf` | real-time factor, e.g. `2.0` |
 | `rviz` | `true` / `false` |
+| `panel` | `true`: match panel window (needs `python3-tk`) |
+
+## Match panel
+
+`sim_panel` opens a separate window (it shows in the VNC desktop next to RViz):
+clock, score, both robots (pose, boxes per face, current action), every pick
+stack P1–P10 and drop zone Y1–Y5 / B1–B5 with its box count, the last game
+events, and buttons to start / reset the match and to pick / drop on each face.
+If it does not open: `sudo apt install python3-tk`.
 
 ## Validate it by hand
 

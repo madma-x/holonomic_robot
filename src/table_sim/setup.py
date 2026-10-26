@@ -27,6 +27,7 @@ setup(
         'console_scripts': [
             'sim_node = table_sim.sim_node:main',
             'goal_driver = table_sim.goal_driver:main',
+            'sim_panel = table_sim.sim_panel:main',
             'headless_match = table_sim.headless:main',
         ],
     },

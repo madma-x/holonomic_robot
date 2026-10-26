@@ -10,6 +10,7 @@ Arguments
   our_robot    cmd_vel (driven by /cmd_vel) | scripted:<behaviour> (to watch a full match)
   goal_driver  true: click "2D Goal Pose" in RViz to move our robot (cmd_vel mode only)
   rviz         true | false
+  panel        true: separate match panel window (score, stacks, zones, pick/drop buttons)
   rtf          real-time factor (2.0 = twice as fast)
   auto_start   true: the 85 s match starts 3 s after launch, else call /sim/start
 """
@@ -49,6 +50,8 @@ def _setup(context, *args, **kwargs):
     if our_robot == 'cmd_vel' and lc('goal_driver').lower() == 'true':
         nodes.append(Node(package='table_sim', executable='goal_driver', name='goal_driver',
                           output='screen', parameters=[{'use_sim_time': True}]))
+    if lc('panel').lower() == 'true':
+        nodes.append(Node(package='table_sim', executable='sim_panel', name='sim_panel', output='screen'))
     if lc('rviz').lower() == 'true':
         nodes.append(Node(package='rviz2', executable='rviz2', name='rviz2', output='log',
                           arguments=['-d', os.path.join(share, 'rviz', 'table_sim.rviz')],
@@ -64,6 +67,7 @@ def generate_launch_description():
         DeclareLaunchArgument('our_robot', default_value='cmd_vel'),
         DeclareLaunchArgument('goal_driver', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('panel', default_value='true'),
         DeclareLaunchArgument('rtf', default_value='1.0'),
         DeclareLaunchArgument('auto_start', default_value='true'),
         DeclareLaunchArgument('field_file', default_value=os.path.join(share, 'config', 'field_2027.yaml')),

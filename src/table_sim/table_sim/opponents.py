@@ -228,7 +228,7 @@ class ScriptedOpponent:
             self.w.set_cmd(self.name, 0, 0, 0)
             return
         kind, key, target, face = self.task
-        self.status = f'{kind} {key or ""}'.strip()
+        self.status = f'{kind} {self.w.field.label(key) if key else ""}'.strip()
         if kind == 'home':
             self._goto(target[0], target[1], r.th, dt)
             return

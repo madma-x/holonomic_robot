@@ -42,9 +42,9 @@ zones:
   - {name: strip_hi, x: 0.25, y: 1.60, lx: 0.40, ly: 0.20, th: 0,   approach_deg: [-90]}
   - {name: strip_lo, x: 0.25, y: 0.40, lx: 0.40, ly: 0.20, th: 0,   approach_deg: [90]}
   - {name: bridge,   x: 0.85, y: 1.00, lx: 0.40, ly: 0.20, th: 90,  approach_deg: [180]}
-  # diagonal grey bands between the circles (centre given by the team: 650, 650)
-  - {name: diag_hi,  x: 0.65, y: 1.35, lx: 0.40, ly: 0.20, th: -45, approach_deg: [-135]}
-  - {name: diag_lo,  x: 0.65, y: 0.65, lx: 0.40, ly: 0.20, th: 45,  approach_deg: [135]}
+  # diagonal grey bands between the circles (centre given by the team: x 550, y 700)
+  - {name: diag_hi,  x: 0.55, y: 1.30, lx: 0.40, ly: 0.20, th: -45, approach_deg: [-135]}
+  - {name: diag_lo,  x: 0.55, y: 0.70, lx: 0.40, ly: 0.20, th: 45,  approach_deg: [135]}
 
 # Start square (also the end-of-match zone unless end_zone is given).
 start_zone: {x: 0.25, y: 1.00, lx: 0.50, ly: 0.50, heading: 0.0}

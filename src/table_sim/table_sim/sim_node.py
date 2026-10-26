@@ -357,10 +357,27 @@ class TableSimNode(Node):
         self.pub_left.publish(Float32(data=float(w.time_left)))
         sc = {t: w.score(t) for t in ('yellow', 'blue')}
         self.pub_score.publish(Int32(data=int(sc[self.team]['total'])))
+        robots = {}
+        for name, r in w.robots.items():
+            ph = w.action_progress(name)
+            robots[name] = {
+                'team': r.team, 'x': round(r.x, 3), 'y': round(r.y, 3),
+                'th_deg': round(math.degrees(r.th), 1), 'faces': list(r.faces),
+                'action': f'{ph[0]} {int(ph[1] * 100)}%' if ph else '',
+                'contacts': r.contacts,
+            }
+        robots['opp']['behavior'] = self.opp_behavior
+        robots['opp']['status'] = self.opp.status
+        if self.us_script is not None:
+            robots['us']['status'] = self.us_script.status
         self.pub_score_json.publish(String(data=json.dumps(
-            {'time': round(w.match_time, 2), 'running': w.running, 'score': sc,
+            {'time': round(w.match_time, 2), 'time_left': round(w.time_left, 2),
+             'started': w.match_t0 is not None, 'running': w.running, 'finished': w.finished,
+             'team': self.team, 'score': sc, 'robots': robots,
              'stacks': {f.label(k): v for k, v in w.stacks.items()},
-             'zones': {f.label(k): v for k, v in w.zones.items()}})))
+             'zones': {f.label(k): v for k, v in w.zones.items()},
+             'zone_capacity': f.zone_capacity,
+             'events': [f'{t:5.1f}  {m}' for t, m in w.events[-15:]]})))
 
     # ------------------------------------------------------------ markers
     def _mk(self, ns, mid, mtype, stamp, frame=None):
@@ -383,7 +400,9 @@ class TableSimNode(Node):
     def _text(self, ns, mid, stamp, x, y, z, text, size=0.06, rgb=(1, 1, 1)):
         m = self._mk(ns, mid, Marker.TEXT_VIEW_FACING, stamp)
         m.pose.position.x, m.pose.position.y, m.pose.position.z = float(x), float(y), float(z)
-        m.scale.z = float(size)
+        # RViz only uses scale.z for text, but a zero x/y scale breaks the
+        # glyph spacing (huge gaps at spaces) on some Ogre versions
+        m.scale.x = m.scale.y = m.scale.z = float(size)
         m.color = _color(rgb)
         m.text = text
         return m

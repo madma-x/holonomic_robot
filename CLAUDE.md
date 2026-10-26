@@ -20,7 +20,7 @@ with this repo mounted in the container.
   4 on each long edge, 2 in the centre (x = 1.5 m).
 - **5 drop zones per team** (Y1–Y5 / B1–B5), **max 3 boxes per zone**;
   best is a stack of 3 (same as in the pick zones). The diagonal zone is
-  centred at (650, 650) mm (+ twin at y = 1350, mirrored for blue).
+  centred at x 550, y 700 mm (+ twin at y = 1300, mirrored for blue).
 - Points in `src/table_sim/config/field_2027.yaml` are PLACEHOLDERS: check the
   official rules (coupederobotique.fr, "Règlement 2027") and update them.
 
@@ -66,7 +66,7 @@ IDs on pick/drop zones, robot moves, pick/drop via
 magenta lidar points when within 1 m of the opponent, scoreboard.
 
 ### Open questions for Max
-- Size/orientation of the diagonal drop zones (assumed 400 x 200 at ±45°).
+- Size/orientation of the diagonal drop zones (assumed 400 x 200 at ±45°, centre 550, 700).
 - Approach side of each pick/drop zone (centre stacks P5/P6 from both sides).
 - End zone = start square?
 - Real face numbering of the robot.
