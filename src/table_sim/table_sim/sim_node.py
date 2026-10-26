@@ -214,6 +214,7 @@ class TableSimNode(Node):
     def _srv_reset(self, _req, resp):
         with self.lock:
             self._build_world()
+            self._next_scan = self._next_markers = self._next_table = 0.0
         resp.success, resp.message = True, 'world reset (call /sim/start)'
         return resp
 
