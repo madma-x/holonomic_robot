@@ -10,7 +10,12 @@ as a video so you can watch both robots move.
 
 Our robot is driven by --brain: "scripted:<behaviour>" (default
 scripted:mirror) or "module:Class" for a strategy that exposes step(obs, dt)
-and whose module defines Observation(...) and Command.
+and whose module defines Observation(...) and Command. Observation fields:
+t, active, time_left, pose, ranges, angle_min, angle_inc, lidar_yaw, cam,
+tool_busy, result, flip_busy, flip_result (see run_match below for exactly
+what's passed each tick - ranges/cam are None on ticks without a fresh
+lidar/camera frame; flip_busy/flip_result track FLIP's own concurrent slot,
+separate from tool_busy/result which are PICK/DROP only).
 """
 
 import argparse
@@ -59,6 +64,31 @@ def load_params(path):
     return d
 
 
+def _goal_snapshot(brain, cmd):
+    """Mirror of strategy_node._goal_fields for the headless path: the pose
+    being driven to and the heading asked for, so a headless run replays in
+    replay_match with the same angle validation a recorded match gets."""
+    out = {'target': None, 'stage': None, 'face': None, 'goal': None,
+           'dock_pose': None, 'req_yaw_deg': None, 'yaw_err_deg': None,
+           'mode': getattr(brain, '_mode', None)}
+    sp = getattr(brain, 'spot', None)
+    if sp is None:
+        return out
+    face = getattr(brain, 'face', 0)
+    req = (sp.face_heading - brain.face_angles[face] + math.pi) % (2 * math.pi) - math.pi
+    out.update({
+        'target': getattr(brain.target_obj, 'label', None),
+        'stage': getattr(brain, 'stage', None),
+        'face': face,
+        'goal': list(cmd.goal_pose) if cmd.goal_pose is not None else None,
+        'dock_pose': [round(sp.x, 4), round(sp.y, 4), round(req, 4)],
+        'req_yaw_deg': round(math.degrees(req), 1),
+        'yaw_err_deg': round(math.degrees(
+            (req - brain.pose[2] + math.pi) % (2 * math.pi) - math.pi), 1),
+    })
+    return out
+
+
 def run_match(field, sim_cfg, team, behavior, brain_spec, params, seed=0, avoid=True,
               control_dt=0.05, record_every=0.0, verbose=False):
     world = World(field, sim_cfg, team_us=team, seed=seed)
@@ -74,9 +104,12 @@ def run_match(field, sim_cfg, team, behavior, brain_spec, params, seed=0, avoid=
         brain = cls(field, team, params)
     lidar_period = 1.0 / float(sim_cfg.get('lidar', {}).get('rate', 10.0))
     lidar_yaw = float(sim_cfg.get('lidar', {}).get('yaw_offset', math.pi))
+    cam_period = 1.0 / float(sim_cfg.get('camera', {}).get('rate', 15.0))
     world.start_match()
     pending = None
+    flip_pending = None
     next_scan = 0.0
+    next_cam = 0.0
     next_rec = 0.0
     frames = []
     last_scan_pts = None
@@ -101,22 +134,36 @@ def run_match(field, sim_cfg, team, behavior, brain_spec, params, seed=0, avoid=
         if world.time >= next_scan:
             ranges, a_min, inc = world.scan('us')
             next_scan = world.time + lidar_period
+        cam = None
+        if world.time >= next_cam:
+            cam = world.camera_view('us')
+            next_cam = world.time + cam_period
         res = world.pop_result('us')
         if res is not None:
             pending = (res.face, res.mode, res.success, res.count, res.message)
+        flip_res = world.pop_result('us', flip=True)
+        if flip_res is not None:
+            flip_pending = (flip_res.face, flip_res.success, flip_res.count, flip_res.message)
         obs = mod.Observation(t=world.match_time, active=world.running, time_left=world.time_left,
                               pose=(r.x, r.y, r.th), ranges=ranges, angle_min=a_min,
-                              angle_inc=inc, lidar_yaw=lidar_yaw,
-                              tool_busy=r.action is not None, result=pending)
-        pending = None
+                              angle_inc=inc, lidar_yaw=lidar_yaw, cam=cam,
+                              tool_busy=r.action is not None, result=pending,
+                              flip_busy=r.flip_action is not None, flip_result=flip_pending)
+        pending, flip_pending = None, None
         cmd = brain.step(obs, control_dt)
         world.set_cmd('us', cmd.vx, cmd.vy, cmd.wz)
         if cmd.cancel:
             world.cancel_action('us')
         if cmd.action is not None:
-            ok, why = world.request_action('us', cmd.action[0], cmd.action[1])
+            count = cmd.action[2] if len(cmd.action) > 2 else 0
+            ok, why = world.request_action('us', cmd.action[0], cmd.action[1], count)
             if not ok:
                 pending = (cmd.action[0], cmd.action[1], False, 0, why)
+        flip_action = getattr(cmd, 'flip_action', None)
+        if flip_action is not None and r.flip_action is None:
+            ok, why = world.request_action('us', flip_action[0], 2, 0)   # FLIP=2
+            if not ok:
+                flip_pending = (flip_action[0], False, 0, why)
         opp.step(control_dt)
         world.step(control_dt)
         if record_every and world.time >= next_rec:
@@ -133,6 +180,12 @@ def run_match(field, sim_cfg, team, behavior, brain_spec, params, seed=0, avoid=
             snap['scan_pts'] = last_scan_pts or []
             snap['score'] = {t: world.score(t)['total'] for t in ('yellow', 'blue')}
             snap['log'] = (getattr(dbg, 'log', []) or [])[-4:]
+            # Same goal/heading fields strategy_node publishes on
+            # /strategy/status, so replay_match can validate a headless run
+            # exactly like a recorded one (see bag2frames).
+            snap.update(_goal_snapshot(brain, cmd))
+            # Where piles really landed, rather than each zone's preset centre
+            snap['pile_poses'] = {k: tuple(v) for k, v in world.pile_pose.items()}
             frames.append(snap)
         if world.finished:
             break
@@ -150,25 +203,9 @@ def run_match(field, sim_cfg, team, behavior, brain_spec, params, seed=0, avoid=
 
 
 # --------------------------------------------------------------------------
-# drawing
+# drawing  (the renderer itself lives in render.py, shared with replay_match)
 # --------------------------------------------------------------------------
-TEAM_COL = {'yellow': '#e8b730', 'blue': '#4f7fd0'}
-
-
-def _draw_table(ax, f):
-    from matplotlib.patches import Polygon, Circle, Rectangle
-    ax.add_patch(Rectangle((0, 0), f.length, f.width, fc='#5d8a3f', ec='#333333', lw=2))
-    for team, col in TEAM_COL.items():
-        ax.add_patch(Polygon(f.start_zones[team].poly, closed=True, fc=col, ec='none', alpha=0.85))
-        for z in f.team_zones(team):
-            ax.add_patch(Polygon(z.poly, closed=True, fc='#9a9a9a', ec=col, lw=2))
-    for (x, y, r) in f.decor:
-        ax.add_patch(Circle((x, y), r, fc='none', ec='#444444', lw=1))
-    ax.set_xlim(-0.05, f.length + 0.05)
-    ax.set_ylim(-0.05, f.width + 0.05)
-    ax.set_aspect('equal')
-    ax.set_xticks([0, 0.5, 1, 1.5, 2, 2.5, 3])
-    ax.set_yticks([0, 0.5, 1, 1.5, 2])
+from .render import TEAM_COL, TableRenderer, draw_table as _draw_table  # noqa: E402,F401
 
 
 def render(res, path, fps=20, speed=2.0, frame_dt=0.1):
@@ -177,131 +214,20 @@ def render(res, path, fps=20, speed=2.0, frame_dt=0.1):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib import animation
-    from matplotlib.patches import Polygon, Circle
-    import numpy as np
-    from .geometry import rect_poly, transform
 
     w = res['world']
-    f = w.field
     frames = res['frames']
     step = max(1, int(round(speed / (fps * frame_dt))))
     frames = frames[::step]
-    team_us = res['team']
-    team_opp = 'blue' if team_us == 'yellow' else 'yellow'
     fig = plt.figure(figsize=(12.8, 7.2), dpi=100)
     ax = fig.add_axes([0.02, 0.06, 0.70, 0.88])
     side = fig.add_axes([0.73, 0.06, 0.26, 0.88])
-    side.axis('off')
-    _draw_table(ax, f)
-    dyn = []
-    trail = {'us': [], 'opp': []}
+    r = TableRenderer(w.field, w.models, team_us=res['team'],
+                      lidar_range=float(w.lidar.get('detect_range', 2.8)),
+                      opponent_label=res['opponent']).attach(ax, side)
 
-    def robot_artists(name, x, y, th, faces, col, edge):
-        m = w.models[name]
-        arts = [Polygon(transform(m.local_poly, x, y, th), closed=True, fc=col, ec=edge, lw=2, alpha=0.95)]
-        # face 0 marker
-        c = m.face_center_local(0)
-        p = transform(np.array([c * 0.75]), x, y, th)[0]
-        arts.append(Circle(p, 0.018, fc=edge, ec='none'))
-        for fi, n in enumerate(faces):
-            if n:
-                a = th + m.face_angles[fi]
-                nv = np.array([math.cos(a), math.sin(a)])
-                fc = np.array([x, y]) + m.r_in * nv
-                bc = fc + nv * (f.box_width / 2 + 0.003)
-                arts.append(Polygon(rect_poly(bc[0], bc[1], f.box_length, f.box_width, a + math.pi / 2),
-                                    closed=True, fc='#c99a5b', ec='#3b2a12', lw=1))
-                arts.append(ax.text(bc[0], bc[1], str(n), ha='center', va='center', fontsize=8,
-                                    color='black', weight='bold'))
-        arts.append(Circle((x, y), m.mast / 2, fc='#222222', ec='white', lw=0.8))
-        return arts
-
-    def draw(i):
-        for a in dyn:
-            a.remove()
-        dyn.clear()
-        fr = frames[i]
-        for name, (x, y, th, faces, phase) in fr['robots'].items():
-            trail[name].append((x, y))
-            del trail[name][:-60]
-        # stacks
-        for s in f.stacks:
-            n = fr['stacks'][s.name]
-            if n:
-                p = Polygon(s.poly, closed=True, fc='#c99a5b', ec='#3b2a12', lw=1.2)
-                ax.add_patch(p)
-                dyn.append(p)
-                dyn.append(ax.text(s.x, s.y, str(n), ha='center', va='center', fontsize=9, weight='bold'))
-            else:
-                p = Polygon(s.poly, closed=True, fc='none', ec='#3b2a12', lw=0.8, ls='--')
-                ax.add_patch(p)
-                dyn.append(p)
-        # piles in zones
-        for z in f.zones:
-            n = fr['zones'][z.name]
-            if n:
-                p = Polygon(f.pile_poly(z), closed=True, fc='#c99a5b',
-                            ec=TEAM_COL[z.team], lw=2.5 if n >= f.zone_capacity else 1.2)
-                ax.add_patch(p)
-                dyn.append(p)
-                dyn.append(ax.text(z.x, z.y, f'{n}/{f.zone_capacity}', ha='center', va='center',
-                                   fontsize=8, weight='bold'))
-        # trails
-        for name, col in (('us', 'red'), ('opp', 'white')):
-            if len(trail[name]) > 1:
-                ln, = ax.plot(*zip(*trail[name]), '-', color=col, lw=1.2, alpha=0.7)
-                dyn.append(ln)
-        # our planned path
-        if fr['us_path']:
-            x, y = fr['robots']['us'][0], fr['robots']['us'][1]
-            pts = [(x, y)] + list(fr['us_path'])
-            ln, = ax.plot(*zip(*pts), ':', color='red', lw=1.5)
-            dyn.append(ln)
-        # lidar range + returns
-        x, y = fr['robots']['us'][0], fr['robots']['us'][1]
-        c = Circle((x, y), 1.0, fc='none', ec='red', lw=0.6, ls='--', alpha=0.6)
-        ax.add_patch(c)
-        dyn.append(c)
-        if fr['scan_pts']:
-            sc = ax.scatter(*zip(*fr['scan_pts']), s=6, c='yellow', zorder=6)
-            dyn.append(sc)
-        # opponent estimate
-        e = fr['opp_est']
-        if e and e.get('seen_ever'):
-            c = Circle((e['x'], e['y']), min(0.5, max(0.05, e['sigma'])), fc='none',
-                       ec='magenta', lw=1.5 if e['visible'] else 0.8, ls='-' if e['visible'] else '--')
-            ax.add_patch(c)
-            dyn.append(c)
-        # robots
-        for name, team, edge in (('us', team_us, 'red'), ('opp', team_opp, 'white')):
-            rx, ry, rth, faces, _ = fr['robots'][name]
-            for a in robot_artists(name, rx, ry, rth, faces, TEAM_COL[team], edge):
-                if hasattr(a, 'get_xy') or isinstance(a, Circle):
-                    ax.add_patch(a)
-                dyn.append(a)
-        # side panel
-        sc = fr['score']
-        lines = [
-            f"t = {fr['t']:5.1f} s   (left {f.match_duration - fr['t']:4.1f} s)",
-            '',
-            f"US  ({team_us}, red edge)      {sc[team_us]:3d} pts",
-            f"   state : {fr['us_state']}",
-            f"   faces : {fr['robots']['us'][3]}",
-            '',
-            f"OPP ({team_opp}, '{res['opponent']}')  {sc[team_opp]:3d} pts",
-            f"   state : {fr['opp_state']}",
-            f"   faces : {fr['robots']['opp'][3]}",
-            '',
-            'what we believe is left (true):',
-        ]
-        for s in f.stacks:
-            lines.append(f"   {s.label:4s} {s.name:8s} {fr['belief'].get(s.name, 0):3.1f}   ({fr['stacks'][s.name]})")
-        lines += ['', 'strategy log:'] + ['  ' + ln[:38] for ln in fr['log']]
-        dyn.append(side.text(0, 1, '\n'.join(lines), va='top', ha='left', family='monospace', fontsize=8.5))
-        ax.set_title(f"Eurobot 2027 sim  -  yellow {sc['yellow']}  :  {sc['blue']} blue", fontsize=12)
-        return dyn
-
-    anim = animation.FuncAnimation(fig, draw, frames=len(frames), interval=1000 / fps, blit=False)
+    anim = animation.FuncAnimation(fig, lambda i: r.draw(frames[i]),
+                                   frames=len(frames), interval=1000 / fps, blit=False)
     if path.endswith('.gif'):
         anim.save(path, writer=animation.PillowWriter(fps=fps))
     else:
@@ -310,30 +236,47 @@ def render(res, path, fps=20, speed=2.0, frame_dt=0.1):
     plt.close(fig)
 
 
+def dump_frames(res, path):
+    """Write the recorded frames as the same JSON bag2frames produces, so
+    replay_match can step through a headless run - no ROS, no bag, no
+    container. Tuples become lists through JSON; the renderer handles both."""
+    w = res['world']
+    with open(path, 'w') as fh:
+        json.dump({'frames': res['frames'], 'team': res['team'],
+                   'opponent': res['opponent'],
+                   'lidar_range': float(w.lidar.get('detect_range', 2.8)),
+                   'source': f"headless {res['opponent']} seed {res['seed']}"}, fh)
+
+
 def snapshot_png(res, path, index=-1):
-    """Single still frame (default: final state)."""
+    """Single still frame (default: the last recorded one).
+
+    `index` used to be accepted and silently ignored - it always drew the
+    live final world state regardless.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon
+
     w = res['world']
-    f = w.field
-    fig, ax = plt.subplots(figsize=(10, 7))
-    _draw_table(ax, f)
-    for s in f.stacks:
-        if w.stacks[s.name]:
-            ax.add_patch(Polygon(s.poly, closed=True, fc='#c99a5b', ec='k'))
-            ax.text(s.x, s.y, str(w.stacks[s.name]), ha='center', va='center')
-    for z in f.zones:
-        if w.zones[z.name]:
-            ax.add_patch(Polygon(f.pile_poly(z), closed=True, fc='#c99a5b', ec=TEAM_COL[z.team], lw=2))
-            ax.text(z.x, z.y, str(w.zones[z.name]), ha='center', va='center')
-    for k, col in (('us', 'red'), ('opp', 'white')):
-        tr = [(fr['robots'][k][0], fr['robots'][k][1]) for fr in res['frames']]
-        if tr:
-            ax.plot(*zip(*tr), '-', color=col, lw=1)
-        ax.add_patch(Polygon(w.robots[k].poly, closed=True, fc='none', ec=col, lw=2))
-    ax.set_title(f"us({res['team']}) {res['us']['total']} - {res['them']['total']} opp:{res['opponent']}")
+    frames = res['frames']
+    fig = plt.figure(figsize=(12.8, 7.2), dpi=100)
+    ax = fig.add_axes([0.02, 0.06, 0.70, 0.88])
+    side = fig.add_axes([0.73, 0.06, 0.26, 0.88])
+    r = TableRenderer(w.field, w.models, team_us=res['team'],
+                      lidar_range=float(w.lidar.get('detect_range', 2.8)),
+                      opponent_label=res['opponent']).attach(ax, side)
+    if frames:
+        i = index if index >= 0 else len(frames) + index
+        i = max(0, min(i, len(frames) - 1))
+        r.seed_trails(frames[:i])
+        r.draw(frames[i])
+    else:
+        # no frames recorded (record_every == 0): live final state, which is
+        # the same schema minus the strategy-debug keys
+        r.draw(w.snapshot())
+    ax.set_title(f"us({res['team']}) {res['us']['total']} - {res['them']['total']} "
+                 f"opp:{res['opponent']}")
     fig.savefig(path, dpi=90, bbox_inches='tight')
     plt.close(fig)
 
@@ -352,7 +295,12 @@ def main(argv=None):
     ap.add_argument('--no-avoid', action='store_true', help='opponent does not avoid us')
     ap.add_argument('--video', default=None, help='.mp4/.gif of the last match per opponent')
     ap.add_argument('--speed', type=float, default=2.0, help='video playback speed-up')
+    ap.add_argument('--fps', type=int, default=20, help='video frame rate')
     ap.add_argument('--png', default=None, help='final-state picture per opponent')
+    ap.add_argument('--frames', default=None,
+                    help='.json of the last match per opponent, for replay_match '
+                         '(same schema bag2frames writes, minus what only a live '
+                         'run records)')
     ap.add_argument('--json', default=None)
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args(argv)
@@ -371,7 +319,8 @@ def main(argv=None):
         for b in behaviors:
             last = None
             for seed in range(args.seed, args.seed + args.runs):
-                want = bool(args.video or args.png) and seed == args.seed + args.runs - 1
+                want = (bool(args.video or args.png or args.frames)
+                        and seed == args.seed + args.runs - 1)
                 res = run_match(field, sim_cfg, team, b, args.brain, params, seed=seed,
                                 avoid=not args.no_avoid, record_every=0.1 if want else 0.0,
                                 verbose=args.verbose)
@@ -381,11 +330,15 @@ def main(argv=None):
                       f"{u['end_zone']:7} {u['contacts']:3d}")
                 rows.append({k: v for k, v in res.items() if k not in ('world', 'frames')})
                 last = res
-            for opt, fn in ((args.video, render), (args.png, snapshot_png)):
+            # --speed/--fps were declared but never passed through, so they
+            # silently did nothing - render always used its own defaults.
+            for opt, fn, kw in ((args.video, render, {'fps': args.fps, 'speed': args.speed}),
+                                (args.png, snapshot_png, {}),
+                                (args.frames, dump_frames, {})):
                 if opt and last is not None:
                     root, ext = os.path.splitext(opt)
                     out = f'{root}_{team}_{b}{ext}' if multi else opt
-                    fn(last, out)
+                    fn(last, out, **kw)
                     print(f'   -> {out}')
     n = len(rows)
     if n:

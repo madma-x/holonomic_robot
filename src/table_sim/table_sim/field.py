@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field as dc_field
 from typing import List, Tuple
 
+import numpy as np
 import yaml
 
 from .geometry import rect_poly
@@ -21,6 +22,23 @@ _DIRS = {'+x': 0.0, '-x': 180.0, '+y': 90.0, '-y': -90.0}
 
 def other_team(team):
     return 'blue' if team == 'yellow' else 'yellow'
+
+
+def _point_in_polygon(p, poly):
+    """Ray-casting point-in-polygon test - any simple polygon, either
+    winding order, convex or not (the hand-traced castle outline isn't
+    guaranteed convex)."""
+    x, y = p
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y):
+            x_at_y = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < x_at_y:
+                inside = not inside
+    return inside
 
 
 def default_field_file():
@@ -69,7 +87,23 @@ class StackSpec(Rect):
 class ZoneSpec(Rect):
     team: str = 'yellow'
     approach: List[float] = dc_field(default_factory=list)
-    label: str = ''          # Y1..Y5 / B1..B5
+    label: str = ''          # Y1..Y5 / B1..B5 (rect) or YC1..YC4 / BC1..BC4 (circle)
+    shape: str = 'rect'      # 'rect' | 'circle'
+    capacity: int = 3        # max boxes
+    vertical_only: bool = False   # circle zones: only accepts flipped (vertical) boxes
+
+    def contains(self, p, margin=0.0):
+        if self.shape == 'circle':
+            return math.hypot(p[0] - self.x, p[1] - self.y) <= self.lx / 2 + margin
+        return super().contains(p, margin)
+
+    @property
+    def poly(self):
+        if self.shape == 'circle':
+            n, r = 24, self.lx / 2
+            return np.array([[self.x + r * math.cos(2 * math.pi * k / n),
+                             self.y + r * math.sin(2 * math.pi * k / n)] for k in range(n)])
+        return super().poly
 
 
 @dataclass
@@ -120,17 +154,50 @@ class Field:
             th = math.radians(z.get('th', 0.0))
             appr = [math.radians(a) for a in z['approach_deg']]
             self.zones.append(ZoneSpec('Y_' + z['name'], z['x'], z['y'], z['lx'], z['ly'], th,
-                                       'yellow', appr))
-            self.zones.append(ZoneSpec('B_' + z['name'], self.length - z['x'], z['y'], z['lx'],
-                                       z['ly'], math.pi - th, 'blue', [math.pi - a for a in appr]))
+                                       'yellow', appr, capacity=self.zone_capacity))
+            # `blue:` lets a zone's blue twin keep its own independent pose
+            # instead of being auto-mirrored from the yellow one (e.g. Max
+            # repositioned yellow's drop zones in the reference artifact but
+            # wants the opponent's left where they were).
+            bz = z.get('blue')
+            if bz is not None:
+                bth = math.radians(bz.get('th', 0.0))
+                bappr = [math.radians(a) for a in bz['approach_deg']]
+                self.zones.append(ZoneSpec('B_' + z['name'], bz['x'], bz['y'], z['lx'], z['ly'],
+                                           bth, 'blue', bappr, capacity=self.zone_capacity))
+            else:
+                self.zones.append(ZoneSpec('B_' + z['name'], self.length - z['x'], z['y'], z['lx'],
+                                           z['ly'], math.pi - th, 'blue', [math.pi - a for a in appr],
+                                           capacity=self.zone_capacity))
+
+        # circle zones: vertical (flipped) boxes only, up to 3 stacked (one
+        # drop can place 1, 2 or 3 at once - FaceTool.Goal.count).
+        for i, c in enumerate(cfg.get('decor_circles', []), 1):
+            r = float(c['r'])
+            a = math.radians(float(c.get('approach_deg', 0.0)))
+            self.zones.append(ZoneSpec(f'Y_circle_{i}', c['x'], c['y'], 2 * r, 2 * r, 0.0,
+                                       'yellow', [a], shape='circle', capacity=3, vertical_only=True))
+            bc = c.get('blue')
+            if bc is not None:
+                ba = math.radians(float(bc.get('approach_deg', 0.0)))
+                self.zones.append(ZoneSpec(f'B_circle_{i}', bc['x'], bc['y'], 2 * r, 2 * r, 0.0,
+                                           'blue', [ba], shape='circle', capacity=3, vertical_only=True))
+            else:
+                self.zones.append(ZoneSpec(f'B_circle_{i}', self.length - c['x'], c['y'], 2 * r, 2 * r,
+                                           0.0, 'blue', [math.pi - a], shape='circle', capacity=3,
+                                           vertical_only=True))
 
         # short IDs shown on the table
         for i, s in enumerate(sorted(self.stacks, key=lambda s: (round(s.x, 2), -s.y)), 1):
             s.label = f'P{i}'
         for team, prefix in (('yellow', 'Y'), ('blue', 'B')):
-            zs = sorted(self.team_zones(team), key=lambda z: (round(abs(z.x - self.length / 2), 2) * -1, -z.y))
+            zs = sorted((z for z in self.team_zones(team) if z.shape != 'circle'),
+                       key=lambda z: (round(abs(z.x - self.length / 2), 2) * -1, -z.y))
             for i, z in enumerate(zs, 1):
                 z.label = f'{prefix}{i}'
+            cs = sorted((z for z in self.team_zones(team) if z.shape == 'circle'), key=lambda z: -z.y)
+            for i, z in enumerate(cs, 1):
+                z.label = f'{prefix}C{i}'
 
         sz = cfg['start_zone']
         ez = cfg.get('end_zone', sz)
@@ -149,6 +216,15 @@ class Field:
             self.decor.append((c['x'], c['y'], c['r']))
             self.decor.append((self.length - c['x'], c['y'], c['r']))
 
+        # Castle area: only place the flip mechanism (vertical boxes, door)
+        # may be used. Traced by Max over the reference artwork.
+        cpts = cfg.get('castle', {}).get('points', [])
+        self.castle = {
+            'yellow': np.array(cpts, dtype=float) if cpts else np.zeros((0, 2)),
+            'blue': np.array([[self.length - x, y] for x, y in cpts], dtype=float)
+                    if cpts else np.zeros((0, 2)),
+        }
+
     # ------------------------------------------------------------------ util
     def _half(self, x):
         if abs(x - self.length / 2.0) < 0.05:
@@ -160,6 +236,16 @@ class Field:
             if o.name == name:
                 return o.label
         return name
+
+    def name_by_label(self):
+        """Inverse of label(): P1/Y1/YC1 -> internal stack/zone name.
+
+        Anything consuming the JSON on /sim/score or /strategy/status needs
+        this - those are keyed by label, while the renderer and the sim's own
+        dicts are keyed by internal name."""
+        m = {s.label: s.name for s in self.stacks}
+        m.update({z.label: z.name for z in self.zones})
+        return m
 
     def stack(self, name) -> StackSpec:
         return next(s for s in self.stacks if s.name == name)
@@ -174,9 +260,23 @@ class Field:
         z = self.start_zones[team]
         return z.x, z.y, self.start_headings[team]
 
-    def pile_poly(self, zone: ZoneSpec):
-        """Footprint of boxes dropped in a zone (centred, along its long axis)."""
-        return rect_poly(zone.x, zone.y, self.box_length, self.box_width, zone.th)
+    def in_castle(self, team, x, y) -> bool:
+        """True if (x, y) is inside `team`'s castle area (where flipping is
+        allowed). No castle defined in the config -> don't gate (True)."""
+        poly = self.castle.get(team)
+        if poly is None or len(poly) == 0:
+            return True
+        return _point_in_polygon((x, y), poly)
+
+    def pile_poly(self, zone: ZoneSpec, pose=None):
+        """Footprint of boxes dropped in a zone (centred, along its long
+        axis) - at `pose` (x, y, th) if given (where they were actually
+        dropped), else the zone's own preset centre/orientation."""
+        x, y, th = pose if pose is not None else (zone.x, zone.y, zone.th)
+        if zone.shape == 'circle':
+            # a vertical (flipped) box stands on its box_width x box_width end
+            return rect_poly(x, y, self.box_width, self.box_width, th)
+        return rect_poly(x, y, self.box_length, self.box_width, th)
 
     # --------------------------------------------------------- robot poses
     def _spot(self, kind, name, cx, cy, half_depth, appr, r_in, standoff, pre_dist):

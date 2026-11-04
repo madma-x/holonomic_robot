@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.8)
 project(motion_controller)
 
+# Default to Release - left unset (colcon's own default), this plugin ran
+# with no -O flags at all. computeVelocityCommands' candidate sampler does
+# ~1M ops/tick (see pure_pursuit_controller.cpp); unoptimized, that alone
+# was enough to miss controller_server's 20Hz loop under the container's
+# normal load (RViz + the rest of the Nav2 stack). `ros2 run ... --cmake-
+# args -DCMAKE_BUILD_TYPE=Debug` still overrides this when actually needed.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

@@ -1,0 +1,24 @@
+# Empty-table field for opponent-avoidance testing: table dimensions and
+# start zone only, no pick stacks, no drop zones, no castle/decor -
+# everything else game-specific stripped out so the local/global costmaps
+# only ever show the opponent, not pick-stack clutter. Used via
+# sim.launch.py's field_file:= argument (see .claude/skills/
+# avoidance-rviz-test/SKILL.md), never swapped into normal match testing.
+table:
+  length_x: 3.0
+  width_y: 2.0
+
+match_duration: 85.0
+
+box:
+  length: 0.32
+  width: 0.11
+  height: 0.11
+
+boxes_per_stack: 3
+zone_capacity: 3
+
+stacks: []
+zones: []
+
+start_zone: {x: 0.25, y: 1.00, lx: 0.50, ly: 0.50, heading: 0.0}

@@ -5,14 +5,24 @@ Click "2D Goal Pose" in RViz: the robot drives there in a straight line
 (holonomic, with speed/accel limits) and turns to the clicked heading.
 Publishes /cmd_vel only while a goal is active, so it can stay running
 next to any other controller.
+
+Current pose comes from a map -> base_footprint TF lookup, not /odom: /odom
+is the noisy, drifting dead-reckoning estimate (odom_sim) and lives in its
+own odom frame, which does not coincide with map - comparing it directly
+against a goal clicked in RViz's map-frame "2D Goal Pose" would compute a
+bogus error vector (frame mismatch), occasionally pointing straight at a
+wall instead of the clicked point.
 """
 
 import math
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from std_msgs.msg import Int32
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 
 def _yaw(q):
@@ -31,28 +41,53 @@ class GoalDriver(Node):
         self.declare_parameter('max_ang_vel', 2.5)
         self.declare_parameter('pos_tol', 0.01)
         self.declare_parameter('yaw_tol', 0.02)
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
         self.pose = None
         self.goal = None
         self.v = (0.0, 0.0)
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.create_subscription(Odometry, '/odom', self._odom, 10)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         self.create_subscription(PoseStamped, '/goal_pose', self._goal, 10)
-        self.dt = 0.05
+        self.create_subscription(Int32, '/sim/reset_event', self._on_reset, 10)
+        self.dt = 0.1
         self.create_timer(self.dt, self._tick)
         self.get_logger().info('goal_driver: click "2D Goal Pose" in RViz to move the robot')
 
-    def _odom(self, m):
-        p = m.pose.pose
-        self.pose = (p.position.x, p.position.y, _yaw(p.orientation))
+    def _on_reset(self, _msg):
+        # The robot teleports back to its start pose on /sim/reset; drop any
+        # in-progress goal and velocity ramp rather than trying to chase a
+        # stale goal from a stale assumed velocity.
+        self.goal = None
+        self.v = (0.0, 0.0)
+
+    def _update_pose(self):
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.get_parameter('map_frame').value,
+                self.get_parameter('base_frame').value,
+                rclpy.time.Time())
+        except TransformException:
+            return
+        t = tf.transform.translation
+        self.pose = (t.x, t.y, _yaw(tf.transform.rotation))
 
     def _goal(self, m):
         if m.header.frame_id not in ('map', 'odom', ''):
             self.get_logger().warn(f'goal in frame {m.header.frame_id}, expected map')
         self.goal = (m.pose.position.x, m.pose.position.y, _yaw(m.pose.orientation))
+        # Start the accel ramp fresh for every new goal: self.v is an
+        # internal model with no feedback from the robot's actual velocity,
+        # so carrying it over from a previous (possibly unfinished, possibly
+        # pre-/sim/reset) goal would apply acceleration limiting around a
+        # stale assumption and make the robot oscillate/overshoot for real.
+        self.v = (0.0, 0.0)
         self.get_logger().info('goal x=%.3f y=%.3f yaw=%.1f deg' % (self.goal[0], self.goal[1],
                                                                      math.degrees(self.goal[2])))
 
     def _tick(self):
+        self._update_pose()
         if self.goal is None or self.pose is None:
             return
         g = lambda n: self.get_parameter(n).value  # noqa: E731

@@ -1,0 +1,380 @@
+# Nav2 params for table_sim. Adapted from
+# robot_application/config/nav2_params_odom_only.yaml:
+#  - use_sim_time: True everywhere (sim publishes /clock)
+#  - footprint: real equilateral-triangle robot (side 0.34 m) instead of the
+#    old circular r=0.15 placeholder
+#  - controller_server publishes straight to /cmd_vel (no collision_monitor
+#    in sim - the real robot's own odom-only launch leaves it uninitialized
+#    too, so this isn't a regression)
+#  - bt_navigator BT xml paths and map_server.yaml_filename are left empty
+#    here; nav2_sim.launch.py fills them in at launch time via
+#    get_package_share_directory (no hardcoded absolute paths)
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odom
+    bt_loop_duration: 50
+    default_server_timeout: 20
+    transform_tolerance: 0.3
+    enable_groot_monitoring: False
+    default_nav_to_pose_bt_xml: ""
+    default_nav_through_poses_bt_xml: ""
+    error_code_names:
+      - follow_path_error_code
+      - compute_path_error_code
+
+bt_navigator_navigate_through_poses_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+bt_navigator_navigate_to_pose_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    cmd_vel_topic: "/cmd_vel"
+    controller_frequency: 20.0
+    # Widened from the Nav2 default (0.1): this busy container runs 7+ ROS
+    # nodes + RViz, and sim_node's own timer-driven clock can jitter enough
+    # under load to occasionally make a TF lookup land with ~zero margin,
+    # which tf2 treats as "extrapolation into the future" and aborts.
+    transform_tolerance: 0.5
+    min_x_velocity_threshold: 0.02
+    min_y_velocity_threshold: 0.02
+    min_theta_velocity_threshold: 0.01
+    failure_tolerance: 0.5
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+    current_goal_checker: "goal_checker"
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.2
+      movement_time_allowance: 10.0
+
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.05
+      # Was 3.14 (any heading = arrived), which meant the yaw packed into
+      # every NavigateToPose goal was simply never enforced - Nav2 reported
+      # "reached" the instant position converged, regardless of which way
+      # the robot was actually facing. 10deg matches the drop-alignment rule
+      # (adaptive_strategy: dropped pile within +-10deg of the zone's own
+      # placed angle) and FollowPath's own goal_yaw_tolerance below - both
+      # must agree, or whichever is looser decides what "arrived" means.
+      yaw_goal_tolerance: 0.175
+      stateful: False
+
+    FollowPath:
+      plugin: "motion_controller::PurePursuitController"
+      lookahead_dist: 0.3
+      lookahead_time: 0.6
+      min_lookahead: 0.2
+      max_lookahead: 0.8
+      k_xy: 1.8
+      # Holonomic heading control rotates toward the goal's final
+      # orientation from the start of the move (not the lookahead
+      # direction), so this gain needs real authority throughout the
+      # whole translation, not just a late blend near the goal.
+      k_theta: 0.8
+      # Isotropic now (was separate max_vx/max_vy - a SQUARE speed limit in
+      # body frame, so the achievable speed toward a fixed world direction
+      # swung by up to sqrt(2) as the robot turned). Same for max_a (was
+      # max_ax/max_ay, ramped per body axis against a stale yaw - throttled
+      # translation the faster the robot turned).
+      max_v: 1.0
+      max_wz: 1.0
+      max_a: 5.0
+      max_aw: 20.0
+      goal_dist_tolerance: 0.02
+      # Must stay <= goal_checker.yaw_goal_tolerance above, or the BT
+      # considers the goal reached before this controller's own terminal
+      # yaw stage (computeVelocityCommands) ever gets to run it.
+      goal_yaw_tolerance: 0.175
+      output_rotate_deg: 0.0
+      output_invert_x: false
+      output_invert_y: false
+      output_invert_wz: false
+      # Real robot default is true (its lidar does real 360 deg free-space
+      # clearing). table_sim's mast lidar deliberately only ever returns a
+      # hit for the opponent's mast (CLAUDE.md: "only sees the other robot")
+      # - everything else reads as a no-return, so the local costmap never
+      # clears to "known free" and stays permanently unknown. Previously
+      # that was "fixed" by disabling the whole check (sim never stopped for
+      # the opponent at all - confirmed by a live test: robot drove straight
+      # through a stationary opponent at full speed). The real fix is
+      # local_path_unknown_is_invalid: false below - permanently-unknown
+      # cells are then just traversable, and only actual lethal cells (the
+      # opponent, via obstacle_layer+inflation) invalidate the path, so the
+      # check is both enabled and sim-safe. Still sim-only - the real robot's
+      # lidar clears free space, so it keeps unknown_is_invalid: true.
+      enable_local_path_validity_check: true
+      local_path_check_distance: 1.2
+      local_path_invalid_cost_threshold: 253
+      local_path_unknown_is_invalid: false
+      # Holonomic local avoidance (motion_controller's velocity-space
+      # sampler): supersedes the check above (see pure_pursuit_controller.cpp)
+      # with per-cycle candidate re-selection, needed because a fast-closing
+      # obstacle outlasts that check's abort->patience->recovery latency -
+      # confirmed by a live test: opponent and robot closing head-on at
+      # ~0.4 m/s collided even with the check above enabled. Same
+      # unknown-space reasoning as local_path_unknown_is_invalid above.
+      local_avoidance_enabled: true
+      avoidance_unknown_is_obstacle: false
+      # Halved from the 0.25/0.1 defaults (Max's request - still too big
+      # even with the speed-based scaling below).
+      opponent_radius_m: 0.125
+      opponent_safety_margin_m: 0.05
+      # Mechanism 2 (opponent_radius_m/opponent_safety_margin_m disk) used to
+      # dominate mechanism 1 (footprint_padding/avoidance_min_clearance_m/
+      # avoidance_caution_margin_m above) even against a PARKED opponent,
+      # giving it an unnecessarily wide berth - confirmed live (see
+      # pure_pursuit_controller.hpp). These two scale the disk's extra
+      # margin by the opponent's tracked speed: ~0 extra margin below
+      # opponent_speed_deadband_m_s, full margin at/above
+      # opponent_speed_full_effect_m_s, so mechanism 2 only grows past
+      # mechanism 1 once there's real closing speed to anticipate.
+      opponent_speed_deadband_m_s: 0.1
+      opponent_speed_full_effect_m_s: 0.6
+      # Simple adaptive speed limit: slows max_v as we close on the
+      # opponent's current position, regardless of its own speed - more
+      # reaction room for both mechanisms the closer we are.
+      opponent_speed_limit_enabled: true
+      opponent_speed_limit_range_m: 0.6
+      opponent_speed_limit_min_scale: 0.35
+      publish_lookahead_point: true
+      lookahead_topic: /debug/lookahead_point
+
+controller_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      # Raised from 5.0 (Max's request): this is the obstacle-picture
+      # staleness mechanism 1/2 react against - at 2 m/s closing (1+1 m/s
+      # head-on) the old 0.2s worst-case period alone cost ~0.4m of
+      # reaction distance, eating most of the margin lidar.detect_range
+      # gave the opponent-tracking (see pure_pursuit_controller.cpp).
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      use_sim_time: True
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      # Empty string -> subscribe to <this costmap's ns>/footprint instead of
+      # a fixed polygon. The bare hexagon (base case below) isn't the whole
+      # story: a loaded face carries a box sticking out ~32cm (box.length),
+      # well past the body's own r_out (~0.155m) - a strategy node that
+      # knows what it's carrying publishes the real combined footprint
+      # dynamically (adaptive_strategy/strategy_node.py), so Nav2's
+      # planning/collision-checking actually accounts for it instead of
+      # treating a fully-loaded robot as if it were still just the bare
+      # hexagon (base footprint if nothing publishes: Nav2's own default
+      # circle, approximated from the `robot_radius` param - see
+      # sim_node.py's periodic republish, which is what actually gets
+      # this topic the real hexagon instead - see sim_node.py's
+      # _publish_footprint comment).
+      footprint: ""
+      # 0, not a positive margin - Nav2's padFootprint() (nav2_costmap_2d/
+      # src/footprint.cpp) pads by moving each vertex's x and y
+      # independently by `padding * sign(x)` / `padding * sign(y)` - a
+      # per-AXIS nudge, not a true parallel polygon offset. That's a
+      # harmless near-enough approximation for the old symmetric triangle,
+      # but on this hexagon it distorts edges wildly out of proportion
+      # (confirmed live via /global_costmap/published_footprint: edges
+      # came back as 0.41/0.08/0.42/0.08/0.41/0.28 instead of the real
+      # 0.22/0.08 alternating pattern - some vertices' sign(x)/sign(y)
+      # don't line up with either adjacent edge's true outward normal).
+      # Any hard-block margin now comes entirely from mechanism 1's own
+      # avoidance_min_clearance_m_ (a real edge-normal offset via
+      # offsetPolygon, see pure_pursuit_controller.cpp) instead.
+      footprint_padding: 0.0
+      transform_tolerance: 0.3
+      # opponent_layer, not a /scan-fed obstacle_layer: a raycast layer only
+      # clears cells ALONG its current ray, so a past opponent position
+      # sitting in the current one's shadow (as seen from our robot) never
+      # gets swept - confirmed live as a persistent trail of stale lethal
+      # blobs. This is a DELETEALL + re-ADD snapshot every publish instead
+      # (see sim_node.py's _publish_opponent_marker) - the opponent is only
+      # ever "here right now" or absent, nothing in between, and it's
+      # visibility-gated the same way /scan would be, so still exactly as
+      # sensor-realistic.
+      plugins: ["opponent_layer", "inflation_layer"]
+      opponent_layer:
+        plugin: "custom_objects_layer::CustomObjectsLayer"
+        enabled: true
+        topic: "/opponent_marker"
+        lethal_cost: 254
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        # Matched to global_costmap's own inflation_layer (Max's request) -
+        # the opponent is the only thing local_costmap's inflation_layer
+        # currently touches (its only other plugin is opponent_layer), so
+        # this makes the opponent's shaded footprint identical in both
+        # costmaps instead of two different inflation shapes for the same
+        # object. (local_costmap's own earlier reasoning for diverging -
+        # 1.0 then 0.5 - was about this avoidance layer's own circles, see
+        # /debug/opponent_prediction; superseded by this request.)
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.28
+        inflate_unknown: false
+        inflate_around_unknown: false
+      always_send_full_costmap: True
+  local_costmap_client:
+    ros__parameters:
+      use_sim_time: True
+  local_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 3.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      use_sim_time: True
+      # Empty string -> subscribe to <this costmap's ns>/footprint instead of
+      # a fixed polygon. The bare hexagon (base case below) isn't the whole
+      # story: a loaded face carries a box sticking out ~32cm (box.length),
+      # well past the body's own r_out (~0.155m) - a strategy node that
+      # knows what it's carrying publishes the real combined footprint
+      # dynamically (adaptive_strategy/strategy_node.py), so Nav2's
+      # planning/collision-checking actually accounts for it instead of
+      # treating a fully-loaded robot as if it were still just the bare
+      # hexagon (base footprint if nothing publishes: Nav2's own default
+      # circle, approximated from the `robot_radius` param - see
+      # sim_node.py's periodic republish, which is what actually gets
+      # this topic the real hexagon instead - see sim_node.py's
+      # _publish_footprint comment).
+      footprint: ""
+      # 0, matching local_costmap - see its footprint_padding comment:
+      # Nav2's padFootprint() distorts this hexagon's proportions badly.
+      footprint_padding: 0.0
+      resolution: 0.05
+      track_unknown_space: true
+      transform_tolerance: 0.3
+      # opponent_layer added so the GLOBAL planner also sees the opponent
+      # (previously only local_costmap did) and routes the path around it
+      # up front, instead of always planning straight through and leaving
+      # 100% of opponent avoidance to the local costmap safety layer during
+      # the follow. A snapshot layer (DELETEALL + re-ADD every publish, see
+      # sim_node.py's _publish_opponent_marker), not a /scan-fed
+      # obstacle_layer - a raycast layer only clears cells ALONG its current
+      # ray, so a past opponent position sitting in the current one's shadow
+      # (as seen from our robot) never gets swept, confirmed live as a
+      # persistent trail of stale lethal blobs across most of the table.
+      # Same topic/settings as local_costmap's own opponent_layer.
+      plugins: ["static_layer", "opponent_layer", "custom_objects_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        enabled: true
+      opponent_layer:
+        plugin: "custom_objects_layer::CustomObjectsLayer"
+        enabled: true
+        topic: "/opponent_marker"
+        lethal_cost: 254
+      custom_objects_layer:
+        plugin: "custom_objects_layer::CustomObjectsLayer"
+        enabled: true
+        topic: "/custom_objects"
+        lethal_cost: 254
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        cost_scaling_factor: 5.0
+        # NavFn doesn't sweep the real footprint during search - it treats
+        # inflated cost as a point-robot proxy for clearance. That only
+        # works if inflation_radius covers the robot's own circumscribed
+        # radius (vertex-to-center, ~0.155m for this hexagon - was 0.196m
+        # for the old pointy-triangle shape): anything smaller and the
+        # planner will happily draw a path whose centerline passes close
+        # enough to a lethal box cell that the robot's actual corners clip
+        # it while driving. 0.28 was originally ~0.196 + ~8cm margin.
+        # (An earlier, lower 0.12 was chasing a
+        # different bug - the robot starting "in" the wall - that turned
+        # out to be unrelated, in goal_driver's pose source, not inflation;
+        # starting in a moderately-costed, non-lethal cell doesn't block
+        # NavFn, so there's no tension between this and the tight start zone.)
+        # Raised again (Max's request, twice now: 0.28 -> 0.35 -> 0.45) for
+        # more wall/object margin while dodging the opponent. This is now
+        # PAST the 0.4 value that previously caused a DIFFERENT bug (robot
+        # trapped near a wall right after a pick: loaded footprint + wide
+        # wall inflation registered its own new, bigger footprint as
+        # already-in-collision, nowhere non-costed to replan from) - that
+        # incident was specific to the post-pick loaded-footprint case, not
+        # plain avoidance, so it's untested at this exact value. If
+        # picking/dropping near walls starts failing with boxes loaded,
+        # this is the first thing to revisit/lower.
+        inflation_radius: 0.28
+        inflate_unknown: false
+        inflate_around_unknown: false
+      always_send_full_costmap: True
+  global_costmap_client:
+    ros__parameters:
+      use_sim_time: True
+  global_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: True
+
+map_server:
+  ros__parameters:
+    use_sim_time: True
+    yaml_filename: ""
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 5.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.3
+      use_astar: false
+      allow_unknown: true
+      transform_tolerance: 0.3
+
+planner_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: True
+
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: True
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: True
+
+waypoint_follower_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: True
+    autostart: True
+    node_names: ['controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'waypoint_follower']
+
+lifecycle_manager_localization:
+  ros__parameters:
+    use_sim_time: True
+    autostart: True
+    node_names: ['map_server']

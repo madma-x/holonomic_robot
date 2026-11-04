@@ -160,7 +160,9 @@ class ScriptedOpponent:
         w, f = self.w, self.w.field
         cands = []
         for z in f.team_zones(self.team):
-            if w.zones[z.name] >= f.zone_capacity:
+            if z.vertical_only:
+                continue   # scripted opponents never flip, so can't use these
+            if w.zones[z.name] >= z.capacity:
                 continue
             for sp in f.drop_spots(z, self.r.model.r_in):
                 cands.append((math.hypot(sp.x - self.r.x, sp.y - self.r.y), z.name, sp))

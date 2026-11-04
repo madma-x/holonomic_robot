@@ -34,7 +34,11 @@ Max and Claude.
 - Holonomic, 3 omni wheels, **equilateral triangle, 340 mm per face**.
 - Each face holds **3 boxes** (as a stack). Faces assumed at 0°, 120°, 240°
   from +x of `base_footprint` (face 0 = +x) – **to confirm** on the real robot.
-- 2D lidar SL C1 **on a mast**: only sees the other robot (its mast), ~1 m.
+- 2D lidar SL C1 **on a mast**: only sees the other robot (its mast, min 7 cm
+  dia.), ~2.8 m (computed from angular resolution needing >=2 beam hits).
+- Camera on face 0 (front), 160° HFOV, 720p global shutter, 15 fps: reads
+  8×8 cm ArUco tags on all 4 box faces, ~2.5 m max range (computed for a
+  reliable decode) - used to check pick-stack occupancy while driving by.
 - Frames: `map -> odom -> base_footprint -> base_link -> base_scan`
   (`base_scan` yawed by π in `holonomic_robot_description/urdf/holonomic_robot.urdf`).
 - Motion command: `/cmd_vel` (`geometry_msgs/Twist`, body frame: vx, vy, wz).
@@ -65,10 +69,10 @@ stacks and piles are single objects with a box count; only robots collide).
 |---|---|
 | `config/field_2027.yaml` | table layout: stacks, zones, start zone, box size, scoring |
 | `config/sim.yaml` | robot size/limits, gripper timings, lidar, opponent |
-| `table_sim/world.py` | world model, match clock, collisions, lidar raycast, score (no ROS) |
+| `table_sim/world.py` | world model, match clock, collisions, lidar raycast, camera FOV check, score (no ROS) |
 | `table_sim/field.py` | layout loader, IDs, pick/drop robot poses (no ROS) |
 | `table_sim/opponents.py` | scripted opponents: mirror, greedy, raider, center_first, random, blocker, idle, teleop |
-| `table_sim/sim_node.py` | ROS node: `/cmd_vel` in; `/odom`, TF, `/scan`, `/joint_states`, `/clock` out; action `/face_tool`; services `/sim/start`, `/sim/reset`, `/game/start_match`; markers `/sim/table`, `/sim/markers`; JSON state `/sim/score` |
+| `table_sim/sim_node.py` | ROS node: `/cmd_vel` in; `/odom`, TF, `/scan`, `/camera/detections`, `/joint_states`, `/clock` out; action `/face_tool`; services `/sim/start`, `/sim/reset`, `/game/start_match`; markers `/sim/table`, `/sim/markers`; JSON state `/sim/score` |
 | `table_sim/sim_panel.py` | Tk match panel window (score, clock, P/Y/B counts, events, start/reset, pick/drop buttons) |
 | `table_sim/goal_driver.py` | click "2D Goal Pose" in RViz to drive our robot |
 | `table_sim/headless.py` | many matches without ROS, `--video out.mp4` |
@@ -86,12 +90,39 @@ ros2 action send_goal /face_tool table_sim_interfaces/action/FaceTool "{face: 0,
 ros2 topic echo /sim/score --once
 ```
 
+## Strategy: `src/adaptive_strategy`
+
+Sensor-realistic match strategy (not the old `robot_application/task_planner`,
+which is a dead-code-riddled priority scheduler with no real opponent
+awareness). Never reads ground truth (no `/opponent/odom`, no `/sim/score`) -
+only what the real robot will eventually have: `/cmd_vel` out, `/odom`,
+`/scan`, `/camera/detections`, `/face_tool` (sim-only for now - the real
+robot has no equivalent action yet, see `robot_actuators`), `/game/time_remaining`,
+`/game/match_active`.
+
+| file | role |
+|---|---|
+| `adaptive_strategy/core.py` | `StrategyCore` (the brain): `Observation`/`Command` dataclasses, pick/drop/go-home state machine, utility-based target scoring. No ROS imports - runs under `table_sim/headless.py --brain adaptive_strategy.core:StrategyCore` for fast iteration (no Docker needed, even on the Mac host). |
+| `adaptive_strategy/belief.py` | `StackBelief`: our own occupancy belief (camera sighting > our own pick result > time-decayed prior), decay rate higher for enemy-side stacks - this is what makes "steal enemy stacks early, play safe late" fall out of one utility score instead of a hardcoded match-phase rule. Drop-zone fill order = lowest-numbered not-yet-full zone (`Y1..Y5`/`B1..B5` are already sorted nearest-home-first). |
+| `adaptive_strategy/opponent_tracker.py` | `OpponentTracker`: clusters lidar hits into one position estimate with decaying confidence between sightings - only ever reacts to the opponent within lidar range, never tracks it at range. |
+| `adaptive_strategy/strategy_node.py` | ROS2 wrapper - current pose via `map -> base_footprint` TF (same pattern `goal_driver.py` uses), drives `/face_tool` via `ActionClient`. |
+| `launch/strategy.launch.py`, `config/strategy.yaml` | run alongside `sim.launch.py` (just another `/cmd_vel` publisher), tunable weights. |
+
+Out of scope for v1: the flip/door mechanic (vertical boxes, circle zones) -
+a scoring optimization on a working baseline, natural next step.
+
+Run: `ros2 launch table_sim sim.launch.py goal_driver:=false` then
+`ros2 launch adaptive_strategy strategy.launch.py`. Fast iteration without
+ROS: `python3 -m table_sim.headless --brain adaptive_strategy.core:StrategyCore --opponent all --runs 3`.
+
 ## Status / next steps
 
 1. ✅ Sim runs in the container, RViz shows the table.
-2. ⏳ Validate with Max: text markers (scale fix), match panel (`python3-tk`
-   needed), diagonal zone position/size, approach side of each zone, face
-   numbering, end zone = start square?
-3. Then: write the new adaptive strategy as its own package (not the old
-   `robot_application/task_planner`), driving the sim only through the real
-   robot's interfaces (`/cmd_vel`, `/odom`, `/scan`, `/face_tool`, `/game/*`).
+2. ✅ Validated with Max: text markers, match panel, diagonal zone position,
+   door/flip mechanic, camera + lidar ranges computed from real specs.
+3. ✅ Adaptive strategy package (`src/adaptive_strategy`) - picks, drops,
+   reacts to the opponent within lidar range, parks home in time. Validated
+   headless against all 7 scripted opponents (parks 14/14) and live in RViz.
+4. Next: tune collision/stuck-recovery against aggressive opponents (`raider`
+   scores low for us currently - see `StrategyCore.blocked_t`), then the
+   flip/door mechanic as a v2 scoring layer on top.

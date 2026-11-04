@@ -44,7 +44,9 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.05
-      yaw_goal_tolerance: 3.14
+      # Was 3.14 (any heading = arrived) - see FollowPath.goal_yaw_tolerance
+      # below, both must agree.
+      yaw_goal_tolerance: 0.175
       stateful: False
 
     FollowPath:
@@ -55,17 +57,16 @@ controller_server:
       max_lookahead: 0.8
       k_xy: 1.8
       k_theta: 0.1
-      max_vx: 1.0
-      max_vy: 1.0
+      # Isotropic now - see table_sim/config/nav2_params_sim.yaml for why
+      # (max_vx/max_vy and max_ax/max_ay were both per-body-axis, which
+      # coupled rotation and translation two different ways).
+      max_v: 1.0
       max_wz: 1.0
-      max_ax: 5.0
-      max_ay: 5.0
+      max_a: 5.0
       max_aw: 20.0
       goal_dist_tolerance: 0.02
-      goal_yaw_tolerance: 3.14
-      linear_speed_for_wz_scale_start: 0.12
-      linear_speed_for_wz_scale_end: 0.3
-      min_wz_scale_at_high_speed: 0.3
+      # Must stay <= goal_checker.yaw_goal_tolerance above.
+      goal_yaw_tolerance: 0.175
       output_rotate_deg: 0.0
       output_invert_x: false
       output_invert_y: false

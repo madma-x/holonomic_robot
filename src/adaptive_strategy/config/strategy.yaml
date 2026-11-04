@@ -1,0 +1,97 @@
+# Tunable weights for StrategyCore. Usable directly with headless.py's
+# --params flag (it accepts a plain dict or a ROS params file like this one).
+strategy_node:
+  ros__parameters:
+    robot_side: 0.34          # m, matches table_sim config/sim.yaml robot.side
+    face_angles_deg: [0, 120, 240]   # matches table_sim robot.face_angles_deg
+    boxes_per_face: 3
+    max_lin_vel: 1.0          # m/s, matches table_sim robot.max_lin_vel
+    max_lin_acc: 1.5
+    max_ang_vel: 4.0
+    go_home_margin_s: 5.0     # safety margin added to the straight-line ETA home
+    # Opponent avoidance only applies to the final, direct-controlled pick/
+    # drop approach - the coarse Nav2-driven legs already get reactive
+    # avoidance from Nav2's own local costmap (fed live by /scan), so
+    # duplicating it here would be redundant. Graduated: slows down inside
+    # avoid_slow_dist, hard stops at avoid_stop_dist.
+    avoid_slow_dist_m: 0.7
+    avoid_stop_dist_m: 0.35
+    pos_tol_m: 0.02
+    yaw_tol_rad: 0.05
+    nav_pos_tol_m: 0.08      # must stay >= Nav2's own goal_checker xy_goal_tolerance (0.05)
+    nav_yaw_tol_rad: 3.2     # must stay >= Nav2's own yaw_goal_tolerance (3.14, i.e. any heading)
+    verify_confidence_threshold: 0.7  # below this, turn the camera toward a pick target before committing
+    verify_timeout_s: 3.0
+
+    # StackBelief decay rates (per second of elapsed match time, applied
+    # only once a stack has gone this long without a direct camera/pick
+    # observation) - higher means "assume it's gone" sooner. Own side decays
+    # slowest (we haven't taken it, and the opponent has to cross the whole
+    # table to reach it first); enemy side fastest (assume they go there
+    # early); center in between. This is what makes "steal enemy stacks
+    # early when there's time, play safe late" an emergent utility-score
+    # result instead of a hardcoded match-phase rule.
+    decay_own_per_s: 0.002
+    decay_center_per_s: 0.01
+    decay_enemy_per_s: 0.02
+
+    # Opponent-reactive stack choice (B2) - parked for now, see pick_sequence
+    # below. Kept so the params still parse if B2 comes back.
+    contested_penalty: 0.7
+    contested_lookahead_s: 1.5
+    contested_radius_m: 0.8
+    contested_confidence_scale_m: 2.0
+
+    handling_time_s: 3.0      # rough pick/drop duration, used in the pick utility score
+    travel_speed_mps: 0.5     # rough average travel speed estimate, used for ETA/utility
+
+    # Never give up on the current pick/drop target - Max: "if not possible
+    # retry infinite." A huge blocked_timeout_s (core.py's stuck-detection in
+    # _goto) means the stuck-abandon/retry-a-different-side path essentially
+    # never fires within a match; the robot just keeps trying the one, due,
+    # strictly-ordered target.
+    blocked_timeout_s: 1000000.0
+
+    # Fixed pick order (Max): try strictly in this order, skipping only a
+    # stack already empty (ground truth from our own pick results/camera -
+    # see belief.py's next_pick). Not reordered by distance or opponent.
+    pick_sequence: [P5, P7, P9, P1, P3, P2, P4, P6, P8, P10]
+
+    # Drop-zone fill order Max gave as a full choreography, in own-team-
+    # relative terms (Y3/B3 -> kind rect index 3, YC2/BC2 -> kind circle
+    # index 2) so it applies whichever team we're playing:
+    #
+    #   pick P5, P7, P9 -> drop Y1 -> (flip face0, async/concurrent - see
+    #   core.py's _decide_flip, no explicit step needed) -> drop Y3 ->
+    #   pick P1, P3 (once a face frees up - core.py's mode-interleave) ->
+    #   drop YC1 -> drop YC2 -> drop Y5 (horizontal) -> drop YC3 -> pick
+    #   P2, P4, P6, P8, P10 as faces free up -> Y2 -> Y4 LAST (door finish -
+    #   B6, not implemented yet, so Y4 is currently just a plain horizontal
+    #   drop). YC4 removed from play entirely - see excluded_drop_zones.
+    #   `type` (H/V/D) is informational only - H vs V already falls out of
+    #   each zone's own shape, and D isn't implemented.
+    drop_sequence:
+      - {order: 1, kind: rect,   index: 1, type: H}   # Y1
+      - {order: 2, kind: rect,   index: 3, type: H}   # Y3
+      - {order: 3, kind: circle, index: 1, type: V}   # YC1
+      - {order: 4, kind: circle, index: 2, type: V}   # YC2
+      - {order: 5, kind: rect,   index: 5, type: H}   # Y5 (horizontal)
+      - {order: 6, kind: circle, index: 3, type: V}   # YC3
+      - {order: 7, kind: rect,   index: 2, type: H}   # Y2
+      - {order: 8, kind: rect,   index: 4, type: D}   # Y4 - saved for last (door finish, not yet implemented)
+
+    # Zones never to target at all (Max: "remove YC4") - excluded from
+    # best_drop's candidate list entirely, not just deprioritized.
+    excluded_drop_zones: [YC4]
+
+    # Circle (V) zones need a flip first (see adaptive_strategy/core.py) -
+    # false restricts best_drop to rect (H) zones only, for testing the new
+    # drop_sequence order on its own before adding the flip mechanism.
+    use_vertical_zones: true
+
+    # Exact dock poses Max tuned in the table-reference artifact's dock-pose
+    # editor - overrides the geometric drop_spots()/_best_face computation
+    # for whichever zone labels it has an entry for (see core.py's
+    # _load_dock_overrides). Path is relative to the package share dir at
+    # runtime (set by strategy.launch.py); headless.py needs the repo path.
+    dock_poses_file: dock_poses.json

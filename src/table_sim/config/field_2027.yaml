@@ -39,12 +39,23 @@ stacks:
 # `approach_deg`: direction(s) from the zone centre to the robot.
 zone_capacity: 3
 zones:
-  - {name: strip_hi, x: 0.25, y: 1.60, lx: 0.40, ly: 0.20, th: 0,   approach_deg: [-90]}
-  - {name: strip_lo, x: 0.25, y: 0.40, lx: 0.40, ly: 0.20, th: 0,   approach_deg: [90]}
+  # Repositioned by Max in the table-reference artifact: strip_hi/lo now
+  # flush against the x=0 castle wall (rotated 90deg), diag_hi/lo flattened
+  # to axis-aligned and pulled into the castle interior, opening toward the
+  # start zone. bridge left untouched. The opponent (blue) keeps the old,
+  # pre-edit positions via the `blue:` override - only our own (yellow)
+  # drop zones moved.
+  - {name: strip_hi, x: 0.112, y: 1.458, lx: 0.40, ly: 0.20, th: 90, approach_deg: [0],
+     blue: {x: 2.75, y: 1.60, th: 0, approach_deg: [-90]}}
+  - {name: strip_lo, x: 0.119, y: 0.537, lx: 0.40, ly: 0.20, th: 90, approach_deg: [0],
+     blue: {x: 2.75, y: 0.40, th: 0, approach_deg: [90]}}
   - {name: bridge,   x: 0.85, y: 1.00, lx: 0.40, ly: 0.20, th: 90,  approach_deg: [180]}
-  # diagonal grey bands between the circles (centre given by the team: x 550, y 700)
-  - {name: diag_hi,  x: 0.55, y: 1.30, lx: 0.40, ly: 0.20, th: -45, approach_deg: [-135]}
-  - {name: diag_lo,  x: 0.55, y: 0.70, lx: 0.40, ly: 0.20, th: 45,  approach_deg: [135]}
+  # Y3: approach from the top (+y), not below - Max corrected this directly
+  # after watching the replay.
+  - {name: diag_hi,  x: 0.436, y: 1.366, lx: 0.40, ly: 0.20, th: 0, approach_deg: [90],
+     blue: {x: 2.315, y: 1.435, th: -45, approach_deg: [-135]}}
+  - {name: diag_lo,  x: 0.436, y: 0.626, lx: 0.40, ly: 0.20, th: 0, approach_deg: [90],
+     blue: {x: 2.315, y: 0.565, th: 45, approach_deg: [135]}}
 
 # Start square (also the end-of-match zone unless end_zone is given).
 start_zone: {x: 0.25, y: 1.00, lx: 0.50, ly: 0.50, heading: 0.0}
@@ -56,8 +67,37 @@ scoring:
   robot_in_end_zone: 10      # robot fully inside its zone at the end
   robot_partly_in_end_zone: 0
 
+# Functional drop zones for vertical (flipped) boxes: capacity 1 each, see
+# field.py ZoneSpec(shape='circle'). approach_deg points from the circle
+# toward the table centre (where the diagonal zones sit), a reasonable
+# default approach side - PLACEHOLDER like the rest of this file.
 decor_circles:
-  - {x: 0.50, y: 1.60, r: 0.10}
-  - {x: 0.85, y: 1.25, r: 0.10}
-  - {x: 0.85, y: 0.75, r: 0.10}
-  - {x: 0.50, y: 0.40, r: 0.10}
+  # circle_1 (YC1) wasn't itself moved, but Y1/Y3 landing right next to it
+  # (see zones: above) boxed it in - every approach side is now tight, the
+  # old -30 even clips Y3's pile. 138deg is the least-bad side (~4cm
+  # clearance from both Y1 and Y3's piles) - still tight for the real robot,
+  # worth revisiting if Y1/Y3/YC1 get nudged apart later. Blue's BC1 keeps
+  # the untouched mirror of the ORIGINAL -30 (blue's own Y1/Y3 never moved,
+  # so blue was never boxed in).
+  - {x: 0.50, y: 1.60, r: 0.10, approach_deg: 138,
+     blue: {x: 2.50, y: 1.60, approach_deg: -150}}
+  - {x: 0.805, y: 1.315, r: 0.10, approach_deg: -20,
+     blue: {x: 2.15, y: 1.25, approach_deg: -160}}
+  - {x: 0.794, y: 0.703, r: 0.10, approach_deg: 20,
+     blue: {x: 2.15, y: 0.75, approach_deg: 160}}
+  - {x: 0.50, y: 0.40, r: 0.10, approach_deg: 30}
+
+# Castle area: the only place the flip mechanism (vertical boxes, door) may
+# be used. Traced by Max over the reference artwork - it hugs the start
+# zone and all 4 circle (YC1-4) zones, nothing more. Yellow-side polygon,
+# mirrored for blue at x -> 3 - x.
+castle:
+  points:
+    - [0.024, 0.305]
+    - [0.525, 0.309]
+    - [0.959, 0.696]
+    - [0.967, 0.939]
+    - [0.956, 1.340]
+    - [0.757, 1.525]
+    - [0.495, 1.705]
+    - [0.000, 1.705]

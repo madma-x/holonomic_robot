@@ -81,7 +81,7 @@ void CustomObjectsLayer::markersCallback(const visualization_msgs::msg::MarkerAr
 }
 
 void CustomObjectsLayer::updateBounds(
-  double /* robot_x */, double /* robot_y */, double /* robot_yaw */,
+  double robot_x, double robot_y, double /* robot_yaw */,
   double * min_x, double * min_y, double * max_x, double * max_y)
 {
   std::lock_guard<std::mutex> lk(mtx_);
@@ -96,6 +96,23 @@ void CustomObjectsLayer::updateBounds(
   };
   for (const auto & [_, obj] : objects_) { expand(obj); }
   for (const auto & [_, obj] : prev_objects_) { expand(obj); }
+
+  // A layer that never expands these bounds (objects_ and prev_objects_
+  // both permanently empty, e.g. a tracked object that's never yet been
+  // seen) never gets a non-degenerate region to run updateCosts over -
+  // and updateCosts is the only place current_ is set back to true after
+  // markersCallback sets it false. Confirmed live: with a layer instance
+  // tracking an intermittently-visible object (table_sim's opponent_layer)
+  // and the object never yet visible, the local costmap got permanently
+  // stuck "not current" and every Nav2 goal aborted with "Costmap timed
+  // out waiting for update" - fixed by always touching a tiny region
+  // around the robot, so this layer always participates in every update
+  // pass regardless of whether it currently has anything to draw.
+  constexpr double kMinTouchRadius = 0.05;
+  *min_x = std::min(*min_x, robot_x - kMinTouchRadius);
+  *min_y = std::min(*min_y, robot_y - kMinTouchRadius);
+  *max_x = std::max(*max_x, robot_x + kMinTouchRadius);
+  *max_y = std::max(*max_y, robot_y + kMinTouchRadius);
 }
 
 void CustomObjectsLayer::drawRectangle(

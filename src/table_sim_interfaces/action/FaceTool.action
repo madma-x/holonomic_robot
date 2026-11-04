@@ -1,8 +1,13 @@
-# Pick boxes from a stack, or drop the boxes held on a face into a zone.
+# Pick boxes from a stack, drop the boxes held on a face into a zone, or
+# flip a face's held boxes from horizontal to vertical (face 0 only - the
+# one face with the flip mechanism). A flipped face's boxes drop into
+# circle zones (capacity 3), one or more at a time - see `count`.
 uint8 PICK=0
 uint8 DROP=1
+uint8 FLIP=2
 uint8 face        # 0, 1 or 2 (face 0 points along +x of base_footprint)
-uint8 mode        # PICK or DROP
+uint8 mode        # PICK, DROP or FLIP
+uint8 count       # DROP only: boxes to drop (0 = as many as fit/held)
 ---
 bool success
 uint8 count       # boxes picked / dropped

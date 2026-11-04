@@ -54,6 +54,46 @@ def polygon_from_face_angles(side, face_angles):
     return np.array(verts)
 
 
+def truncated_triangle_apothem(long_edge, short_edge):
+    """Apothem (centre -> long-edge midpoint) of polygon_from_truncated_triangle.
+
+    Same shape as cutting a small equilateral triangle of side `short_edge`
+    off each 60deg corner of an equilateral triangle of side
+    `long_edge + 2 * short_edge` - the remaining middle of each original
+    edge is `long_edge` long, each cut is `short_edge` long. The apothem is
+    unchanged by the cut (the long edges sit on the original edges' lines).
+    """
+    return (long_edge + 2.0 * short_edge) / (2.0 * math.sqrt(3.0))
+
+
+def truncated_triangle_circumradius(long_edge, short_edge):
+    """Distance centre -> any of the 6 vertices (all equal, see below)."""
+    r_in = truncated_triangle_apothem(long_edge, short_edge)
+    return math.hypot(r_in, long_edge / 2.0)
+
+
+def polygon_from_truncated_triangle(long_edge, short_edge, face_angles):
+    """Hexagon: 3 long edges (`long_edge`, outward normals `face_angles`)
+    alternating with 3 short edges (`short_edge`) - an equilateral triangle
+    with each 60deg corner symmetrically cut off. By the 60deg-corner/
+    symmetric-cut geometry, all 6 vertices sit at the same distance from the
+    centre (truncated_triangle_circumradius), so sorting them by angle
+    around the centre is enough to get a valid CCW polygon regardless of
+    face_angles' order.
+    """
+    r_in = truncated_triangle_apothem(long_edge, short_edge)
+    pts = []
+    for a in face_angles:
+        nx, ny = math.cos(a), math.sin(a)
+        tx, ty = -math.sin(a), math.cos(a)
+        mx, my = r_in * nx, r_in * ny
+        half = long_edge / 2.0
+        pts.append((mx - half * tx, my - half * ty))
+        pts.append((mx + half * tx, my + half * ty))
+    pts.sort(key=lambda p: math.atan2(p[1], p[0]))
+    return np.array(pts)
+
+
 def point_in_poly(p, poly):
     """True if point p is inside convex CCW polygon (boundary counts)."""
     n = len(poly)

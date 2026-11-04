@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adaptive_strategy</name>
+  <version>0.1.0</version>
+  <description>Sensor-realistic adaptive match strategy for the Eurobot 2027 robot: picks, drops, reacts to the opponent, gets home in time. Drives table_sim (and later the real robot) only through /cmd_vel, /odom, /scan, /camera/detections, /face_tool, /game/*.</description>
+  <maintainer email="maxmorlion2024@gmail.com">Max</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>table_sim</exec_depend>
+  <exec_depend>table_sim_interfaces</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <!-- Nav2: coarse navigation legs go through table_sim's nav2_sim.launch.py
+       (the real robot's own controller plugin + costmap, fed by our own
+       belief - see strategy_node.py - not ground truth). -->
+  <exec_depend>nav2_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
