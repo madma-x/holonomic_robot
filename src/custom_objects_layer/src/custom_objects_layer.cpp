@@ -37,9 +37,13 @@ void CustomObjectsLayer::onInitialize()
 
 void CustomObjectsLayer::reset()
 {
+  // Keep objects_: they are what the publisher told us is there (belief piles / stacks, the tracked
+  // opponent), not sensor marks - a costmap clear (Nav2's recovery after a failed plan) used to drop
+  // them until the publisher's next message, up to 1 s with an empty table (Max). They are repainted
+  // on the next update cycle; the publisher's own DELETE / DELETEALL still removes them.
   std::lock_guard<std::mutex> lk(mtx_);
-  objects_.clear();
   prev_objects_.clear();
+  full_redraw_ = true;
   current_ = false;
 }
 
@@ -94,8 +98,22 @@ void CustomObjectsLayer::updateBounds(
     *max_x = std::max(*max_x, obj.x + half_diag);
     *max_y = std::max(*max_y, obj.y + half_diag);
   };
-  for (const auto & [_, obj] : objects_) { expand(obj); }
-  for (const auto & [_, obj] : prev_objects_) { expand(obj); }
+  if (full_redraw_) {
+    for (const auto & [_, obj] : objects_) { expand(obj); }
+    for (const auto & [_, obj] : prev_objects_) { expand(obj); }
+  } else {
+    // only what changed since the last paint (unchanged objects keep their cells and inflation)
+    for (const auto & [k, obj] : objects_) {
+      auto it = prev_objects_.find(k);
+      if (it == prev_objects_.end() || !(it->second == obj)) {
+        expand(obj);
+        if (it != prev_objects_.end()) {expand(it->second);}
+      }
+    }
+    for (const auto & [k, obj] : prev_objects_) {
+      if (objects_.find(k) == objects_.end()) {expand(obj);}
+    }
+  }
 
   // A layer that never expands these bounds (objects_ and prev_objects_
   // both permanently empty, e.g. a tracked object that's never yet been
@@ -189,6 +207,7 @@ void CustomObjectsLayer::updateCosts(
   }
 
   prev_objects_ = objects_;
+  full_redraw_ = false;
   current_ = true;
 }
 

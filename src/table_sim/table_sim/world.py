@@ -28,6 +28,7 @@ from .geometry import (closest_point_on_poly, poly_inside_poly, poly_segments,
 PICK = 0
 DROP = 1
 FLIP = 2
+DROP_FLOOR = 3     # put a face's horizontal stack down on the bare floor (anywhere), to repick it with another face
 
 
 class RobotModel:
@@ -48,6 +49,10 @@ class RobotModel:
         self.awmax = float(cfg.get('max_ang_acc', 12.0))
         self.cmd_timeout = float(cfg.get('cmd_timeout', 0.5))
         self.mast = float(cfg.get('mast_size', 0.08))
+        self.wheel_coupling = bool(cfg.get('wheel_coupling', False))
+        self.wheel_angles = [math.radians(a) for a in cfg.get('wheel_angles_deg', [60, 180, 300])]
+        self.wheel_base = float(cfg.get('wheel_base_m', 0.12))
+        self.wheel_vmax = float(cfg.get('wheel_max_speed', self.vmax))
         self.flip_face = int(cfg.get('flip_face', 0))   # the one face with the flip mechanism
         # r_in (apothem, centre -> long-edge midpoint) is unchanged by the
         # corner cut - face_center_local below still sits exactly on it.
@@ -165,10 +170,16 @@ class World:
         self.finished = False
         self.final_score = None
         self.events = []
-        self.stacks: Dict[str, int] = {s.name: f.boxes_per_stack for s in f.stacks}
+        self.castle_faults = 0          # times OUR robot entered the opponent's castle (forbidden)
+        self._in_keepout = False
+        self._in_start_keepout = False
+        self.keepout_from_s = 20.0     # opponent castle is only forbidden from this match time
+        self.stacks: Dict[str, int] = {s.name: (0 if s.steal_zone else f.boxes_per_stack) for s in f.stacks}
         self.zones: Dict[str, int] = {z.name: 0 for z in f.zones}
         self.zone_vertical: Dict[str, int] = {z.name: 0 for z in f.zones}  # of the above, how many are vertical (door posts)
-        self.zone_full_stack: Dict[str, bool] = {z.name: False for z in f.zones}
+        # First (and only bonus-earning) construction per zone: None / 'wall' /
+        # 'tower' / 'door'. Later boxes in the zone score +1 each, no bonus.
+        self.zone_kind: Dict[str, Optional[str]] = {z.name: None for z in f.zones}
         # Real pose of a zone's pile, set to where the robot's face actually
         # was on its first drop into that zone - "no box physics on
         # purpose" (one object per zone, just a count) still holds, but the
@@ -177,7 +188,15 @@ class World:
         # centre regardless of how/where the robot approached from.
         self.pile_pose: Dict[str, tuple] = {}
         self.stack_polys = {s.name: s.poly for s in f.stacks}
+        self._steal_zone = {s.name: s.steal_zone for s in f.stacks if s.steal_zone}
         self.pile_polys = {z.name: f.pile_poly(z) for z in f.zones}
+        # Stacks put down on the bare floor (DROP_FLOOR): {name: [x, y, th, count]}. Score nothing,
+        # are obstacles for both robots, any face can pick them back up.
+        self.floor_piles: Dict[str, list] = {}
+        # Over-picked stacks discarded next to a built wall (field discard_docks:): {name: [x, y, th,
+        # count, zone]}. Their boxes are counted in self.zones[zone] (extras, +1 each); solid like piles.
+        self.extra_piles: Dict[str, list] = {}
+        self._floor_n = 0
         self.robots: Dict[str, RobotState] = {}
         for name, team in (('us', self.team_us), ('opp', other_team(self.team_us))):
             m = self.models[name]
@@ -244,11 +263,6 @@ class World:
                 return False, 'face busy with pick/drop'
             if r.faces[face] == 0:
                 return False, 'face empty'
-            if r.vertical[face] and r.faces[face] != 1:
-                # reversing vertical -> horizontal is only for "elevating" the
-                # lone third box onto a door's two posts - needs the face
-                # holding just that one box, not a full flip back of 2-3
-                return False, 'can only un-flip a single box (to top a door)'
             if not self._flip_box_in_castle(r, face):
                 return False, 'flip only allowed inside the castle area'
             phase = 'elevating' if r.vertical[face] else 'flipping'
@@ -274,6 +288,13 @@ class World:
                 return False, 'face empty'
             r.action = Action(face, DROP, self.time, float(self.tool.get('drop_time', 0.6)),
                               phase='releasing', req_count=int(count))
+        elif mode == DROP_FLOOR:
+            if r.faces[face] == 0:
+                return False, 'face empty'
+            if r.vertical[face]:
+                return False, 'face is flipped vertical, only horizontal stacks go on the floor'
+            r.action = Action(face, DROP_FLOOR, self.time, float(self.tool.get('drop_time', 0.6)),
+                              phase='releasing')
         else:
             return False, 'bad mode'
         return True, ''
@@ -388,10 +409,23 @@ class World:
         max_lat = float(self.tool.get('pick_max_lateral', 0.12))
         c, n = self.face_frame(r, f)
         best, best_d = None, float('inf')
-        for name, count in self.stacks.items():
+        floor = {k: v[3] for k, v in self.floor_piles.items()}
+        for name, count in list(self.stacks.items()) + list(floor.items()):
             if count <= 0:
                 continue
-            poly = self.stack_polys[name]
+            if name in self.floor_piles:
+                x, y, th, _ = self.floor_piles[name]
+                poly = rect_poly(x, y, self.field.box_length, self.field.box_width, th)
+                sz = None
+            else:
+                poly = self.stack_polys[name]
+                sz = self._steal_zone.get(name)
+            if sz is not None:                       # a pile in an enemy drop zone: face 0 only
+                own = self.field.zone(sz).team == r.team
+                lab = self.field.zone(sz).label
+                if f != 0 or (own and not (lab.endswith('5') or lab[1:] in self.field.own_repick_inside)):
+                    continue            # own pile: the door zone (repick) and the own_repick_inside walls only
+                poly = self.field.pile_poly(self.field.zone(sz), self.pile_pose.get(sz))
             _, d = closest_point_on_poly(c, poly)
             if d > reach:
                 continue
@@ -439,6 +473,29 @@ class World:
                 return z.name, None
         return None, None
 
+    def dock_under_face(self, r: RobotState, f):
+        """Closest own zone with a dock pose (field yaml docks:) for a drop off face f:
+        (zone_name, slot, pos_err_m, yaw_err_rad), or None. Vertical: per occupied slot, the robot
+        pose shifted so that slot's box sits where the centre slot's would at the dock."""
+        a = r.th + r.model.face_angles[f]
+        bw = self.field.box_width
+        tangent = np.array([-math.sin(a), math.cos(a)])
+        slots = [s for s in range(3) if r.vertical_slots[f][s]] if r.vertical[f] else [None]
+        best = None
+        for z in self.field.team_zones(r.team):
+            if z.dock is None or (z.shape == 'circle' and not r.vertical[f]):
+                continue
+            dx_, dy_, dh = z.dock
+            # rect zone: the whole face drops there (horizontal wall, or vertical door posts), robot
+            # pose = the dock unshifted; circle: one vertical slot, dock shifted for that slot
+            for s_ in (slots if z.shape == 'circle' else [None]):
+                p = np.array([r.x, r.y]) + (tangent * ((s_ - 1) * bw) if s_ is not None else 0.0)
+                e = math.hypot(p[0] - dx_, p[1] - dy_)
+                eth = abs(wrap(a - dh))
+                if best is None or e + 0.1 * eth < best[2] + 0.1 * best[3]:
+                    best = (z.name, s_, e, eth)
+        return best
+
     def _update_action(self, r: RobotState):
         a = r.action
         if a is None or a.done:
@@ -450,24 +507,89 @@ class World:
                 if name is None:
                     self._finish(r, a, False, 0, 'no stack in reach')
                     return
+                if name in self.floor_piles:
+                    fp = self.floor_piles[name]
+                    n = min(r.free_slots(a.face), fp[3])
+                    fp[3] -= n
+                    if fp[3] <= 0:
+                        del self.floor_piles[name]
+                    r.faces[a.face] += n
+                    a.attached, a.count, a.target = True, n, name
+                    a.duration = a.engage + n * float(self.tool.get('pick_time_per_box', 0.2))
+                    a.phase = 'lifting'
+                    self._event(f'{r.name} picked {n} from floor pile {name} on face {a.face}')
+                    return
                 n = min(r.free_slots(a.face), self.stacks[name])
                 self.stacks[name] -= n
+                sz = self._steal_zone.get(name)
+                if sz is not None:                   # stolen from the opponent's pile
+                    self.zones[sz] -= n
+                    if self.zones[sz] < self.field.zone_capacity:
+                        self.zone_kind[sz] = None
+                    if self.zones[sz] <= 0:
+                        self.pile_pose.pop(sz, None)
                 r.faces[a.face] += n
                 a.attached, a.count, a.target = True, n, name
                 a.duration = a.engage + n * float(self.tool.get('pick_time_per_box', 0.2))
                 a.phase = 'lifting'
                 self._event(f'{r.name} picked {n} from {self.field.label(name)} on face {a.face}')
             elif a.attached and el >= a.duration:
-                self._finish(r, a, True, a.count, f'picked {a.count} from {self.field.label(a.target)}')
+                lbl = a.target if a.target.startswith('floor') else self.field.label(a.target)
+                self._finish(r, a, True, a.count, f'picked {a.count} from {lbl}')
+        elif a.mode == DROP_FLOOR:
+            if el >= a.duration:
+                x, y, th = self._face_drop_pose(r, a.face)
+                self._floor_n += 1
+                name = f'floor{self._floor_n}'
+                n = r.faces[a.face]
+                self.floor_piles[name] = [x, y, th, n]
+                r.faces[a.face] = 0
+                self._event(f'{r.name} put {n} on the floor ({name}) from face {a.face} at ({x:.2f}, {y:.2f})')
+                self._finish(r, a, True, n, f'dropped {n} on the floor ({name})')
         else:
+            if el >= a.duration and self._try_discard(r, a):
+                return
             if el >= a.duration:
                 zname, slot = self.zone_under_face(r, a.face)
+                dk = self.dock_under_face(r, a.face)
+                tol_p = float(self.tool.get('dock_tol_m', 0.02))
+                tol_a = math.radians(float(self.tool.get('dock_tol_deg', 5.0)))
+                docked = dk is not None and dk[2] <= tol_p and dk[3] <= tol_a
+                if docked:
+                    zname = dk[0]
+                    if dk[1] is not None:
+                        slot = dk[1]
+                elif dk is not None and (dk[2] < 0.15 or (zname is not None and self.field.zone(zname).dock is not None)):
+                    # a zone with a dock pose: only the dock counts (Max) - no "close enough" overlap
+                    self._finish(r, a, False, 0,
+                                 f'{self.field.label(dk[0])} not at the dock pose '
+                                 f'({dk[2] * 100:.1f} cm, {math.degrees(dk[3]):.1f} deg off)')
+                    return
                 if zname is None:
                     self._finish(r, a, False, 0, 'not above a drop zone')
                     return
                 zone = self.field.zone(zname)
                 label = self.field.label(zname)
                 face_vertical = r.vertical[a.face]
+                if zone.shape == 'rect' and not face_vertical and zone.dock is None:
+                    # A horizontal drop must be centred on the zone and square
+                    # to it (tolerances in sim.yaml tool.drop_*), not merely
+                    # overlap it.
+                    px, py, pth = self._face_drop_pose(r, a.face)
+                    c, sn = math.cos(-zone.th), math.sin(-zone.th)
+                    dx, dy = px - zone.x, py - zone.y
+                    along, across = dx * c - dy * sn, dx * sn + dy * c
+                    dth = abs(wrap(pth - zone.th)) % math.pi
+                    dth = min(dth, math.pi - dth)
+                    t = self.tool
+                    if (abs(along) > float(t.get('drop_tol_along_m', 0.06))
+                            or abs(across) > float(t.get('drop_tol_across_m', 0.05))
+                            or math.degrees(dth) > float(t.get('drop_tol_angle_deg', 10.0))):
+                        self._finish(r, a, False, 0,
+                                     f'{self.field.label(zname)} drop not centred '
+                                     f'(along {along * 100:+.0f} cm, across {across * 100:+.0f} cm, '
+                                     f'{math.degrees(dth):.0f} deg)')
+                        return
                 vcount = self.zone_vertical[zname]
                 total = self.zones[zname]
                 hcount = total - vcount
@@ -476,7 +598,7 @@ class World:
                     if not face_vertical:
                         self._finish(r, a, False, 0, f'{label} needs flipped (vertical) boxes')
                         return
-                    space = zone.capacity - total
+                    space = 1 - total   # one tower per circle
                     if space <= 0:
                         self._finish(r, a, False, 0, f'{label} is full')
                         return
@@ -508,13 +630,22 @@ class World:
                     if vcount == 1:
                         self._finish(r, a, False, 0, f'{label} has 1 post - needs its second vertical box')
                         return
-                    space = zone.capacity - total
+                    if vcount == 2 and a.face != r.model.flip_face:
+                        self._finish(r, a, False, 0, f'{label} lid must come from the flip face (elevated)')
+                        return
+                    # Before its construction a zone takes at most one stack
+                    # (zone.capacity); once built, extras fill up to
+                    # field.zone_max_boxes (+1 each).
+                    limit = (self.field.zone_max_boxes if self.zone_kind[zname]
+                             else zone.capacity)
+                    if self.zone_kind[zname] == 'door' and not self.field.door_accepts_extras:
+                        limit = total
+                    space = limit - total
                     if space <= 0:
                         self._finish(r, a, False, 0, f'{label} is full')
                         return
                     n = 1 if vcount == 2 else min(space, r.faces[a.face])
 
-                one_stack = (total == 0 and n == zone.capacity)
                 # Circle zones always drop vertical (world rule above), so
                 # they used to be excluded by `not face_vertical` alongside
                 # door posts (which DO want excluding - a door's render uses
@@ -533,17 +664,74 @@ class World:
                     self.zone_vertical[zname] += n
                     if slot is not None and n == 1:
                         r.vertical_slots[a.face][slot] = False
-                if vcount == 2 and not face_vertical:
-                    r.door_used = True   # door completed: 2 posts + this lid
-                    one_stack = True
-                if one_stack:
-                    self.zone_full_stack[zname] = True
+                if self.zone_kind[zname] is None:
+                    if zone.shape == 'circle':
+                        self.zone_kind[zname] = 'tower'
+                    elif vcount == 2 and not face_vertical:
+                        r.door_used = True   # door completed: 2 posts + this lid
+                        self.zone_kind[zname] = 'door'
+                    elif not face_vertical and self.zones[zname] >= zone.capacity:
+                        self.zone_kind[zname] = 'wall'
                 r.faces[a.face] -= n
                 if r.faces[a.face] == 0:
                     r.vertical[a.face] = False
                     r.vertical_slots[a.face] = [False, False, False]
                 self._event(f'{r.name} dropped {n} in {label} from face {a.face}')
                 self._finish(r, a, True, n, f'dropped {n} in {label}')
+
+    def discard_under_face(self, r: RobotState, f):
+        """Closest discard dock of r's team for face f: (zone_name, pos_err_m, yaw_err_rad) or None."""
+        a = r.th + r.model.face_angles[f]
+        best = None
+        for zname, dx_, dy_, dh in self.field.discard_docks.get(r.team, []):
+            e, eth = math.hypot(r.x - dx_, r.y - dy_), abs(wrap(a - dh))
+            if best is None or e + 0.1 * eth < best[1] + 0.1 * best[2]:
+                best = (zname, e, eth)
+        return best
+
+    def _try_discard(self, r: RobotState, a):
+        """A horizontal drop at a discard dock: the boxes go next to the zone's built wall as extras.
+        True if this drop was handled here (accepted or refused)."""
+        if r.faces[a.face] <= 0:
+            return False
+        dk = self.discard_under_face(r, a.face)
+        if dk is None:
+            return False
+        zname, e, eth = dk
+        if e > float(self.tool.get('discard_tol_m', 0.06)) or eth > math.radians(float(self.tool.get('discard_tol_deg', 10.0))):
+            return False
+        label = self.field.label(zname)
+        kind = self.zone_kind[zname]
+        if kind != 'wall' and not (kind == 'door' and self.field.door_accepts_extras):
+            self._finish(r, a, False, 0, f'{label} discard: its wall is not built yet')
+            return True
+        space = self.field.discard_max_boxes - self.zones[zname]
+        if space <= 0:
+            self._finish(r, a, False, 0, f'{label} is full (extras)')
+            return True
+        vert = r.vertical[a.face]
+        n = min(space, r.faces[a.face])          # standing boxes: all of them in one action (Max)
+        if vert:
+            # each standing box lands where it stood on the face (its own slot), as it stood
+            k = 0
+            for slot in range(3):
+                if k >= n or not r.vertical_slots[a.face][slot]:
+                    continue
+                x, y, th = self._face_drop_pose_slot(r, a.face, slot)
+                self.extra_piles[f'extra_{label}_{len(self.extra_piles) + 1}'] = [x, y, th, 1, zname, True]
+                k += 1
+        else:
+            x, y, th = self._face_drop_pose(r, a.face)
+            self.extra_piles[f'extra_{label}_{len(self.extra_piles) + 1}'] = [x, y, th, n, zname, False]
+        self.zones[zname] += n
+        r.faces[a.face] -= n
+        if r.faces[a.face] == 0:
+            r.vertical[a.face] = False
+            r.vertical_slots[a.face] = [False, False, False]
+        self._event(f'{r.name} discarded {n}{" standing" if vert else ""} next to {label} from face {a.face} '
+                    f'(extras, +1 each)')
+        self._finish(r, a, True, n, f'discarded {n} in {label}')
+        return True
 
     def _update_flip_action(self, r: RobotState):
         a = r.flip_action
@@ -573,6 +761,34 @@ class World:
         h = dt / n
         for _ in range(n):
             self._substep(h)
+        self._sync_steal()
+        self._check_keepout()
+
+    def _sync_steal(self):
+        """Steal 'stacks' mirror the horizontal piles in the enemy drop zones (towers/doors are not pickable)."""
+        for name, sz in self._steal_zone.items():
+            ok = self.zone_kind[sz] in (None, 'wall') and self.zone_vertical[sz] == 0
+            self.stacks[name] = self.zones[sz] if ok else 0
+
+    def _check_keepout(self):
+        """Our robot's centre inside the opponent's castle is a fault (counted once per entry)."""
+        r = self.robots['us']
+        inside = (self.field.in_castle(other_team(r.team), r.x, r.y)
+                  and self.match_t0 is not None
+                  and self.time - self.match_t0 >= self.keepout_from_s)
+        if inside and any(self.field.zone(z).team != r.team and math.hypot(r.x - self.field.zone(z).x, r.y - self.field.zone(z).y) < 0.7
+                          for n, z in self._steal_zone.items()):
+            inside = False                       # on its way to / picking a stealable pile: allowed
+        if inside and not self._in_keepout:
+            self.castle_faults += 1
+            self._event(f'FAULT: us entered the opponent castle at ({r.x:.2f}, {r.y:.2f})')
+        self._in_keepout = inside
+        # the opponent's start zone is forbidden at all times (counted with the castle faults)
+        in_start = self.match_t0 is not None and self.field.in_start_keepout(r.team, r.x, r.y)
+        if in_start and not self._in_start_keepout:
+            self.castle_faults += 1
+            self._event(f'FAULT: us entered the opponent start zone at ({r.x:.2f}, {r.y:.2f})')
+        self._in_start_keepout = in_start
 
     def _opponent_safety_brake(self, tvx, tvy, opp, other):
         """Scale down the component of `opp`'s target world-frame velocity
@@ -627,6 +843,14 @@ class World:
             r.vx += dvx
             r.vy += dvy
             r.w += max(-m.awmax * h, min(m.awmax * h, cw - r.w))
+            if m.wheel_coupling:
+                # driving and turning share the wheels' top speed: scale (vx, vy, w) together
+                bvx, bvy = c * r.vx + s * r.vy, -s * r.vx + c * r.vy
+                wmax_ = max(abs(-math.sin(b) * bvx + math.cos(b) * bvy + m.wheel_base * r.w)
+                            for b in m.wheel_angles)
+                if wmax_ > m.wheel_vmax > 0:
+                    k = m.wheel_vmax / wmax_
+                    r.vx, r.vy, r.w = r.vx * k, r.vy * k, r.w * k
             r.x += r.vx * h
             r.y += r.vy * h
             r.th = wrap(r.th + r.w * h)
@@ -655,6 +879,10 @@ class World:
                 out.append((f.pile_poly(f.zone(n), pose), pose[0], pose[1], 0.2, n))
             else:
                 out.append((self.pile_polys[n], f.zone(n).x, f.zone(n).y, 0.2, n))
+        for n, (x, y, th, c) in self.floor_piles.items():
+            out.append((rect_poly(x, y, f.box_length, f.box_width, th), x, y, 0.2, n))
+        for n, (x, y, th, c, _z, v) in self.extra_piles.items():
+            out.append((rect_poly(x, y, f.box_width if v else f.box_length, f.box_width, th), x, y, 0.2, n))
         return out
 
     def _collide(self):
@@ -686,7 +914,7 @@ class World:
                     # still held) - don't let that self-overlap fight the
                     # robot's own commanded motion; the bare body (index 0)
                     # still can't drive through the built posts.
-                    if i > 0 and sname == r.door_zone:
+                    if i > 0 and (sname == r.door_zone or sname.startswith('extra_')):
                         continue
                     res = sat_mtv(poly, spoly)
                     if res:
@@ -769,14 +997,13 @@ class World:
     def score(self, team):
         f = self.field
         sc = f.scoring
-        boxes = full = 0
+        boxes = 0
+        kinds = {'wall': 0, 'tower': 0, 'door': 0}
         for z in f.team_zones(team):
             boxes += self.zones[z.name]
-            # "full stack" bonus is for a complete 3-box zone (per the
-            # rulebook placeholder comment); capacity-1 circle zones are
-            # never a "stack" so don't earn it, just their per-box points.
-            if z.capacity >= 3 and self.zones[z.name] >= z.capacity:
-                full += 1
+            k = self.zone_kind[z.name]
+            if k:
+                kinds[k] += 1
         robot = next(r for r in self.robots.values() if r.team == team)
         ez = f.end_zones[team]
         poly = robot.poly
@@ -786,13 +1013,16 @@ class World:
             zone_state = 'partial'
         else:
             zone_state = 'out'
-        total = boxes * sc.get('box_in_zone', 0) + full * sc.get('full_stack_bonus', 0)
+        total = boxes * sc.get('box_in_zone', 0)
+        total += sum(n * sc.get(f'{k}_bonus', 0) for k, n in kinds.items())
         if zone_state == 'full':
             total += sc.get('robot_in_end_zone', 0)
         elif zone_state == 'partial':
             total += sc.get('robot_partly_in_end_zone', 0)
-        return {'boxes': boxes, 'full_stacks': full, 'end_zone': zone_state,
-                'carried': robot.carried(), 'contacts': robot.contacts, 'total': int(total)}
+        return {'boxes': boxes, 'walls': kinds['wall'], 'towers': kinds['tower'],
+                'doors': kinds['door'], 'end_zone': zone_state,
+                'carried': robot.carried(), 'contacts': robot.contacts, 'castle_faults': self.castle_faults if team == self.team_us else 0,
+                'total': int(total)}
 
     def _end_match(self):
         self.finished = True
@@ -813,4 +1043,7 @@ class World:
                        for k, r in self.robots.items()},
             'stacks': dict(self.stacks),
             'zones': dict(self.zones),
+            'floor': {k: list(v) for k, v in self.floor_piles.items()},
+            'extra': {k: list(v[:4]) + [v[4], v[5]] for k, v in self.extra_piles.items()},
+            'pile_poses': {k: list(v) for k, v in self.pile_pose.items()},
         }

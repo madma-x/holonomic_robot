@@ -67,7 +67,7 @@ controller_server:
       # (adaptive_strategy: dropped pile within +-10deg of the zone's own
       # placed angle) and FollowPath's own goal_yaw_tolerance below - both
       # must agree, or whichever is looser decides what "arrived" means.
-      yaw_goal_tolerance: 0.175
+      yaw_goal_tolerance: 0.50   # coarse leg only: the strategy's docking stage corrects the rest
       stateful: False
 
     FollowPath:
@@ -81,21 +81,31 @@ controller_server:
       # orientation from the start of the move (not the lookahead
       # direction), so this gain needs real authority throughout the
       # whole translation, not just a late blend near the goal.
-      k_theta: 0.8
+      k_theta: 2.5               # was 0.8: heading P gain (rotation was the slow part of every leg)
       # Isotropic now (was separate max_vx/max_vy - a SQUARE speed limit in
       # body frame, so the achievable speed toward a fixed world direction
       # swung by up to sqrt(2) as the robot turned). Same for max_a (was
       # max_ax/max_ay, ramped per body axis against a stale yaw - throttled
       # translation the faster the robot turned).
       max_v: 1.0
-      max_wz: 1.0
+      max_wz: 3.0                # was 1.0 (the robot can do 4 rad/s, sim.yaml max_ang_vel)
       max_a: 5.0
       max_aw: 20.0
       goal_dist_tolerance: 0.02
       # Must stay <= goal_checker.yaw_goal_tolerance above, or the BT
       # considers the goal reached before this controller's own terminal
       # yaw stage (computeVelocityCommands) ever gets to run it.
-      goal_yaw_tolerance: 0.175
+      goal_yaw_tolerance: 0.50
+      # Terminal docking stage (see pure_pursuit_controller.hpp): inside
+      # docking_distance of the goal, cross-track error is corrected against
+      # the fixed approach line instead of the pure-pursuit lookahead point -
+      # added because the sim robot was arriving at pick/drop poses with side
+      # velocity from a curved upstream segment and overshooting past the
+      # docking line before settling with a residual y offset.
+      docking_enabled: true
+      docking_distance: 0.3
+      docking_lookback_dist: 0.4
+      k_lateral: 2.5
       output_rotate_deg: 0.0
       output_invert_x: false
       output_invert_y: false
@@ -128,7 +138,9 @@ controller_server:
       avoidance_unknown_is_obstacle: false
       # Halved from the 0.25/0.1 defaults (Max's request - still too big
       # even with the speed-based scaling below).
-      opponent_radius_m: 0.125
+      # 0.125 -> 0.27 (Max: we still hit the opponent): a loaded robot like ours reaches 0.27 m; our own
+      # side of the stop distance is already the loaded footprint's circumradius (0.27)
+      opponent_radius_m: 0.27
       opponent_safety_margin_m: 0.05
       # Mechanism 2 (opponent_radius_m/opponent_safety_margin_m disk) used to
       # dominate mechanism 1 (footprint_padding/avoidance_min_clearance_m/
@@ -145,7 +157,7 @@ controller_server:
       # opponent's current position, regardless of its own speed - more
       # reaction room for both mechanisms the closer we are.
       opponent_speed_limit_enabled: true
-      opponent_speed_limit_range_m: 0.6
+      opponent_speed_limit_range_m: 0.8
       opponent_speed_limit_min_scale: 0.35
       publish_lookahead_point: true
       lookahead_topic: /debug/lookahead_point
@@ -209,6 +221,9 @@ local_costmap:
       # ever "here right now" or absent, nothing in between, and it's
       # visibility-gated the same way /scan would be, so still exactly as
       # sensor-realistic.
+      # Opponent ONLY: the controller takes every LETHAL cell here as the opponent
+      # (updateObstacleEstimate) - piles added here became a phantom opponent (Max, 2026-11-12).
+      # (Piles at cost 253 were tried too: not needed, the pile touch was the opponent pushing us.)
       plugins: ["opponent_layer", "inflation_layer"]
       opponent_layer:
         plugin: "custom_objects_layer::CustomObjectsLayer"

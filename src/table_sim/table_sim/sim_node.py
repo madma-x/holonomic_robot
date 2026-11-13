@@ -216,11 +216,13 @@ class TableSimNode(Node):
         # with no error on either side. Republishing on a slow timer instead
         # guarantees the subscriber picks it up on whichever tick it happens
         # to already be connected for, regardless of startup ordering.
-        # Harmless when strategy_node IS also running: it republishes its
-        # own (loaded-aware) footprint on face changes, superseding this one
-        # on the same topic until the next tick of this timer puts the bare
-        # one back - acceptable since that's sim-only degraded behaviour,
-        # not a crash, and real matches always run strategy_node anyway.
+        # When strategy_node IS also running, it owns this topic instead
+        # (its own loaded-aware footprint, republished on face/vertical
+        # changes) - _publish_footprint below skips once it detects
+        # another publisher, rather than fighting it every tick (previously
+        # this timer's bare fallback kept clobbering strategy_node's
+        # extended footprint a second later, flickering Nav2's footprint
+        # extended/bare the whole time boxes were held).
         self.pub_footprint_local = self.create_publisher(Polygon, '/local_costmap/footprint', latched)
         self.pub_footprint_global = self.create_publisher(Polygon, '/global_costmap/footprint', latched)
         self._footprint_poly = Polygon(points=[
@@ -508,6 +510,15 @@ class TableSimNode(Node):
         self._publish_opponent_marker(stamp, now, visible=bool(np.isfinite(ranges).any()))
 
     def _publish_footprint(self):
+        # Skip once someone else (strategy_node, which republishes its own
+        # loaded-aware footprint only on an actual face/vertical change,
+        # not on a timer) is also publishing here - otherwise this timer's
+        # bare fallback wins every tick regardless of what strategy_node
+        # just set, flickering the Nav2 footprint extended/bare/extended
+        # every ~1s while boxes are held. count_publishers includes this
+        # node's own publisher, hence > 1 (not > 0) means "someone else too".
+        if self.count_publishers('/local_costmap/footprint') > 1:
+            return
         self.pub_footprint_local.publish(self._footprint_poly)
         self.pub_footprint_global.publish(self._footprint_poly)
 
@@ -540,7 +551,9 @@ class TableSimNode(Node):
             return
         self._opponent_marker_key = key
         self._next_opponent_marker = now + 1.0
-        mast = opp.model.mast
+        # obstacle size for Nav2: sim.yaml lidar.opponent_obstacle_m (Max: the bare mast let our robot
+        # brush past the opponent's body); default the mast itself
+        mast = float((self.sim_cfg.get('lidar') or {}).get('opponent_obstacle_m', opp.model.mast))
         arr = MarkerArray()
         clear = Marker()
         clear.action = Marker.DELETEALL
@@ -591,6 +604,9 @@ class TableSimNode(Node):
              'stacks': {f.label(k): v for k, v in w.stacks.items()},
              'zones': {f.label(k): v for k, v in w.zones.items()},
              'zone_capacities': {f.label(k): f.zone(k).capacity for k in w.zones},
+             'extra': {k: [round(v[0], 3), round(v[1], 3), round(v[2], 4), v[3], f.label(v[4]), bool(v[5])]
+                       for k, v in w.extra_piles.items()},
+             'pile_poses': {k: [round(v[0], 3), round(v[1], 3), round(v[2], 4)] for k, v in w.pile_pose.items()},
              'events': [f'{t:5.1f}  {m}' for t, m in w.events[-15:]]})))
 
     # ------------------------------------------------------------ markers
@@ -746,6 +762,8 @@ class TableSimNode(Node):
         mid = 0
         # stacks and piles: one cube per box
         for s in f.stacks:
+            if s.steal_zone:
+                continue
             n = w.stacks[s.name]
             for k in range(n):
                 arr.markers.append(self._box('stacks', mid, stamp, s.x, s.y, bh / 2 + k * bh, s.th,
@@ -753,6 +771,30 @@ class TableSimNode(Node):
                 mid += 1
             arr.markers.append(self._text('stack_count', mid, stamp, s.x, s.y, n * bh + 0.06,
                                           f'{s.label}: {n}', 0.06))
+            mid += 1
+        # stacks put down on the bare floor by a regrip (DROP_FLOOR)
+        for name, (fx, fy, fth, n) in w.floor_piles.items():
+            for k in range(n):
+                arr.markers.append(self._box('floor_piles', mid, stamp, fx, fy, bh / 2 + k * bh, fth,
+                                             bl, bw, bh * 0.97, BOX_RGB))
+                mid += 1
+            arr.markers.append(self._text('floor_count', mid, stamp, fx, fy, n * bh + 0.06,
+                                          f'{name}: {n}', 0.06))
+            mid += 1
+        # over-picked stacks discarded next to a built wall (extras of that zone)
+        extras = {}
+        for name, (ex, ey, eth, n, ez, ev) in w.extra_piles.items():
+            extras[ez] = extras.get(ez, 0) + n
+            for k in range(n):
+                if ev:        # a standing box, as it stood on the robot's face
+                    arr.markers.append(self._box('extra_piles', mid, stamp, ex, ey, bl / 2, eth,
+                                                 bw, bw, bl * 0.97, BOX_RGB))
+                else:
+                    arr.markers.append(self._box('extra_piles', mid, stamp, ex, ey, bh / 2 + k * bh, eth,
+                                                 bl, bw, bh * 0.97, BOX_RGB))
+                mid += 1
+            arr.markers.append(self._text('extra_count', mid, stamp, ex, ey, n * bh + 0.06,
+                                          f'{f.label(ez)} extra: {n}', 0.06, TEAM_RGB[f.zone(ez).team]))
             mid += 1
         for z in f.zones:
             n = w.zones[z.name]
@@ -763,8 +805,8 @@ class TableSimNode(Node):
             zx, zy, zth = w.pile_pose.get(z.name, (z.x, z.y, z.th))
             if z.shape == 'circle':
                 # a flipped box stands on its bw x bw end, height bl
-                for k in range(n):
-                    arr.markers.append(self._box('piles', mid, stamp, z.x, z.y, bl / 2, z.th,
+                for k in range(n):        # at the real drop pose: as the box stood on the robot's face
+                    arr.markers.append(self._box('piles', mid, stamp, zx, zy, bl / 2, zth,
                                                  bw, bw, bl * 0.97, BOX_RGB))
                     mid += 1
                 top = bl
@@ -787,7 +829,7 @@ class TableSimNode(Node):
                     mid += 1
                 top = bl + bh
             else:
-                for k in range(n):
+                for k in range(n - extras.get(z.name, 0)):
                     arr.markers.append(self._box('piles', mid, stamp, zx, zy, bh / 2 + k * bh, zth,
                                                  bl, bw, bh * 0.97, BOX_RGB))
                     mid += 1

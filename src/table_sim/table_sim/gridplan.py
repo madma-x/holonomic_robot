@@ -46,8 +46,9 @@ class GridPlanner:
         mask[i0:i1, j0:j1] = inside | (dmin <= radius)
         return mask
 
-    def set_static(self, key, polys, radius):
-        """Static obstacles (cached on `key`)."""
+    def set_static(self, key, polys, radius, keepout=(), keepout_radius=0.08):
+        """Static obstacles (cached on `key`). `keepout` polygons are forbidden areas inflated by their
+        own (small) radius: the rule is about the robot's centre, not its loaded footprint."""
         if key == self._static_key:
             return
         occ = np.zeros((self.nx, self.ny), bool)
@@ -58,6 +59,8 @@ class GridPlanner:
         occ |= self.cy > self.width - m
         for p in polys:
             occ |= self._poly_mask(p, radius)
+        for p in keepout:
+            occ |= self._poly_mask(p, keepout_radius)
         self._static, self._static_key = occ, key
 
     def occupancy(self, discs=()):
@@ -74,20 +77,38 @@ class GridPlanner:
     def center(self, c):
         return ((c[0] + 0.5) * self.res, (c[1] + 0.5) * self.res)
 
-    def _nearest_free(self, occ, c, max_r=15):
+    def _component(self, occ, c):
+        """Boolean mask of the free cells 4-connected to free cell c."""
+        seen = np.zeros_like(occ)
+        seen[c] = True
+        stack = [c]
+        while stack:
+            i, j = stack.pop()
+            for n in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)):
+                if 0 <= n[0] < self.nx and 0 <= n[1] < self.ny and not occ[n] and not seen[n]:
+                    seen[n] = True
+                    stack.append(n)
+        return seen
+
+    def _nearest_free(self, occ, c, max_r=15, allowed=None):
+        """Nearest free cell to c (c itself if free). `allowed`: optional mask the cell must be in -
+        used so a start swallowed by an inflated obstacle snaps to the goal's region, not to an
+        isolated free pocket next to it."""
         if not occ[c]:
             return c
         for r in range(1, max_r):
             best = None
             for i in range(c[0] - r, c[0] + r + 1):
                 for j in (c[1] - r, c[1] + r):
-                    if 0 <= i < self.nx and 0 <= j < self.ny and not occ[i, j]:
+                    if 0 <= i < self.nx and 0 <= j < self.ny and not occ[i, j] \
+                            and (allowed is None or allowed[i, j]):
                         d = (i - c[0]) ** 2 + (j - c[1]) ** 2
                         if best is None or d < best[0]:
                             best = (d, (i, j))
             for j in range(c[1] - r + 1, c[1] + r):
                 for i in (c[0] - r, c[0] + r):
-                    if 0 <= i < self.nx and 0 <= j < self.ny and not occ[i, j]:
+                    if 0 <= i < self.nx and 0 <= j < self.ny and not occ[i, j] \
+                            and (allowed is None or allowed[i, j]):
                         d = (i - c[0]) ** 2 + (j - c[1]) ** 2
                         if best is None or d < best[0]:
                             best = (d, (i, j))
@@ -111,9 +132,13 @@ class GridPlanner:
             occ = self.occupancy(discs)
         if self.line_free(occ, start, goal):
             return [tuple(goal)], math.hypot(goal[0] - start[0], goal[1] - start[1])
-        s = self._nearest_free(occ, self.cell(start))
         g = self._nearest_free(occ, self.cell(goal))
-        if s is None or g is None:
+        if g is None:
+            return None, math.inf
+        s = self.cell(start)
+        if occ[s]:      # start inside an inflated obstacle (just dropped beside a pile): escape toward the goal's region
+            s = self._nearest_free(occ, s, allowed=self._component(occ, g))
+        if s is None:
             return None, math.inf
         openq = [(0.0, 0.0, s)]
         came = {s: None}

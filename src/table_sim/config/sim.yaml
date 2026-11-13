@@ -18,6 +18,15 @@ robot:
   cmd_timeout: 0.5           # s without /cmd_vel -> robot brakes
   mast_size: 0.08            # square beacon support seen by the other lidar
   flip_face: 0               # the one face that can flip its boxes vertical (FaceTool FLIP)
+  # Wheel coupling (Max): 3 omni wheels share one top speed between driving and turning, as on the
+  # real robot. Each wheel's tangential speed = -sin(b) vx + cos(b) vy + wheel_base_m * wz (body frame,
+  # b = wheel angle); when one exceeds wheel_max_speed the whole (vx, vy, wz) is scaled down together.
+  # wheel_max_speed = max_lin_vel keeps full speed in every direction while not turning.
+  # wheel_angles_deg / wheel_base_m: TO CONFIRM on the real chassis.
+  wheel_coupling: true
+  wheel_angles_deg: [60, 180, 300]
+  wheel_base_m: 0.12
+  wheel_max_speed: 1.0
 
 opponent_robot:              # keys missing here are copied from `robot`
   face_long_m: 0.22
@@ -25,12 +34,20 @@ opponent_robot:              # keys missing here are copied from `robot`
   max_lin_vel: 0.8
 
 tool:
-  pick_engage_time: 0.40     # s before the boxes are attached (reach checked then)
-  pick_time_per_box: 0.20    # s added per box taken (lift)
+  pick_engage_time: 0.05     # s before the boxes are attached (reach checked then); real grippers close while
+                             # the robot is still docking, so a pick is done as soon as it is at the dock (Max)
+  pick_time_per_box: 0.0     # s added per box taken (lift)
   pick_reach: 0.05           # max gap face <-> stack at engage time
   pick_max_angle_deg: 25.0   # max misalignment face normal <-> stack
   pick_max_lateral: 0.12     # face centre may be this far off the stack side centre
   drop_time: 0.60            # s to release a face
+  dock_tol_m: 0.03           # zones with a dock pose (field yaml docks:): robot within this of the dock...
+  dock_tol_deg: 5.0          # ... and this of its heading, or the drop is refused
+  discard_tol_m: 0.06        # discard docks (field yaml discard_docks:): approximate drop, this close...
+  discard_tol_deg: 10.0      # ... and this of its heading
+  drop_tol_along_m: 0.06     # horizontal drop: box centre vs zone centre along the zone's long axis
+  drop_tol_across_m: 0.05    # ... and across it
+  drop_tol_angle_deg: 10.0   # ... and max angle between box and zone
   flip_time: 0.50            # s to flip a face's held boxes horizontal -> vertical
 
 lidar:
@@ -47,6 +64,9 @@ lidar:
   yaw_offset: 3.14           # base_scan yaw in the URDF (lidar_joint rpy)
   see_walls: false           # mast lidar is above the 70 mm borders
   see_bodies: false          # true: also see robot triangles, not only masts
+  # Size of the square the opponent becomes in Nav2's costmaps (/opponent_marker), centred on its mast.
+  # The lidar only sees the mast, but the body is there: 0.31 = the robot hexagon's width across corners.
+  opponent_obstacle_m: 0.31
 
 # Face-mounted box-ArUco camera: checks pick-stack occupancy while driving
 # by, without needing to be right next to the stack. Pure 2D model (no pitch -

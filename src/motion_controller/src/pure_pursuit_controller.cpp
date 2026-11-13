@@ -163,6 +163,11 @@ void PurePursuitController::configure(
   node_->declare_parameter(plugin_name_ + ".goal_dist_tolerance", goal_dist_tolerance_);
   node_->declare_parameter(plugin_name_ + ".goal_yaw_tolerance", goal_yaw_tolerance_);
 
+  node_->declare_parameter(plugin_name_ + ".docking_enabled", docking_enabled_);
+  node_->declare_parameter(plugin_name_ + ".docking_distance", docking_distance_);
+  node_->declare_parameter(plugin_name_ + ".docking_lookback_dist", docking_lookback_dist_);
+  node_->declare_parameter(plugin_name_ + ".k_lateral", k_lateral_);
+
   node_->declare_parameter(plugin_name_ + ".output_rotate_deg", output_rotate_deg_);
   node_->declare_parameter(plugin_name_ + ".output_invert_x", output_invert_x_);
   node_->declare_parameter(plugin_name_ + ".output_invert_y", output_invert_y_);
@@ -254,6 +259,14 @@ void PurePursuitController::configure(
 
   node_->get_parameter(plugin_name_ + ".goal_dist_tolerance", goal_dist_tolerance_);
   node_->get_parameter(plugin_name_ + ".goal_yaw_tolerance", goal_yaw_tolerance_);
+
+  node_->get_parameter(plugin_name_ + ".docking_enabled", docking_enabled_);
+  node_->get_parameter(plugin_name_ + ".docking_distance", docking_distance_);
+  node_->get_parameter(plugin_name_ + ".docking_lookback_dist", docking_lookback_dist_);
+  node_->get_parameter(plugin_name_ + ".k_lateral", k_lateral_);
+  if (k_lateral_ <= 1e-9) {
+    k_lateral_ = k_xy_;
+  }
 
   node_->get_parameter(plugin_name_ + ".output_rotate_deg", output_rotate_deg_);
   node_->get_parameter(plugin_name_ + ".output_invert_x", output_invert_x_);
@@ -417,6 +430,7 @@ void PurePursuitController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;
   last_closest_index_ = 0;
+  updateApproachAxis();
   // A new plan means a new goal to drive, even if a previous one was
   // cancelled - without this, was_cancelled_ stays latched true from the
   // first-ever cancel() for the rest of this controller's lifetime (it's
@@ -552,8 +566,28 @@ geometry_msgs::msg::TwistStamped PurePursuitController::computeVelocityCommands(
   // achievable speed toward a fixed world direction swung by up to sqrt(2)
   // as the robot turned, and clipping one axis but not the other bent the
   // commanded direction away from the lookahead bearing).
-  double target_vx_world = k_xy_ * dx;
-  double target_vy_world = k_xy_ * dy;
+  double target_vx_world;
+  double target_vy_world;
+  if (docking_enabled_ && has_approach_axis_ && dist_to_goal <= docking_distance_) {
+    // Terminal docking stage: within docking_distance_ of the goal, steer
+    // in the approach-axis frame (see updateApproachAxis()) instead of
+    // chasing the lookahead point. along_error/cross_error are the error
+    // decomposed onto that fixed line, so a robot handed off with side
+    // velocity gets a cross-track command proportional to how far it
+    // actually is off the docking line - not just whatever small residual
+    // the moving lookahead point happens to show near the goal.
+    const double gx = goal_pose.pose.position.x - pose.pose.position.x;
+    const double gy = goal_pose.pose.position.y - pose.pose.position.y;
+    const double along_error = gx * approach_axis_x_ + gy * approach_axis_y_;
+    const double cross_error = gy * approach_axis_x_ - gx * approach_axis_y_;
+    const double along_cmd = k_xy_ * along_error;
+    const double cross_cmd = k_lateral_ * cross_error;
+    target_vx_world = along_cmd * approach_axis_x_ - cross_cmd * approach_axis_y_;
+    target_vy_world = along_cmd * approach_axis_y_ + cross_cmd * approach_axis_x_;
+  } else {
+    target_vx_world = k_xy_ * dx;
+    target_vy_world = k_xy_ * dy;
+  }
   const double max_v = max_v_ * speed_limit_scale_;
   const double v_mag = std::hypot(target_vx_world, target_vy_world);
   if (v_mag > max_v && v_mag > 1e-9) {
@@ -636,6 +670,10 @@ rcl_interfaces::msg::SetParametersResult PurePursuitController::onParameterUpdat
     else if (key == "max_aw") {max_aw_ = p.as_double();}
     else if (key == "goal_dist_tolerance") {goal_dist_tolerance_ = p.as_double();}
     else if (key == "goal_yaw_tolerance") {goal_yaw_tolerance_ = p.as_double();}
+    else if (key == "docking_enabled") {docking_enabled_ = p.as_bool();}
+    else if (key == "docking_distance") {docking_distance_ = p.as_double();}
+    else if (key == "docking_lookback_dist") {docking_lookback_dist_ = p.as_double();}
+    else if (key == "k_lateral") {k_lateral_ = p.as_double();}
     else if (key == "output_rotate_deg") {output_rotate_deg_ = p.as_double();}
     else if (key == "output_invert_x") {output_invert_x_ = p.as_bool();}
     else if (key == "output_invert_y") {output_invert_y_ = p.as_bool();}
@@ -769,6 +807,59 @@ PurePursuitController::LookaheadPoint PurePursuitController::findLookaheadPoint(
   point.y = back.y;
   point.heading = tf2::getYaw(global_plan_.poses.back().pose.orientation);
   return point;
+}
+
+void PurePursuitController::updateApproachAxis()
+{
+  has_approach_axis_ = false;
+  if (global_plan_.poses.empty()) {
+    return;
+  }
+
+  const auto & goal = global_plan_.poses.back().pose.position;
+
+  // Walk backward from the goal accumulating path length until
+  // docking_lookback_dist_ is covered; the axis is goal minus that point.
+  double back_x = goal.x;
+  double back_y = goal.y;
+  double traveled = 0.0;
+  bool found_lookback_point = false;
+  for (size_t i = global_plan_.poses.size(); i-- > 1; ) {
+    const auto & p1 = global_plan_.poses[i].pose.position;
+    const auto & p0 = global_plan_.poses[i - 1].pose.position;
+    const double seg_dx = p1.x - p0.x;
+    const double seg_dy = p1.y - p0.y;
+    const double seg_len = std::hypot(seg_dx, seg_dy);
+
+    if (traveled + seg_len >= docking_lookback_dist_ && seg_len > 1e-6) {
+      const double ratio = (docking_lookback_dist_ - traveled) / seg_len;
+      back_x = p1.x - ratio * seg_dx;
+      back_y = p1.y - ratio * seg_dy;
+      found_lookback_point = true;
+      break;
+    }
+    traveled += seg_len;
+  }
+
+  double axis_x = goal.x - back_x;
+  double axis_y = goal.y - back_y;
+  const double axis_len = std::hypot(axis_x, axis_y);
+
+  if (!found_lookback_point || axis_len < 1e-6) {
+    // Plan shorter than docking_lookback_dist_ (or degenerate) - nothing
+    // reliable to measure a direction from; fall back to the goal's own
+    // orientation.
+    const double goal_yaw = tf2::getYaw(global_plan_.poses.back().pose.orientation);
+    axis_x = std::cos(goal_yaw);
+    axis_y = std::sin(goal_yaw);
+  } else {
+    axis_x /= axis_len;
+    axis_y /= axis_len;
+  }
+
+  approach_axis_x_ = axis_x;
+  approach_axis_y_ = axis_y;
+  has_approach_axis_ = true;
 }
 
 geometry_msgs::msg::Twist PurePursuitController::applyAccelerationLimits(
@@ -1377,6 +1468,23 @@ bool PurePursuitController::selectSafeVelocity(
   double best_cost = std::numeric_limits<double>::infinity();
   bool found = false;
 
+  // Escape rule (Max: "the opponent is so close it blocks us even if we go the other way"). Once the
+  // opponent is already inside the stop distance (or our footprint already touches its costmap cells),
+  // every candidate's first step is "inside" too, moving away included, and the robot froze until
+  // the opponent left. Inside that zone a step is only a collision if it brings us CLOSER to the
+  // opponent than we are now; opening (or holding) the distance stays allowed. The local costmap
+  // holds the opponent only (see nav2 params), so the same rule applies to the footprint check.
+  const double escape_eps = 1e-4;
+  double d_now = std::numeric_limits<double>::infinity();
+  bool touching_now = false;
+  if (opponent_prediction_enabled_ && snap_has_obstacle_estimate) {
+    d_now = std::hypot(snap_obstacle_x - x, snap_obstacle_y - y);
+    bool c0 = false, k0 = false;
+    footprintClearance(
+      x, y, yaw, footprint, costmap, avoidance_min_clearance_m_, avoidance_caution_margin_m_, c0, k0);
+    touching_now = c0;
+  }
+
   for (const auto & raw : candidates) {
     double vx = clamp(raw.vx, last_vx_world_ - max_dv, last_vx_world_ + max_dv);
     double vy = clamp(raw.vy, last_vy_world_ - max_dv, last_vy_world_ + max_dv);
@@ -1417,7 +1525,11 @@ bool PurePursuitController::selectSafeVelocity(
         sx, sy, syaw, footprint, costmap,
         avoidance_min_clearance_m_, avoidance_caution_margin_m_,
         step_collision, step_caution);
-      if (step_collision) {
+      // escaping: already touching the opponent's cells and this step does not close in on it
+      const bool escaping = std::isfinite(d_now) &&
+        std::hypot(snap_obstacle_x + snap_obstacle_vx * t - sx,
+                   snap_obstacle_y + snap_obstacle_vy * t - sy) >= d_now - escape_eps;
+      if (step_collision && !(touching_now && escaping)) {
         collision = true;
         break;
       }
@@ -1434,8 +1546,8 @@ bool PurePursuitController::selectSafeVelocity(
         const double center_dist = std::hypot(pred_ox - sx, pred_oy - sy);
         const double stop_at = opponent_radius_m_ + scaled_opponent_safety_margin +
           robot_circumradius;
-        if (center_dist <= stop_at) {
-          collision = true;
+        if (center_dist <= stop_at && center_dist < d_now - escape_eps) {
+          collision = true;   // inside the stop disk AND closing in (escape rule above)
           break;
         }
         if (!caution && center_dist <= stop_at + scaled_opponent_caution_margin) {

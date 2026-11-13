@@ -25,6 +25,19 @@ import math
 
 
 class StackBelief:
+    @staticmethod
+    def _resolve_labels(field, labels):
+        """Global P<n>/Y<n>/B<n> labels -> Stack objects, in the given
+        order, dropping any label that doesn't resolve - small shared
+        helper so pick_sequence/contested_hi_group/contested_lo_group/
+        drop_sequence's `pick:` all parse the same way."""
+        out = []
+        for label in labels or []:
+            stk = next((s for s in field.stacks if s.label == label), None)
+            if stk is not None:
+                out.append(stk)
+        return out
+
     def __init__(self, field, team, params=None):
         self.field = field
         self.team = team
@@ -49,13 +62,19 @@ class StackBelief:
 
         # Fixed pick order (Max): global P<n> labels, tried strictly in this
         # order - the next one still believed non-empty, never scored/
-        # reordered by distance or opponent position. Resolved to actual
-        # Stack objects once here.
-        self._pick_order = []
-        for label in p.get('pick_sequence') or []:
-            stk = next((s for s in field.stacks if s.label == label), None)
-            if stk is not None:
-                self._pick_order.append(stk)
+        # reordered by distance. Resolved to actual Stack objects once here.
+        self._pick_order = self._resolve_labels(field, p.get('pick_sequence'))
+
+        # Semi-modular exception to the strict order above (Max): P7/P9 are
+        # the enemy-side "hi" stacks - if the opponent currently looks to be
+        # headed for either one, swap the due hi pick for whichever of P6/
+        # P8/P10 (the "lo" alternatives) still has stock left, instead of
+        # either ploughing into the opponent or sitting on the hi stack
+        # until it clears. No threat there -> pick P7/P9 as normal and
+        # leave P6/P8/P10 for their own turn later in pick_sequence.
+        self._contested_hi = self._resolve_labels(field, p.get('contested_hi_group'))
+        self._contested_lo = self._resolve_labels(field, p.get('contested_lo_group'))
+        self._contested_hi_names = {s.name for s in self._contested_hi}
 
         # Fill order Max set in the table-reference artifact (state.json's
         # `assignments`): {kind: rect|circle, index: own-team zone number
@@ -85,11 +104,12 @@ class StackBelief:
         self._pinned_stacks = {s.name for s in self._pick_for.values()}
 
         cap = float(field.boxes_per_stack)
-        self._count = {s.name: cap for s in field.stacks}
+        self._count = {s.name: (0.0 if s.steal_zone else cap) for s in field.stacks}   # enemy piles: camera only
         self._last_seen = {s.name: 0.0 for s in field.stacks}
         self._fresh = {s.name: False for s in field.stacks}   # True until the prior starts decaying
 
         self._zone_count = {z.name: 0 for z in field.zones if z.team == team}
+        self._steal_of = {s.steal_zone: s.name for s in field.stacks if s.steal_zone}
         # Opponent's own zones: camera-only, no prior (no decay - unlike
         # stacks, a zone's box count only ever goes up, and we have no basis
         # to guess when/whether that happens without having seen it).
@@ -103,17 +123,45 @@ class StackBelief:
         # pile_pose for rendering/collision.
         self._zone_pose = {}
 
-    def next_pick(self, exclude=()):
+    def _opponent_near(self, stack, opp):
+        """True if the opponent currently looks to be headed for `stack`'s
+        spot - same projected-position/confidence shape as pick_score's
+        contested discount, but a hard gate here instead of a soft
+        multiplier: next_pick needs a yes/no to decide whether to swap
+        groups, not a score to blend in."""
+        if opp is None or not opp.seen_ever:
+            return False
+        tx = opp.x + opp.vx * self.contested_lookahead_s
+        ty = opp.y + opp.vy * self.contested_lookahead_s
+        d = math.hypot(stack.x - tx, stack.y - ty)
+        confidence = max(0.0, 1.0 - opp.sigma / self.contested_confidence_scale_m)
+        return d < self.contested_radius_m and confidence > 0.3
+
+    def next_pick(self, exclude=(), opp=None):
         """The next stack in the fixed pick_sequence that's still believed
         non-empty (ground truth from our own pick results/camera, not a
         decayed guess here - believed_count(t) handles that) and not in
-        `exclude` (temporarily skipped, e.g. opponent camped on it). Strict:
-        always the first such one in order, never reordered by distance."""
+        `exclude` (temporarily skipped, e.g. opponent camped on it). Strict
+        order, with one semi-modular exception: if the due stack is one of
+        contested_hi_group (P7/P9) and the opponent currently looks headed
+        for either of them, swap to whichever contested_lo_group stack
+        (P6/P8/P10, in that configured order) is still believed non-empty,
+        instead of either contesting the opponent there or sitting on P7/P9
+        until it clears. No threat on the hi side -> just pick the due hi
+        stack as normal, leaving the lo alternatives for their own turn
+        later in pick_sequence."""
         for s in self._pick_order:
             if s.name in exclude:
                 continue
-            if self._count[s.name] >= 0.5:
-                return s
+            if self._count[s.name] < 0.5:
+                continue
+            if s.name in self._contested_hi_names and any(
+                    self._opponent_near(h, opp) for h in self._contested_hi):
+                alt = next((a for a in self._contested_lo
+                           if a.name not in exclude and self._count[a.name] >= 0.5), None)
+                if alt is not None:
+                    return alt
+            return s
         return None
 
     # ------------------------------------------------------------- updates
@@ -132,15 +180,43 @@ class StackBelief:
     def on_pick_result(self, stack_name, success, count, t):
         if stack_name not in self._count:
             return
-        self._count[stack_name] = max(0.0, self._count[stack_name] - count) if success else 0.0
+        if not success and stack_name in self._steal_of.values():
+            self._count[stack_name], self._last_seen[stack_name], self._fresh[stack_name] = 0.0, t, True   # nothing there
+            return
+        if not success:
+            # Not in reach etc - no information about the stack's actual
+            # contents, so don't touch the belief (previously this zeroed
+            # it out, wrongly marking a merely-misaligned stack as empty).
+            return
+        # count == 0 on a successful (in-reach) pick is itself ground
+        # truth that the stack is empty NOW - previously this only ever
+        # subtracted (count - 0 = no change), so a stale belief (still
+        # showing full) was never corrected and next_pick kept retrying
+        # the same already-empty stack forever.
+        self._count[stack_name] = 0.0 if count == 0 else max(0.0, self._count[stack_name] - count)
         self._last_seen[stack_name] = t
         self._fresh[stack_name] = True
 
     def on_drop_result(self, zone_name, success, count, pose=None):
         if success and zone_name in self._zone_count:
             self._zone_count[zone_name] += count
+            st = self._steal_of.get(zone_name)
+            if st is not None:                    # our own pile is a pickable 'stack' (drop-and-repick)
+                self._count[st] = float(self._zone_count[zone_name])
+                self._fresh[st] = True
+                self._last_seen[st] = 0.0
             if pose is not None and zone_name not in self._zone_pose:
                 self._zone_pose[zone_name] = pose
+
+    def on_zone_emptied(self, zone_name, count):
+        """We picked our own pile back up (drop-and-repick)."""
+        if zone_name in self._zone_count:
+            self._zone_count[zone_name] = max(0, self._zone_count[zone_name] - count)
+            st = self._steal_of.get(zone_name)
+            if st is not None:
+                self._count[st] = float(self._zone_count[zone_name])
+            if self._zone_count[zone_name] == 0:
+                self._zone_pose.pop(zone_name, None)
 
     def zone_pose(self, zone_name):
         return self._zone_pose.get(zone_name)
@@ -192,7 +268,7 @@ class StackBelief:
     def best_pick(self, from_xy, t, exclude=(), opp=None):
         best, best_score = None, 0.0
         for s in self.field.stacks:
-            if s.name in exclude:
+            if s.name in exclude or s.steal_zone:
                 continue
             sc = self.pick_score(s, from_xy, t, opp=opp)
             if sc > best_score:
@@ -212,6 +288,22 @@ class StackBelief:
     def is_excluded(self, zone):
         """True if `zone` is in excluded_drop_zones - never a drop target."""
         return zone.label in self._excluded_zones
+
+    def due_order(self, zone):
+        """drop_sequence order of the due `zone` (see best_drop's sort_key) -
+        exposed so core.py can tell whether it's still mid a strictly-
+        sequential pair (Y1 -> Y3) that must finish before picking again."""
+        idx = int(''.join(c for c in zone.label if c.isdigit()) or 0)
+        return self._drop_order.get((zone.shape, idx), 1000 + idx)
+
+    def first_interleave_order(self):
+        """Lowest drop_sequence order among circle-zone entries - Max's
+        choreography only interleaves picking back in once the due drop
+        reaches the first circle zone (P1/P3 -> YC1), never mid-way through
+        the earlier strictly-sequential rect zones (Y1 -> Y3 must finish
+        first). No circle zones configured: nothing blocks interleaving."""
+        circle_orders = [order for (shape, _idx), order in self._drop_order.items() if shape == 'circle']
+        return min(circle_orders) if circle_orders else 0
 
     def best_drop(self, exclude=(), include_vertical=True):
         """The DUE zone: lowest-order not-yet-full zone of our own team, in

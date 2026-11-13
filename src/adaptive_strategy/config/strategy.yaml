@@ -2,12 +2,15 @@
 # --params flag (it accepts a plain dict or a ROS params file like this one).
 strategy_node:
   ros__parameters:
-    robot_side: 0.34          # m, matches table_sim config/sim.yaml robot.side
+    face_long_m: 0.22         # m, matches table_sim config/sim.yaml robot.face_long_m
+    face_short_m: 0.08        # m, matches table_sim config/sim.yaml robot.face_short_m
     face_angles_deg: [0, 120, 240]   # matches table_sim robot.face_angles_deg
     boxes_per_face: 3
     max_lin_vel: 1.0          # m/s, matches table_sim robot.max_lin_vel
     max_lin_acc: 1.5
     max_ang_vel: 4.0
+    max_ang_acc: 12.0         # matches table_sim robot.max_ang_acc (was the 8 default)
+    dock_w_gain: 3.5          # docking stage heading gain, rad/s per rad (was 1.5: slow final turn)
     go_home_margin_s: 5.0     # safety margin added to the straight-line ETA home
     # Opponent avoidance only applies to the final, direct-controlled pick/
     # drop approach - the coarse Nav2-driven legs already get reactive
@@ -18,8 +21,20 @@ strategy_node:
     avoid_stop_dist_m: 0.35
     pos_tol_m: 0.02
     yaw_tol_rad: 0.05
+    drop_pos_tol_m: 0.02     # final docking: inside World's dock tolerance (sim.yaml tool.dock_tol_m 0.03)
+    drop_yaw_tol_rad: 0.07   # ~4 deg, inside World's dock_tol_deg 5
+    pick_pos_tol_m: 0.03          # picks with face 0: 3 cm / 4 deg
+    pick_yaw_tol_rad: 0.070
+    pick_pos_tol_side_m: 0.02     # picks with faces 1 and 2: 2 cm / 2 deg
+    pick_yaw_tol_side_rad: 0.035
+    release_v_mps: 0.05      # start a pick/drop only below this speed (no coasting past the dock)
     nav_pos_tol_m: 0.08      # must stay >= Nav2's own goal_checker xy_goal_tolerance (0.05)
-    nav_yaw_tol_rad: 3.2     # must stay >= Nav2's own yaw_goal_tolerance (3.14, i.e. any heading)
+    nav_yaw_tol_rad: 0.55    # approach point: ~30 deg is enough, the docking stage corrects the rest; >= Nav2's yaw_goal_tolerance (0.50)
+    dock_settle_s: 0.0       # 0 = smooth Nav2 -> docking handover (keep the real speed); > 0 = stop up to this long first
+    dock_settle_v: 0.03      # m/s: considered stopped
+    dock_handover_m: 0.25    # near the approach point and stalled (Nav2/global costmap won't go closer): dock directly
+    dock_handover_stall_s: 0.5
+    pre_pose_wall_clear_m: 0.22   # approach points are pulled toward the dock to stay this far off the table edges
     verify_confidence_threshold: 0.7  # below this, turn the camera toward a pick target before committing
     verify_timeout_s: 3.0
 
@@ -52,10 +67,29 @@ strategy_node:
     # strictly-ordered target.
     blocked_timeout_s: 1000000.0
 
+    # Unlike blocked_timeout_s above, a backout (step back off a pile just
+    # dropped) is purely cosmetic, not a strategic target - it must never
+    # hang (e.g. on opponent-avoidance zeroing its velocity while the
+    # opponent lingers nearby). Bounded, short.
+    backout_timeout_s: 2.0
+    backout_handover_m: 0.03       # this close to the back-out's end: decide the next target while still moving
+    backout_vertical_m: 0.15   # back-out after a vertical (circle-zone) drop (backout_dist_m is for the rest)
+    backout_loaded_m: 0.14     # back-out after any drop that leaves boxes on the robot: out of the global loaded circle (0.22)
+    backout_pick_m: 0.08       # back-out after a pick: edge stacks leave the robot 0.22 m from the border, on the loaded circle
+    backout_pick_border_m: 0.25   # ...only for stacks whose centre is this close to the border (P1-P4, P7-P10; not P5 / P6)
+
     # Fixed pick order (Max): try strictly in this order, skipping only a
     # stack already empty (ground truth from our own pick results/camera -
-    # see belief.py's next_pick). Not reordered by distance or opponent.
-    pick_sequence: [P5, P7, P9, P1, P3, P2, P4, P6, P8, P10]
+    # see belief.py's next_pick). Not reordered by distance, except one
+    # semi-modular case: if the due stack is where the opponent is
+    # currently camped, next_pick swaps to its column-mirror (P7<->P8,
+    # P9<->P10, P1<->P2, P3<->P4) instead of plowing through the opponent
+    # or skipping all the way down to a completely different part of the
+    # order. P5 and P6 (the 2 centre stacks, x=1.5) go first and right next
+    # to each other - clearing both early opens the whole table width for
+    # every leg after, so they're worth more than their place in a plain
+    # nearest-first order would give them.
+    pick_sequence: [P5, P6, P7, P9, P1, P3, P2, P4, P8, P10]
 
     # Drop-zone fill order Max gave as a full choreography, in own-team-
     # relative terms (Y3/B3 -> kind rect index 3, YC2/BC2 -> kind circle
@@ -73,25 +107,176 @@ strategy_node:
     drop_sequence:
       - {order: 1, kind: rect,   index: 1, type: H}   # Y1
       - {order: 2, kind: rect,   index: 3, type: H}   # Y3
-      - {order: 3, kind: circle, index: 1, type: V}   # YC1
+      - {order: 3, kind: circle, index: 1, type: V, pick: P1}   # YC1
       - {order: 4, kind: circle, index: 2, type: V}   # YC2
-      - {order: 5, kind: rect,   index: 5, type: H}   # Y5 (horizontal)
-      - {order: 6, kind: circle, index: 3, type: V}   # YC3
-      - {order: 7, kind: rect,   index: 2, type: H}   # Y2
-      - {order: 8, kind: rect,   index: 4, type: D}   # Y4 - saved for last (door finish, not yet implemented)
+      - {order: 5, kind: circle, index: 3, type: V}   # YC3
+      - {order: 6, kind: rect,   index: 2, type: H}   # Y2
+      - {order: 7, kind: rect,   index: 4, type: H}   # Y4 (wall; its dock is outside the castle)
+      - {order: 8, kind: circle, index: 4, type: V, pick: P2}   # YC4 (needs Y2 + Y4, P2)
+      - {order: 9, kind: rect,   index: 5, type: H}   # Y5 - LAST, from inside the castle
+
+    # Door (Max): 2 vertical posts, back out, un-flip the last box, forward,
+    # lid = 23 points. Built on the flip face with a full stack of 3.
+    # Door: only at Y5. The robot is inside the castle there, so it can flip the
+    # last box horizontal for the lid (an un-flip is refused outside the castle).
+    door_zone: Y5
+    # Last drop, entered through the castle waist with ONLY its dock face loaded
+    # (corridor needs just ~36 cm: a 32 cm box on one face). Other faces' boxes
+    # are dumped first as +1 extras in already-built zones.
+    final_zone_index: 5
+    door_min_time_s: 18.0     # don't start a door with less match time left
+
+    # Search planner (planner_brain.PlannerBrain) - ignored by StrategyCore.
+    use_scenarios: true
+    points_threshold: 50          # plans are ranked first by P(points >= this)...
+    taken_dock_dwell_s: 0.6       # opponent docked at any stack (take_dock_m, below take_dock_speed) this long: taken
+    plan_p_ok_enough: 0.8         # ... capped here: plans at least this likely count as equally safe, then expected
+                                  # points decide (a certain 57 no longer beats an 80-90% 75)
+    opponent_scenarios: {defensive: 0.40, aggressive: 0.15, adaptive: 0.27, blocker: 0.10, idle: 0.08}
+    scenario_pos_power: 0.35      # tempering of lidar-sighting evidence (1 = full Bayes)
+    scenario_taken_power: 0.7     # ... of 'stack seen emptied'
+    pick_block_p: 0.85            # a stack is only refused when P(opponent took it) >= this
+    plan_hysteresis: 2.0          # points of head start for keeping the previous plan
+    castle_risk_w: 6.0            # stacks next to the forbidden opponent castle (P9, P10): +3 pts if picked early,
+    opponent_beacon: true         # the opponent's position is known at all times (external beacon; ROS: /opponent/odom)
+    contact_risk_w: 6.0           # points lost for picking where the opponent is/will be (per stack; 0 = off)
+    contact_risk_r_m: 0.9
+    steal_prior_t_s: 25.0         # from this time an enemy drop-zone pile not looked at lately is assumed to hold boxes
+    steal_prior_boxes: 3
+    steal_unseen_cost: 3.0        # points charged for going to look at an assumed (unseen) pile
+    steal_recheck_s: 20.0
+    opening_bottom: [P6, P8, P10]   # opponent heads top -> take the bottom edge, centre outward (no crossing)
+    opening_top: [P5, P7, P9]       # opponent heads bottom -> take the top edge
+    opening_default: bottom         # the opening edge, committed (only switched if the opponent is on its centre stack first)
+    opening_bonus: 2.0              # points per pick that follows the opening, in order
+    opening_until_s: 12.0
+    opening_block_dist_m: 0.25      # opponent this close to our centre stack (P6 / P5) itself...
+    opening_block_s: 0.5            # ... for this long, before we picked it: switch to the other edge
+    opening_blocked_timeout_s: 2.0  # stuck on the way to an opening stack: give up after this (normal: 8)
+    opening_strict: true            # the first picks MUST follow the opening (skipping stacks that are gone)
+    opening_side_margin_m: 0.1      # unused since the committed opening (2026-11-10)
+    keepout_from_s: 20.0          # the opponent castle is only forbidden after this match time
+    castle_risk_t0_s: 20.0        #   -3 pts if late (smoothstep between t0 and t1)
+    castle_risk_t1_s: 45.0
+    castle_near_m: 0.45
+    deny_tau_s: 15.0              # denial fades with (opponent take time - our arrival)
+    deny_weight: 2.0              # points per box taken that an opponent scenario would have used
+    deny_horizon_s: 50.0
+    plan_time_weight: 0.5         # points per second of finish time: stops junk picks / slow loops (0.02 let it hoard boxes)
+    plan_beam: 150
+    plan_depth: 26                # a full match (15 cut plans off before the door); costs no more time:
+                                  # the search ends when every line has run out of match time
+    plan_pot_door_w: 1.5          # beam ranking: share of the door's 23 pts credited while it is still possible
+    plan_pot_tower_w: 0.7         # ... and of a tower's 6 pts per free circle (door / towers first, Max)
+    planner_blocked_timeout_s: 2.5   # give up on a stuck target and replan (the rule brain never does; was 8)
+    # Pick watchdog: drop a pick target as soon as the opponent is AT that stack or clearly heading
+    # there first (tight on purpose: neighbour stacks are 0.5 m apart), or the camera sees it empty.
+    take_dock_m: 0.15             # opponent centre within this of the stack footprint (docked: ~0.12) ...
+    take_dock_speed: 0.10         # ... nearly stopped, and our stack is the nearest one to it
+    take_head_m: 0.6              # or: within this of the stack centre ...
+    take_move_speed: 0.15         # ... moving ...
+    take_cone_deg: 20.0           # ... the stack within +-this of its travel direction (nearest in that cone) ...
+    take_eta_margin_s: 1.0        # ... and arriving at least this much before us
+    take_debounce_s: 0.5          # condition held this long
+    take_max_sigma_m: 0.1         # only with a reliable opponent position (seen by the lidar)
+    take_ban_s: 3.0               # opponent docked at / heading to a stack: keep it out of plans this long (lifted early when
+                                  # the camera sees it full and the opponent is take_lift_m away from it)
+    take_lift_m: 0.6
+    # Ban durations by reason (nothing is extended any more): stuck with the opponent close to us
+    # (< stuck_opp_near_m): 3 s, escalating 3 -> 6 -> 12 s for repeated drops of the same zone, lifted early
+    # once the opponent is stuck_lift_m from the target. Stuck with nobody near (our own piles / held stacks
+    # in the way): no time ban, the target is 'impossible' until what we carry or the pile set changes.
+    stuck_ban_s: [3.0, 6.0, 12.0]
+    stuck_opp_near_m: 0.6
+    stuck_lift_m: 0.9
+    side_ban_s: 3.0               # an approach side with the opponent on its pre-pose is avoided this long (P5/P6 have 2)
+    side_debounce_s: 0.3
+    home_replan_margin_s: 3.0     # driving home / parked: keep replanning every pick_replan_s while time_left > travel home + this
+    # Endgame time guard: the plan's timing calibrated on the 2026-11-09 RViz match (actual vs model)
+    plan_travel_factor: 1.3       # Nav2 legs take this x the grid estimate
+    plan_pick_overhead_s: 1.2     # per pick: approach point + dock in (a re-dock in place is not free)
+    plan_drop_overhead_s: 1.5     # per drop: + stop before release + back out
+    plan_home_reserve_s: 3.0      # every plan step must still reach home with this to spare
+    home_abort_margin_s: 1.0      # executing: drop the target and go home below (time home + this)
+    plan_pick_time_factor: 0.7    # actual / planned for picks (2026-11-09 RViz matches: 26.2 s vs 39.5 s planned)
+    plan_drop_time_factor: 1.1    # ... and drops (54.1 s vs 48.3 s)
+    plan_cross_time_s: 1.0        # s added to every top <-> bottom leg (crossing the castle / centre)
+    plan_turn_s_per_90deg: 0.25   # planner: every pick / drop leg costs this per 90 deg of body turn (Max; to tune)
+    face_swap_margin_deg: 20.0    # execution: faces 1/2 both empty -> pick with the other one if it turns this much less
+    plan_hysteresis_loaded: 4.0   # points a new plan must beat the current one by while boxes are carried (2 otherwise)
+    door_earliest_s: 60.0         # no Y5 drop (ends our match) before this while a table stack is believed full
+    plan_steal_tower_slack_s: 3.0 # a tower built from a stolen stack before the door: the plan keeps this much more
+                                  # spare time (running late after it costs the door, Max)
+    plan_crowded_pick_s: 1.0      # extra time to pick a stack docked next to another full one (P3/P7 by P5, P4/P8 by P6)
+    tower_partial_cost: 1.0       # points per tower drop per box of room left on the 2 other faces while stacks remain
+                                  # (Max: towers are a long trip - fill the faces first); 0 = off
+    flip_heading_tol_deg: 30.0    # flip in the Y5 flip area only when already facing the next drop's dock this closely
+    idle_evidence_after_s: 3.0    # opponent still at its start pose after this -> strong evidence for 'idle'...
+    idle_still_m: 0.15            # ... while it has never been seen farther than this from it
+    plan_budget_s: 0.6            # in-match plan search time limit (pre-match plan: none). Planning runs while a
+                                  # pick / drop executes (from the predicted state) or while driving, never stopped
+    replan_opp_near_m: 0.6        # replan on the way when the opponent is this close to our target's approach point
+    replan_late_s: 2.0            # ... or when we are this far behind the plan's time for the current action
+    pick_replan_s: 1.0            # replan this often while driving to a pick (switch only past plan_hysteresis; 0 = off)
+    replan_opp_move_m: 0.20       # ...but only when something was observed: opponent moved this much, a count / ban changed
+
+    # Door endgame (A): door not built, time for it (door_min_time_s), nothing known full, the plan has no
+    # door -> drive to the viewpoint that sees the most uncertain stacks (stale belief and P(taken) >=
+    # scout_p_taken_lo; enemy drop-zone piles once every P is gone), look, replan.
+    scout_on: true
+    scout_from_s: 40.0            # the door endgame starts at this match time (before it the plan is not a closing one)
+    scout_confirm_s: 10.0         # a sighting this fresh showing a full stack = confirmed (no scouting)
+    scout_p_taken_lo: 0.15
+    scout_margin_s: 2.0           # extra slack on top of viewpoint eta + door_min_time_s
+    scout_wait_s: 2.0             # at the viewpoint: wait this long for fresh camera readings
+    scout_door_gain: 15.0         # points a door adds (x P(a covered stack is still full)); compared with what the detour costs the plan
+    scout_time_cost: 0.4          # viewpoint choice: #stacks seen - this * straight-line eta (s)
+
+    # Hard drop constraints (rules as data; the search planner reads these
+    # via rules.build_guard, the rule-based brain follows drop_sequence).
+    drop_rules:
+      - {first_drop_in: [Y1, Y2]}
+      - {pin_to_flip_face: [P1, P2]}
+      - {door_only_in: [Y5]}
+      - {zone: Y1, then_immediately: Y3}
+      - {zone: Y3, requires_dropped: [Y1]}      # Y3 never before Y1
+      - {zone: Y4, requires_dropped: [Y2]}      # Y4 never before Y2
+      - {zone: Y2, then_immediately: Y4}
+      - {zone: YC1, requires_dropped: [Y1, Y3], requires_picked: [P1]}
+      - {zone: YC4, requires_dropped: [Y2, Y4], requires_picked: [P2]}
+      - {zone: YC2, requires_picked: [P1]}      # never YC2 before P1 is picked
+      - {zone: Y5, last: true, only_face_loaded: true}
+      # Pick order (Max): a centre stack before the two edge stacks it crowds - a loaded robot
+      # squeezing past a full P5/P6 to reach P3/P7 or P4/P8 pushes into it.
+      - {stack: P3, requires_picked: [P5]}
+      - {stack: P7, requires_picked: [P5]}
+      - {stack: P4, requires_picked: [P6]}
+      - {stack: P8, requires_picked: [P6]}
 
     # Zones never to target at all (Max: "remove YC4") - excluded from
     # best_drop's candidate list entirely, not just deprioritized.
-    excluded_drop_zones: [YC4]
+    excluded_drop_zones: []
 
     # Circle (V) zones need a flip first (see adaptive_strategy/core.py) -
     # false restricts best_drop to rect (H) zones only, for testing the new
     # drop_sequence order on its own before adding the flip mechanism.
     use_vertical_zones: true
 
-    # Exact dock poses Max tuned in the table-reference artifact's dock-pose
-    # editor - overrides the geometric drop_spots()/_best_face computation
-    # for whichever zone labels it has an entry for (see core.py's
-    # _load_dock_overrides). Path is relative to the package share dir at
-    # runtime (set by strategy.launch.py); headless.py needs the repo path.
-    dock_poses_file: dock_poses.json
+    # Nav2 footprint while carrying (Max, test): the robot hexagon + the held boxes (convex hull),
+    # published to both costmaps, so the controller's collision check and the opponent avoidance
+    # see the carried stacks. false = bare hexagon always (the old behaviour, inflation only).
+    footprint_carry: true
+    footprint_global_margin_m: 0.02   # global costmap: circle of (held-box outer corner + this) as soon as 1 box is held...
+    footprint_global_radius_m: 0.20   # ...unless this is > 0: that radius (0.29 left a 5 cm corridor at P1, robot trapped;
+                                      # 0.22 closed the castle entrance to Y5 by 1 cm - narrowest clearance there 0.225)
+    # Evacuation: about to start a Nav2 leg from a cell the global planner treats as blocked -> drive direct
+    # to the nearest free point (within evac_search_m, evac_inset_m past its edge) first; none (closed
+    # pocket) -> bare footprint on the global costmap for evac_bare_s
+    evac_search_m: 0.40
+    evac_inset_m: 0.02
+    evac_bare_s: 2.0
+    inflation_radius_empty_m: 0.28
+    gap_block_m: 0.33             # gaps narrower than this between castle piles / towers / discards are closed for
+                                  # path planning (bare robot is 0.31 m across its corners; Max: Nav2 tried Y2-Y4)
+    inflation_radius_carry_m: 0.35   # was 0.40 with the bare footprint; > the loaded circle (0.22) so the cost still slopes
+    # Dock poses: field_2027.yaml `docks:` (the old dock_poses.json is gone)

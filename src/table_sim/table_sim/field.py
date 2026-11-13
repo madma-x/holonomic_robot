@@ -8,12 +8,12 @@ stack and to drop into a zone.
 import math
 import os
 from dataclasses import dataclass, field as dc_field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import yaml
 
-from .geometry import rect_poly
+from .geometry import rect_poly, truncated_triangle_apothem
 
 TEAMS = ('yellow', 'blue')
 
@@ -81,6 +81,7 @@ class StackSpec(Rect):
     approach: List[float] = dc_field(default_factory=list)   # radians, centre -> robot
     side: str = 'center'
     label: str = ''          # P1..P10
+    steal_zone: str = ''     # non-empty: this 'stack' is the pile in that (enemy) drop zone; face 0 only
 
 
 @dataclass
@@ -91,6 +92,10 @@ class ZoneSpec(Rect):
     shape: str = 'rect'      # 'rect' | 'circle'
     capacity: int = 3        # max boxes
     vertical_only: bool = False   # circle zones: only accepts flipped (vertical) boxes
+    # Robot dock pose (x, y, heading of the face that drops), from field yaml `docks:` (Max). When set,
+    # the zone's own x/y/th are derived from it (where the held box lands) and World only accepts a
+    # drop made from this pose (sim.yaml tool.dock_tol_m / dock_tol_deg). None: old zone geometry.
+    dock: Optional[tuple] = None
 
     def contains(self, p, margin=0.0):
         if self.shape == 'circle':
@@ -134,6 +139,15 @@ class Field:
         self.box_height = float(b['height'])
         self.boxes_per_stack = int(cfg.get('boxes_per_stack', 4))
         self.zone_capacity = int(cfg.get('zone_capacity', 3))
+        # Max boxes in a rect zone once its construction is built (extras +1 each).
+        # Extra boxes in an already-built zone (+1 each): off by default for now,
+        # they made the robot get stuck on zones it had already built.
+        self.extra_boxes = bool(cfg.get('extra_boxes', True))
+        self.zone_max_boxes = (int(cfg.get('zone_max_boxes', self.zone_capacity))
+                               if self.extra_boxes else self.zone_capacity)
+        # discards (discard_docks:) always use the zone total of the yaml, extra_boxes or not
+        self.discard_max_boxes = int(cfg.get('zone_max_boxes', self.zone_capacity))
+        self.door_accepts_extras = bool(cfg.get('door_accepts_extras', True))
         self.scoring = dict(cfg.get('scoring', {}))
 
         self.stacks: List[StackSpec] = []
@@ -199,6 +213,63 @@ class Field:
             for i, z in enumerate(cs, 1):
                 z.label = f'{prefix}C{i}'
 
+        # Dock poses (Max): the robot pose for each own drop, the only thing that matters - the zone's
+        # position is derived from it (box centre = dock + (r_in + box_width/2 + 3 mm) along the face
+        # heading; vertical: the centre slot). Yellow only: the opponent's (blue) zones keep their own
+        # geometry so the scripted opponents are unaffected.
+        docks = cfg.get('docks') or {}
+        if docks:
+            r_in = truncated_triangle_apothem(float(cfg.get('robot_face_long_m', 0.22)),
+                                              float(cfg.get('robot_face_short_m', 0.08)))
+            off = r_in + self.box_width / 2 + 0.003
+            for lab, d in docks.items():
+                for team, prefix in (('yellow', 'Y'),):
+                    z = next((z for z in self.team_zones(team) if z.label == prefix + lab[1:]), None)
+                    if z is None:
+                        continue
+                    x, y, h = float(d['x']), float(d['y']), math.radians(float(d['yaw_deg']))
+                    z.dock = (x, y, h)
+                    z.x, z.y = x + off * math.cos(h), y + off * math.sin(h)
+                    z.approach = [h + math.pi]
+                    if z.shape == 'rect':
+                        z.th = h + math.pi / 2          # the box's long axis lies along the face
+
+        # Flip poses next to a circle zone (Max): {zone label: (x, y, body yaw)} - where the flip face
+        # flips a tower load just before that circle's drop (only the flip-face stack has to be inside
+        # the castle). Yellow only, like docks.
+        self.flip_poses = {'yellow': {}, 'blue': {}}
+        for lab, d in (cfg.get('flip_poses') or {}).items():
+            self.flip_poses['yellow'][str(lab)] = (float(d['x']), float(d['y']), math.radians(float(d['yaw_deg'])))
+
+        # Discard docks (Max): over-picked horizontal stacks dropped roughly next to an already-built
+        # wall, inside the (bigger than one stack) drop zone - extras, +1 per box. Robot pose; yaw_deg
+        # = heading of the dropping face, like docks. {team: [(zone name, x, y, face heading)]}
+        self.discard_docks = {'yellow': [], 'blue': []}
+        for d in cfg.get('discard_docks') or []:
+            z = next((z for z in self.team_zones('yellow') if z.label == str(d['zone'])), None)
+            if z is not None:
+                self.discard_docks['yellow'].append(
+                    (z.name, float(d['x']), float(d['y']), math.radians(float(d['yaw_deg']))))
+
+        # Enemy drop zones that can be picked from (horizontal piles, face 0 only): a pick 'stack' that
+        # starts empty and mirrors the pile the opponent builds there.
+        self.steal_labels = [str(x) for x in cfg.get('steal_zones', [])]
+        self.own_repick_inside = [str(x) for x in cfg.get('own_repick_inside', [])]
+        for prefix in ('Y', 'B'):
+            for lab in self.steal_labels:
+                z = next((z for z in self.zones if z.label == prefix + lab), None)
+                if z is None:
+                    continue
+                appr = list(z.approach)
+                if lab in [str(x) for x in cfg.get('steal_approach_flip', [])] and prefix == 'B':
+                    appr = [a + math.pi for a in appr]       # pick from the opposite side of the zone's own approach
+                if lab in self.own_repick_inside and prefix == 'Y':
+                    appr = [a + math.pi for a in appr]       # our own wall taken back from inside the castle (door)
+                st = StackSpec('S_' + z.label, z.x, z.y, self.box_length, self.box_width, z.th,
+                               appr, self._half(z.x))
+                st.label, st.steal_zone = 'S_' + z.label, z.name
+                self.stacks.append(st)
+
         sz = cfg['start_zone']
         ez = cfg.get('end_zone', sz)
         self.start_zones = {
@@ -212,9 +283,9 @@ class Field:
         h = float(sz.get('heading', 0.0))
         self.start_headings = {'yellow': h, 'blue': math.pi - h}
         self.decor = []
-        for c in cfg.get('decor_circles', []):
-            self.decor.append((c['x'], c['y'], c['r']))
-            self.decor.append((self.length - c['x'], c['y'], c['r']))
+        for z in self.zones:          # drawn where the circle zones really are (dock-derived for ours)
+            if z.shape == 'circle':
+                self.decor.append((z.x, z.y, z.lx / 2))
 
         # Castle area: only place the flip mechanism (vertical boxes, door)
         # may be used. Traced by Max over the reference artwork.
@@ -259,6 +330,24 @@ class Field:
     def start_pose(self, team) -> Tuple[float, float, float]:
         z = self.start_zones[team]
         return z.x, z.y, self.start_headings[team]
+
+    def keepout_poly(self, team):
+        """The OPPONENT's castle polygon, counter-clockwise (the mirrored one is clockwise): no robot
+        of `team` may enter it. Empty array if the field has no castle."""
+        poly = self.castle.get(other_team(team))
+        if poly is None or len(poly) == 0:
+            return np.zeros((0, 2))
+        area = 0.5 * sum(poly[i][0] * poly[(i + 1) % len(poly)][1] - poly[(i + 1) % len(poly)][0] * poly[i][1]
+                         for i in range(len(poly)))
+        return poly if area > 0 else poly[::-1].copy()
+
+    def start_keepout_poly(self, team):
+        """The OPPONENT's start zone: forbidden for a robot of `team` at all times (Max). Our own
+        start zone never is (yellow keeps out of blue's, blue keeps out of yellow's)."""
+        return np.asarray(self.start_zones[other_team(team)].poly, float)
+
+    def in_start_keepout(self, team, x, y) -> bool:
+        return _point_in_polygon((x, y), self.start_keepout_poly(team))
 
     def in_castle(self, team, x, y) -> bool:
         """True if (x, y) is inside `team`'s castle area (where flipping is

@@ -34,10 +34,21 @@ stacks:
   - {name: mid_hi, x: 1.50, y: 1.50, th: 90, approach: ["-x", "+x"], mirror: false}
   - {name: mid_lo, x: 1.50, y: 0.50, th: 90, approach: ["-x", "+x"], mirror: false}
 
+# Enemy drop zones whose horizontal pile can be picked (face 0 only), by zone number (B3/B4/B5 or Y3/Y4/Y5)
+steal_zones: ['3', '4', '5']
+steal_approach_flip: ['3', '5']   # blue side: pick from the opposite side of the zone's own approach (+180 deg)
+# Our own walls the door may be taken from as a last resort (Max: nothing left to steal and no 3 boxes
+# for the door -> take Y3 or Y4 back, face 0, from INSIDE the castle: the approach is flipped to the
+# castle side). Yellow side only, like docks:.
+own_repick_inside: ['3', '4']
+
 # Drop zones (rectangles, lx along their own axis rotated by th).
 # Each holds at most `zone_capacity` boxes, best as one stack of 3.
 # `approach_deg`: direction(s) from the zone centre to the robot.
-zone_capacity: 3
+zone_capacity: 3        # one stack = one wall
+door_accepts_extras: false   # a finished door (posts + lid) takes no further boxes
+extra_boxes: false          # OFF for now: extras made the robot stick on built zones (true = +1 each up to zone_max_boxes)
+zone_max_boxes: 6       # rect zone total once built; extras score +1 each
 zones:
   # Repositioned by Max in the table-reference artifact: strip_hi/lo now
   # flush against the x=0 castle wall (rotated 90deg), diag_hi/lo flattened
@@ -53,17 +64,55 @@ zones:
   # Y3: approach from the top (+y), not below - Max corrected this directly
   # after watching the replay.
   - {name: diag_hi,  x: 0.436, y: 1.366, lx: 0.40, ly: 0.20, th: 0, approach_deg: [90],
-     blue: {x: 2.315, y: 1.435, th: -45, approach_deg: [-135]}}
+     blue: {x: 2.315, y: 1.435, th: 45, approach_deg: [-45]}}
   - {name: diag_lo,  x: 0.436, y: 0.626, lx: 0.40, ly: 0.20, th: 0, approach_deg: [90],
-     blue: {x: 2.315, y: 0.565, th: 45, approach_deg: [135]}}
+     blue: {x: 2.315, y: 0.565, th: 135, approach_deg: [-135]}}
+
+# Robot dock poses for our (yellow) drops - Max, 2026-11-09. THE reference: the yellow zones'
+# x/y/th above and the YC circles' x/y below are recomputed from these (box centre = dock +
+# (r_in + box_width/2 + 3 mm) along yaw_deg; vertical = centre slot). yaw_deg = heading of the
+# face that drops (face 0 for vertical boxes). The world only accepts a drop within
+# sim.yaml tool.dock_tol_m / dock_tol_deg of the dock (vertical: shifted by the slot).
+docks:
+  Y1:  {x: 0.289, y: 1.522, yaw_deg: 180.0, box: horizontal}
+  Y2:  {x: 0.280, y: 0.487, yaw_deg: 180.0, box: horizontal}
+  Y3:  {x: 0.565, y: 1.523, yaw_deg: -90.0, box: horizontal}
+  Y4:  {x: 0.572, y: 0.502, yaw_deg: 90.0, box: horizontal}
+  Y5:  {x: 0.694, y: 1.000, yaw_deg: 0.0, box: horizontal}
+  YC1: {x: 0.594, y: 1.705, yaw_deg: -131.5, box: vertical}   # Max, 2026-11-10
+  YC2: {x: 1.015, y: 1.311, yaw_deg: 180.0, box: vertical}    # Max, 2026-11-12
+  YC3: {x: 1.022, y: 0.692, yaw_deg: 180.0, box: vertical}    # Max, 2026-11-12
+  YC4: {x: 0.640, y: 0.303, yaw_deg: 143.5, box: vertical}    # Max, 2026-11-10
+
+# Flip poses by a circle zone (Max, 2026-11-09): the robot flips the flip face (face 0) here right
+# before that circle's drop. yaw_deg = body heading. Only the flip-face stack has to be inside the
+# castle. Headings rotated off the dock heading until the stack fits in castleYellow at +-2 cm /
+# +-3 deg with the most pile clearance: YC1 +27 deg (3.3 cm from the Y3 pile, also on the move to
+# the YC1 dock), YC4 -15 deg (>= 2.3 cm from the Y4 pile). A flip here is for that circle only:
+# the planner's next drop after it is that circle zone.
+# Discard docks (Max, 2026-11-09): get rid of over-picked horizontal stacks so the door (Y5, last,
+# flip face only) stays possible. Robot pose, yaw_deg = heading of the dropping face. Only into a zone
+# whose wall is already built: the boxes count as extras (+1 each, up to zone_max_boxes). The drop is
+# approximate (sim.yaml tool.discard_tol_*).
+discard_docks:
+  # Max's (0.860, 0.383) / mirrored (0.860, 1.617), moved 2 cm to the dropping face's left (Y4; mirrored:
+  # right for Y3) and 2 cm back, to clear the built YC3 / YC2 tower (2.5 cm / 0.6 cm).
+  - {zone: Y4, x: 0.858, y: 0.355, yaw_deg: 131.5, box: horizontal}
+  - {zone: Y3, x: 0.858, y: 1.645, yaw_deg: -131.5, box: horizontal}
+
+flip_poses:
+  YC1: {x: 0.500, y: 1.700, yaw_deg: -104.5}
+  YC4: {x: 0.550, y: 0.300, yaw_deg: 115.5}
 
 # Start square (also the end-of-match zone unless end_zone is given).
 start_zone: {x: 0.25, y: 1.00, lx: 0.50, ly: 0.50, heading: 0.0}
 
 # Points. PLACEHOLDERS - replace with the 2027 rulebook figures.
 scoring:
-  box_in_zone: 3
-  full_stack_bonus: 6        # zone holding a stack of 3
+  box_in_zone: 1             # every box in a drop zone
+  wall_bonus: 5              # stack of 3 horizontal (8 with its boxes)
+  tower_bonus: 5             # 1 vertical box in a circle (6)
+  door_bonus: 20             # 2 posts + lid (23 with its 3 boxes); one per match
   robot_in_end_zone: 10      # robot fully inside its zone at the end
   robot_partly_in_end_zone: 0
 
@@ -81,23 +130,32 @@ decor_circles:
   # so blue was never boxed in).
   - {x: 0.50, y: 1.60, r: 0.10, approach_deg: 138,
      blue: {x: 2.50, y: 1.60, approach_deg: -150}}
-  - {x: 0.805, y: 1.315, r: 0.10, approach_deg: -20,
+  # YC2 +10 cm / YC3 -2 cm (was y 1.315 / 0.703): the waist between their boxes
+  # was 0.48 m, now 0.62 m; a robot loaded on 3 faces needs >= 0.56 m to get in
+  # to Y5. YC3 can't go lower: P2's pick pre-pose (0.75, 0.43) sits just under it.
+  - {x: 0.805, y: 1.415, r: 0.10, approach_deg: -20,
      blue: {x: 2.15, y: 1.25, approach_deg: -160}}
-  - {x: 0.794, y: 0.703, r: 0.10, approach_deg: 20,
+  - {x: 0.794, y: 0.683, r: 0.10, approach_deg: 20,
      blue: {x: 2.15, y: 0.75, approach_deg: 160}}
   - {x: 0.50, y: 0.40, r: 0.10, approach_deg: 30}
+
+# Keep-out zones for path planning (Max, 2026-11-12), exact polygons, both teams. adaptive_strategy
+# puts them in Nav2's global costmap: PAMI zones forbidden for every robot, the OPPONENT's start zone
+# always, the opponent's castle (castle: below, mirrored) from keepout_from_s on. Our own start zone
+# and castle stay free.
+keepouts:
+  - {name: keepOutPAMI1Yellow, kind: pami,  team: yellow, points: [[0.000, 0.000], [0.194, 0.000], [0.188, 0.303], [0.000, 0.300]]}
+  - {name: keepOutPAMI2Yellow, kind: pami,  team: yellow, points: [[0.000, 1.700], [0.206, 1.698], [0.197, 1.992], [0.000, 2.000]]}
+  - {name: keepOutPAMI1Blue,   kind: pami,  team: blue,   points: [[2.806, 0.000], [3.000, 0.000], [3.000, 0.300], [2.794, 0.304]]}
+  - {name: keepOutPAMI2Blue,   kind: pami,  team: blue,   points: [[2.807, 1.717], [3.000, 1.700], [3.000, 2.000], [2.796, 1.999]]}
+  - {name: startZoneBlue,      kind: start, team: blue,   points: [[2.500, 0.758], [2.996, 0.766], [2.995, 1.246], [2.495, 1.251]]}
+  - {name: startZoneYellow,    kind: start, team: yellow, points: [[0.000, 0.765], [0.490, 0.767], [0.495, 1.240], [0.003, 1.250]]}
 
 # Castle area: the only place the flip mechanism (vertical boxes, door) may
 # be used. Traced by Max over the reference artwork - it hugs the start
 # zone and all 4 circle (YC1-4) zones, nothing more. Yellow-side polygon,
 # mirrored for blue at x -> 3 - x.
 castle:
-  points:
-    - [0.024, 0.305]
-    - [0.525, 0.309]
-    - [0.959, 0.696]
-    - [0.967, 0.939]
-    - [0.956, 1.340]
-    - [0.757, 1.525]
-    - [0.495, 1.705]
-    - [0.000, 1.705]
+  name: castleYellow       # Max, 2026-11-09 re-trace
+  points: [[0.000, 0.3], [0.455, 0.299], [0.599, 0.350], [0.883, 0.636], [0.945, 0.811],
+           [0.947, 1.247], [0.898, 1.362], [0.545, 1.678], [0.441, 1.695], [0.000, 1.7]]

@@ -44,6 +44,9 @@ class OpponentTracker:
     def update(self, obs, dt):
         """Call every tick. `obs.ranges` is None on ticks without a fresh scan."""
         self._dt_since_sighting += dt
+        beacon = getattr(obs, 'opp_xy', None)
+        if beacon is not None:                 # external position of the opponent: always 'seen'
+            return self._sighting(float(beacon[0]), float(beacon[1]))
         if obs.ranges is None:
             if self.opp.seen_ever:
                 self.opp.sigma = min(self.sigma_max, self.opp.sigma + self.sigma_growth * dt)
@@ -65,8 +68,9 @@ class OpponentTracker:
             self.opp.visible = False
             return self.opp
 
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
+        return self._sighting(sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+
+    def _sighting(self, cx, cy):
         # Velocity: finite difference against the last sighting (not the last
         # tick - the gap between two actual detections can span several
         # no-scan ticks), exponentially smoothed so one noisy mast-cluster

@@ -92,7 +92,7 @@ def _relabel(d, name_by_label):
     return {name_by_label.get(k, k): v for k, v in d.items()}
 
 
-def extract(bag, field=None, dt=0.1):
+def extract(bag, field=None, dt=0.1, match=None):
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
 
@@ -101,7 +101,7 @@ def extract(bag, field=None, dt=0.1):
     reader, types = _open(bag)
 
     score = status = scan = cmd_vel = None
-    frames = []
+    frames, matches = [], []      # matches: the frames of every earlier match in the bag (clock rewinds)
     next_t = 0.0
     last_t = None
 
@@ -127,6 +127,8 @@ def extract(bag, field=None, dt=0.1):
         t = float(score.get('time', 0.0))
         # a /sim/reset_event or a re-run rewinds the clock: start over
         if last_t is not None and t < last_t - 1.0:
+            if frames:
+                matches.append(frames)
             frames, next_t = [], 0.0
         last_t = t
         if t < next_t:
@@ -134,7 +136,11 @@ def extract(bag, field=None, dt=0.1):
         next_t = t + dt
         frames.append(_frame(t, score, status, scan, cmd_vel, name_by_label))
 
-    return {'frames': frames, 'team': (score or {}).get('team', 'yellow'),
+    if frames:
+        matches.append(frames)
+    # several matches in one bag (re-runs / resets): `match` picks one (1 = first), default the last
+    frames = matches[(match - 1) if match else -1] if matches else []
+    return {'frames': frames, 'n_matches': len(matches), 'team': (score or {}).get('team', 'yellow'),
             'opponent': ((score or {}).get('robots', {}).get('opp', {}) or {}).get('behavior', ''),
             'source': os.path.abspath(bag)}
 
@@ -161,6 +167,8 @@ def _frame(t, score, status, scan, cmd_vel, name_by_label):
         'robots': robots,
         'stacks': _relabel(score.get('stacks'), name_by_label),
         'zones': _relabel(score.get('zones'), name_by_label),
+        'extra': score.get('extra') or {},
+        'pile_poses': _relabel(score.get('pile_poses'), name_by_label),
         'score': {k: (sc.get(k) or {}).get('total', 0) for k in ('yellow', 'blue')},
         'us_state': st.get('state'),
         'us_path': [],      # GridPlanner waypoints are brain-internal, not published
@@ -193,11 +201,12 @@ def main(argv=None):
     ap.add_argument('bag', help='bag directory (as written by sim.launch.py record:=true)')
     ap.add_argument('-o', '--out', default=None, help='output .json (default <bag>.json)')
     ap.add_argument('--dt', type=float, default=0.1, help='frame interval, match seconds')
+    ap.add_argument('--match', type=int, default=None, help='which match in the bag (1 = first; default the last)')
     ap.add_argument('--field', default=None)
     args = ap.parse_args(argv)
 
     out = args.out or (args.bag.rstrip('/') + '.json')
-    res = extract(args.bag, Field(args.field) if args.field else None, args.dt)
+    res = extract(args.bag, Field(args.field) if args.field else None, args.dt, args.match)
     if not res['frames']:
         print('no frames extracted - was /sim/score recorded?', file=sys.stderr)
         return 1

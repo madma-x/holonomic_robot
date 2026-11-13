@@ -67,6 +67,11 @@ controller_server:
       goal_dist_tolerance: 0.02
       # Must stay <= goal_checker.yaw_goal_tolerance above.
       goal_yaw_tolerance: 0.175
+      # Terminal docking stage - see table_sim/config/nav2_params_sim.yaml.
+      docking_enabled: true
+      docking_distance: 0.3
+      docking_lookback_dist: 0.4
+      k_lateral: 2.5
       output_rotate_deg: 0.0
       output_invert_x: false
       output_invert_y: false

@@ -37,6 +37,7 @@ def generate_launch_description():
         DeclareLaunchArgument('control_rate', default_value='20.0'),
         DeclareLaunchArgument('field_file', default_value=field_default),
         DeclareLaunchArgument('strategy_params_file', default_value=strategy_params_default),
+        DeclareLaunchArgument('brain', default_value='planner'),   # planner | rules
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(table_sim_share, 'launch', 'nav2_sim.launch.py')),
@@ -47,6 +48,7 @@ def generate_launch_description():
                  'control_rate': LaunchConfiguration('control_rate'),
                  'field_file': LaunchConfiguration('field_file'),
                  'strategy_params_file': LaunchConfiguration('strategy_params_file'),
+                 'brain': LaunchConfiguration('brain'),
                  'use_sim_time': True,
              }]),
     ])

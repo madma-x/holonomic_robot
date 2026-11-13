@@ -41,12 +41,14 @@ stack/zone positions in the map frame.
 import json
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import yaml
 
 import rclpy
 from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import Point, Point32, Polygon, PoseStamped, Twist
+from nav_msgs.msg import OccupancyGrid, Odometry
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -59,11 +61,11 @@ from tf2_ros.transform_listener import TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from table_sim.field import Field
-from table_sim.geometry import polygon_from_face_angles, rect_poly
+from table_sim.geometry import polygon_from_truncated_triangle, rect_poly
 from table_sim_interfaces.action import FaceTool
 from table_sim_interfaces.msg import CameraDetections
 
-from .core import Observation, StrategyCore
+from .core import Observation, StrategyCore, gap_fillers
 
 GOAL_POS_TOL = 0.08    # re-send a Nav2 goal only once it actually moves this much
 GOAL_YAW_TOL = 0.15
@@ -103,6 +105,25 @@ def _convex_hull(points):
     return lower[:-1] + upper[:-1]
 
 
+def _polygon_strips(poly, h=0.02):
+    """A polygon (any shape, convex or not) as horizontal strips (cx, cy, length, height) - the costmap
+    obstacle layer only draws oriented rectangles. Scanline at height h; strips overlap by 2 mm."""
+    pts = [(float(x), float(y)) for x, y in poly]
+    ys = [p[1] for p in pts]
+    out, y = [], min(ys) + h / 2
+    while y < max(ys):
+        xs = []
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+            if (y1 > y) != (y2 > y):
+                xs.append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+        xs.sort()
+        for a, b in zip(xs[0::2], xs[1::2]):
+            if b - a > 1e-3:
+                out.append(((a + b) / 2, y, b - a, h + 0.002))
+        y += h
+    return out
+
+
 def _quat(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
 
@@ -124,6 +145,7 @@ class StrategyNode(Node):
         # (StrategyCore got {} every time), which is why editing strategy.yaml
         # never changed anything about a live (non-headless) run.
         dp('strategy_params_file', '')
+        dp('brain', 'planner')     # 'planner' (PlannerBrain, beam search) | 'rules' (StrategyCore, rule brain)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
         self.team = g('team')
@@ -140,7 +162,42 @@ class StrategyNode(Node):
             dpf = strategy_params.get('dock_poses_file')
             if dpf and not os.path.isabs(dpf):
                 strategy_params['dock_poses_file'] = os.path.join(os.path.dirname(sp_path), dpf)
-        self.brain = StrategyCore(self.field, self.team, strategy_params)
+        # Carrying: the footprint grows by the held boxes (footprint_carry, see _footprint_polygon) and
+        # the global costmap's inflation switches to inflation_radius_carry_m.
+        self._infl_empty = float(strategy_params.get('inflation_radius_empty_m', 0.28))
+        self._infl_carry = float(strategy_params.get('inflation_radius_carry_m', 0.40))
+        self._infl_node = str(strategy_params.get('inflation_param_node', '/global_costmap/global_costmap'))
+        self._footprint_carry = bool(strategy_params.get('footprint_carry', True))   # grow the footprint by the held boxes
+        # global costmap while carrying: a circle around the held boxes (NavFn plans the centre point only
+        # and keeps it out of the footprint's INSCRIBED radius - the real hull's is 0.11 m until all 3
+        # faces are loaded, so 1-2 held stacks were invisible to the path; Max)
+        self._footprint_global_margin = float(strategy_params.get('footprint_global_margin_m', 0.02))
+        # > 0: the loaded global circle's radius, fixed (Max: 0.29 closed the castle-border corridor at P1);
+        # the controller's real-hull check against the local costmap covers the rest of the box reach
+        self._footprint_global_r = float(strategy_params.get('footprint_global_radius_m', 0.0))
+        # evacuation (Max): robot centre in a blocked global-costmap cell -> nearest free point within this
+        # radius; none there (closed pocket) -> the global footprint falls back to the bare robot this long
+        self._evac_search = float(strategy_params.get('evac_search_m', 0.40))
+        self._evac_inset = float(strategy_params.get('evac_inset_m', 0.02))
+        self._evac_bare_s = float(strategy_params.get('evac_bare_s', 2.0))
+        self._gcm, self._bare_until = None, -1.0
+        # keep-out zones for the global costmap (field keepouts:, Max): PAMI zones for all, the opponent's
+        # start zone always, the opponent's castle from keepout_from_s; ours stay free
+        self._keepout_from = float(strategy_params.get('keepout_from_s', 20.0))
+        self._keepout_always, self._keepout_castle = [], []
+        for k in (self.field.cfg.get('keepouts') or []):
+            if k.get('kind') == 'pami' or k.get('team') != self.team:
+                self._keepout_always += _polygon_strips(k['points'])
+        opp_castle = self.field.castle.get('blue' if self.team == 'yellow' else 'yellow')
+        if opp_castle is not None and len(opp_castle):
+            self._keepout_castle = _polygon_strips(opp_castle.tolist())
+        self._infl_want, self._infl_sent, self._infl_client, self._infl_fut = None, None, None, None
+        if g('brain') == 'rules':
+            self.brain = StrategyCore(self.field, self.team, strategy_params)
+        else:
+            from .planner_brain import PlannerBrain
+            self.brain = PlannerBrain(self.field, self.team, strategy_params)
+        self.get_logger().info(f'strategy_node: brain = {type(self.brain).__name__}')
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -150,6 +207,7 @@ class StrategyNode(Node):
         self.active = False
         self._got_time = False
         self._last_scan = None
+        self._scan_yaw_offset = None    # resolved lazily from TF, see _tick
         self._last_cam = None
         self._result = None
         self._action_in_flight = False
@@ -160,6 +218,7 @@ class StrategyNode(Node):
         self._flip_result = None
         self._flip_in_flight = False
         self._pending_flip_face = None
+        self._debug_log_len = 0   # how much of brain.debug.log has been forwarded to the ROS logger
 
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_subscription(LaserScan, '/scan', self._on_scan, 10)
@@ -167,6 +226,12 @@ class StrategyNode(Node):
         self.create_subscription(Float32, '/game/time_remaining', self._on_time, 10)
         self.create_subscription(Bool, '/game/match_active', self._on_active, 10)
         self.create_subscription(Int32, '/sim/reset_event', self._on_reset, 10)
+        # Opponent seen from everywhere (strategy.yaml opponent_beacon, Max): the real robot gets it
+        # from an external beacon; in the sim that is /opponent/odom. Off -> lidar only.
+        self._opp_xy = None
+        if strategy_params.get('opponent_beacon'):
+            self.create_subscription(Odometry, '/opponent/odom', self._on_opp_odom, 10)
+            self.get_logger().info('strategy_node: opponent beacon on (/opponent/odom)')
 
         self.tool = ActionClient(self, FaceTool, '/face_tool')
 
@@ -184,9 +249,20 @@ class StrategyNode(Node):
         self._next_objects_resync = 0.0
 
         # ----------------------------------------------------- footprint
+        self.create_subscription(OccupancyGrid, '/global_costmap/costmap', self._on_gcm, latched)
         self.pub_footprint_local = self.create_publisher(Polygon, '/local_costmap/footprint', latched)
         self.pub_footprint_global = self.create_publisher(Polygon, '/global_costmap/footprint', latched)
         self._footprint_key = None
+        self._last_footprint_poly = None
+        # Costmap2DROS's footprint_sub_ subscribes VOLATILE/BEST_EFFORT (see
+        # sim_node.py's own identical note) - a late-joining Nav2 won't
+        # replay this publisher's transient-local backlog, so a subscriber
+        # that connects between two face/vertical changes would otherwise
+        # never see a footprint at all until the next one happens to occur.
+        # Resend on a slow timer regardless of the change-detection cache
+        # below (which only skips redundant recompute/publish on an
+        # unchanged tick, not this).
+        self.create_timer(1.0, self._resend_footprint)
 
         # ------------------------------------------------- status/markers
         self.pub_status = self.create_publisher(String, '/strategy/status', 10)
@@ -197,6 +273,15 @@ class StrategyNode(Node):
         # what angle was asked for next to what the robot actually did.
         self.pub_goal = self.create_publisher(PoseStamped, '/strategy/goal', 10)
 
+        # The brain runs in a worker thread: a replan takes 0.1-0.5 s, which used to block this
+        # node's control tick (missed control-loop rate, last velocity held during the pause).
+        # The tick never waits for it: while it thinks, Nav2 keeps driving a coarse leg on its own
+        # and a direct-velocity stage gets a zero command (stop rather than hold a stale one).
+        self._worker = ThreadPoolExecutor(max_workers=1)
+        self._step_fut = None
+        self._step_inputs = None
+        self._last_step_ns = None
+        self._last_cmd_direct = False
         self.create_timer(self.dt, self._tick)
         self.get_logger().info(f'strategy_node ready: team={self.team}')
 
@@ -239,6 +324,18 @@ class StrategyNode(Node):
         t = tf.transform.translation
         self.pose = (t.x, t.y, _yaw(tf.transform.rotation))
         return True
+
+    def _get_scan_yaw_offset(self, scan_frame):
+        """base_frame -> scan_frame yaw (static, so resolved once and
+        cached) - see the long comment at the _tick call site."""
+        if self._scan_yaw_offset is not None:
+            return self._scan_yaw_offset
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, scan_frame, rclpy.time.Time())
+        except TransformException:
+            return 0.0
+        self._scan_yaw_offset = _yaw(tf.transform.rotation)
+        return self._scan_yaw_offset
 
     # -------------------------------------------------------------- action
     def _send_action(self, face, mode, count=0):
@@ -334,32 +431,137 @@ class StrategyNode(Node):
 
     # ------------------------------------------------------- footprint
     def _footprint_polygon(self):
+        """The robot hexagon, grown by the boxes held on each loaded face (Max: test - the carried
+        stacks hit piles and the opponent because Nav2 only knew the bare robot). Convex hull of the
+        hexagon + every held stack's rectangle (lying: box_length along the face, standing: the 3
+        slots, 3 x box_width), placed like world.py's held_poly (r_in + box_width / 2 off the face)."""
         b = self.brain
-        pts = [tuple(p) for p in polygon_from_face_angles(b.side, b.face_angles)]
+        pts = [tuple(p) for p in polygon_from_truncated_triangle(
+            b.face_long_m, b.face_short_m, b.face_angles)]
+        if not self._footprint_carry or not any(b.faces):
+            return pts
+        bl, bw = self.field.box_length, self.field.box_width
         for f, n in enumerate(b.faces):
-            if n <= 0:
+            if not n:
                 continue
             a = b.face_angles[f]
-            cx, cy = b.r_in * math.cos(a), b.r_in * math.sin(a)
             nx, ny = math.cos(a), math.sin(a)
-            px = cx + nx * (self.field.box_width / 2 + 0.003)
-            py = cy + ny * (self.field.box_width / 2 + 0.003)
-            pts.extend(tuple(p) for p in rect_poly(px, py, self.field.box_length,
-                                                   self.field.box_width, a + math.pi / 2))
+            tx, ty = -ny, nx
+            along = 3 * bw if b.vertical[f] else bl
+            for sa in (-along / 2, along / 2):
+                for d in (b.r_in, b.r_in + bw):
+                    pts.append((nx * d + tx * sa, ny * d + ty * sa))
         return _convex_hull(pts)
 
+    def _update_inflation(self):
+        """inflation_radius of the global costmap: larger while at least one box is carried."""
+        want = self._infl_carry if sum(self.brain.faces) > 0 else self._infl_empty
+        if want == self._infl_sent or (self._infl_fut is not None and not self._infl_fut.done()):
+            return
+        if self._infl_client is None:
+            from rclpy.parameter_client import AsyncParameterClient
+            self._infl_client = AsyncParameterClient(self, self._infl_node)
+        if not self._infl_client.services_are_ready():
+            return
+        from rclpy.parameter import Parameter
+        self._infl_fut = self._infl_client.set_parameters(
+            [Parameter('inflation_layer.inflation_radius', Parameter.Type.DOUBLE, want)])
+        self._infl_sent = want
+        self.get_logger().info(f'global costmap inflation_radius -> {want:.2f} m')
+
     def _publish_footprint(self):
-        key = tuple(self.brain.faces)
+        # vertical state matters too, not just the counts - a flip changes
+        # a loaded face's footprint from a single box_length pile to a
+        # 3x-box_width span with the count unchanged, which the counts
+        # alone wouldn't detect (the published footprint would then keep
+        # showing the pre-flip shape).
+        key = (tuple(self.brain.faces), tuple(self.brain.vertical),
+               self.get_clock().now().nanoseconds * 1e-9 < self._bare_until)
         if key == self._footprint_key:
             return
+        if self._footprint_carry and any(self.brain.faces) and self._infl_sent != self._infl_carry:
+            return          # loaded footprint only once the carry inflation is set (Nav2: inflation >= inscribed)
         self._footprint_key = key
         # nav2_costmap_2d's footprint_sub_ is a plain geometry_msgs/Polygon,
         # not PolygonStamped (costmap_2d_ros.hpp) - that type mismatch meant
         # these were never actually being received at all, silently leaving
         # Nav2 on its default circular robot_radius_ footprint.
-        poly = Polygon(points=[Point32(x=float(x), y=float(y), z=0.0) for x, y in self._footprint_polygon()])
+        pts = self._footprint_polygon()
+        poly = Polygon(points=[Point32(x=float(x), y=float(y), z=0.0) for x, y in pts])
+        gpoly = poly
+        bare = self.get_clock().now().nanoseconds * 1e-9 < self._bare_until
+        if self._footprint_carry and any(self.brain.faces) and not bare:
+            # inscribed radius = the held boxes' outer corner + margin (16-gon, its apothem is that radius)
+            r_in = (self._footprint_global_r if self._footprint_global_r > 0
+                    else max(math.hypot(x, y) for x, y in pts) + self._footprint_global_margin)
+            r = r_in / math.cos(math.pi / 16)
+            gpoly = Polygon(points=[Point32(x=float(r * math.cos(2 * math.pi * k / 16)),
+                                            y=float(r * math.sin(2 * math.pi * k / 16)), z=0.0) for k in range(16)])
+        self._last_footprint_poly = (poly, gpoly)
         self.pub_footprint_local.publish(poly)
-        self.pub_footprint_global.publish(poly)
+        self.pub_footprint_global.publish(gpoly)
+
+    def _on_gcm(self, msg):
+        import numpy as np
+        i = msg.info
+        self._gcm = (np.asarray(msg.data, dtype=np.int16).reshape(i.height, i.width),
+                     i.resolution, i.origin.position.x, i.origin.position.y)
+
+    def _evac_point(self):
+        """Nearest point the global planner can start from, when the robot centre is in a cell it treats
+        as blocked (OccupancyGrid >= 99: inscribed / lethal), else None. No free cell within evac_search_m
+        (a closed pocket): publish the bare footprint to the global costmap for evac_bare_s instead."""
+        if self._gcm is None or self.pose is None or not any(self.brain.faces):
+            return None
+        import numpy as np
+        g, res, ox, oy = self._gcm
+        x, y = self.pose[0], self.pose[1]
+        ci, cj = int((y - oy) / res), int((x - ox) / res)
+        H, W = g.shape
+        if not (0 <= ci < H and 0 <= cj < W) or g[ci, cj] < 99:
+            return None
+        k = int(self._evac_search / res)
+        i0, i1, j0, j1 = max(0, ci - k), min(H, ci + k + 1), max(0, cj - k), min(W, cj + k + 1)
+        win = g[i0:i1, j0:j1]
+        ii, jj = np.nonzero((win < 99) & (win >= 0))
+        if len(ii) == 0:
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if now >= self._bare_until:
+                self.get_logger().info('evacuate: no free cell within %.2f m, bare footprint for %.1f s'
+                                       % (self._evac_search, self._evac_bare_s))
+            self._bare_until = now + self._evac_bare_s
+            return None
+        px, py = ox + (jj + j0 + 0.5) * res, oy + (ii + i0 + 0.5) * res
+        d = np.hypot(px - x, py - y)
+        n = int(np.argmin(d))
+        if d[n] > self._evac_search:
+            return None
+        ex, ey, dn = float(px[n]), float(py[n]), float(d[n])
+        if dn > 1e-6:                     # a little past the edge, into the free side
+            ex, ey = ex + (ex - x) / dn * self._evac_inset, ey + (ey - y) / dn * self._evac_inset
+        return (ex, ey)
+
+    def _resend_footprint(self):
+        if self._last_footprint_poly is not None:
+            self.pub_footprint_local.publish(self._last_footprint_poly[0])
+            self.pub_footprint_global.publish(self._last_footprint_poly[1])
+
+    def _drain_debug_log(self):
+        """Forward StrategyCore.debug.say() messages to the ROS logger -
+        without this, the brain's own reasoning ("stuck heading to X,
+        abandoning", "P7 needs boxes on face 0, deferring", ...) is kept in
+        an in-memory list (Debug.log) that nothing else ever reads, so a
+        live run gives zero visibility into WHY it did something (e.g. a
+        stuck backout with "no apparent reason" - the reason was always
+        being recorded, just never surfaced). Debug.log itself is trimmed
+        to its last 20 entries, so track how many have ever been said
+        (Debug.log_total, monotonic) rather than the list's own length."""
+        log = self.brain.debug.log
+        total = self.brain.debug.log_total
+        missed = total - self._debug_log_len
+        for msg in log[max(0, len(log) - missed):]:
+            self.get_logger().info(f'brain: {msg}')
+        self._debug_log_len = total
 
     # --------------------------------------------------- status/markers
     def _publish_status(self, t, cmd=None):
@@ -455,7 +657,9 @@ class StrategyNode(Node):
     # ------------------------------------------------------ belief costmap
     def _publish_belief_objects(self, t):
         occ_stacks, occ_zones = self.brain.occupied(t)
-        key = tuple(sorted(s.name for s in occ_stacks) + sorted(z.name for z in occ_zones))
+        castle_on = t >= self._keepout_from
+        key = (tuple(sorted(s.name for s in occ_stacks) + sorted(z.name for z in occ_zones)),
+               len(self.brain.discard_piles), castle_on)
         # CustomObjectsLayer marks itself "not current" on every message and
         # needs a fresh one periodically to ever go current again - without
         # this safety-net resync a stable belief (nothing picked yet, so the
@@ -485,6 +689,22 @@ class StrategyNode(Node):
             lx = f.box_width if z.shape == 'circle' else f.box_length
             arr.markers.append(self._obj_marker(mid, stamp, zx, zy, zth, lx, f.box_width))
             mid += 1
+        castle = []
+        for z in occ_zones:
+            zx, zy, zth = self.brain.zone_obstacle_pose(z)
+            castle.append(rect_poly(zx, zy, f.box_width if z.shape == 'circle' else f.box_length, f.box_width, zth))
+        for (dx_, dy_, dth) in self.brain.discard_piles:      # our discarded extras next to a wall
+            arr.markers.append(self._obj_marker(mid, stamp, dx_, dy_, dth, f.box_length, f.box_width))
+            mid += 1
+            castle.append(rect_poly(dx_, dy_, f.box_length, f.box_width, dth))
+        # close the gaps between castle objects the robot cannot pass (Y2-Y4, Y1-Y3, ...): Nav2 only
+        # keeps the bare robot's inscribed radius clear and planned through them
+        for (cx, cy, th, ln, wd) in gap_fillers(castle, self.brain.gap_block):
+            arr.markers.append(self._obj_marker(mid, stamp, cx, cy, th, ln, wd))
+            mid += 1
+        for (cx, cy, ln, wd) in self._keepout_always + (self._keepout_castle if castle_on else []):
+            arr.markers.append(self._obj_marker(mid, stamp, cx, cy, 0.0, ln, wd))
+            mid += 1
         self.pub_objects.publish(arr)
 
     def _obj_marker(self, mid, stamp, x, y, th, lx, ly):
@@ -498,12 +718,46 @@ class StrategyNode(Node):
         m.color = ColorRGBA(r=0.9, g=0.3, b=0.3, a=0.5)
         return m
 
+    def _on_opp_odom(self, msg):
+        self._opp_xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
     # ---------------------------------------------------------------- tick
     def _tick(self):
         if not self._got_time or not self._update_pose():
-            self.pub_cmd.publish(Twist())
+            if self._step_fut is None:
+                self.pub_cmd.publish(Twist())
             return
 
+        fut = self._step_fut
+        if fut is not None:
+            if not fut.done():
+                # the brain is still thinking (replan): never block the control tick on it
+                if self._last_cmd_direct:
+                    self.pub_cmd.publish(Twist())
+                return
+            self._collect(fut)
+
+        self._launch_step()
+        # usual case: the step is quick - wait a fraction of the period and apply it this same
+        # tick (no added latency for the docking controller); a long replan is collected later
+        try:
+            self._step_fut.result(timeout=0.6 * self.dt)
+        except Exception:
+            pass
+        if self._step_fut.done():
+            self._collect(self._step_fut)
+
+    def _collect(self, fut):
+        self._step_fut = None
+        try:
+            cmd = fut.result()
+        except Exception as e:      # keep the node alive; the next step retries
+            self.get_logger().error(f'brain step failed: {e!r}')
+            self.pub_cmd.publish(Twist())
+            return
+        self._apply_cmd(self._step_inputs, cmd)
+
+    def _launch_step(self):
         scan = self._last_scan
         self._last_scan = None
         cam = self._last_cam
@@ -516,10 +770,16 @@ class StrategyNode(Node):
         if scan is not None:
             ranges = list(scan.ranges)
             angle_min, angle_inc = scan.angle_min, scan.angle_increment
-            # the live LaserScan's angles already account for the mount
-            # offset (base_scan's own TF frame/URDF yaw) - unlike the
-            # headless/direct-array path, nothing extra to add here.
-            lidar_yaw = 0.0
+            # LaserScan.angle_min/max are in the scan's OWN frame - they do
+            # NOT include the sensor's mount yaw (base_scan is yawed by pi
+            # off base_footprint, see CLAUDE.md/the URDF). world.py's own
+            # raycast bakes that offset into the angles it simulates with
+            # (lidar.yaw_offset, see headless.py's identical lookup), so
+            # skipping it here silently reflected every tracked opponent
+            # position by 180 degrees through our own robot. Resolved once
+            # via TF (static transform) and cached - real robot-portable,
+            # unlike reading sim.yaml's yaw_offset directly.
+            lidar_yaw = self._get_scan_yaw_offset(scan.header.frame_id)
         else:
             ranges, angle_min, angle_inc, lidar_yaw = None, -math.pi, 0.0, 0.0
 
@@ -532,8 +792,19 @@ class StrategyNode(Node):
                           pose=self.pose, ranges=ranges, angle_min=angle_min,
                           angle_inc=angle_inc, lidar_yaw=lidar_yaw, cam=cam,
                           tool_busy=self._action_in_flight, result=result,
-                          flip_busy=self._flip_in_flight, flip_result=flip_result)
-        cmd = self.brain.step(obs, self.dt)
+                          flip_busy=self._flip_in_flight, flip_result=flip_result,
+                          opp_xy=self._opp_xy, evac=self._evac_point())
+        # real elapsed (sim) time since the last step: a step after a long replan covers more
+        # than one control period (blocked / stall timers must count it)
+        now_ns = self.get_clock().now().nanoseconds
+        dt = self.dt if self._last_step_ns is None else (now_ns - self._last_step_ns) * 1e-9
+        dt = max(self.dt, min(1.0, dt))
+        self._last_step_ns = now_ns
+        self._step_inputs = t
+        self._step_fut = self._worker.submit(self.brain.step, obs, dt)
+
+    def _apply_cmd(self, t, cmd):
+        self._drain_debug_log()
         # Published after step(), not before: a drop result processed this
         # tick updates belief inside step() - publishing beforehand meant
         # the costmap (and any Nav2 goal sent later this same tick) used
@@ -541,14 +812,17 @@ class StrategyNode(Node):
         # through the zone/stack that was *just* dropped into.
         self._publish_belief_objects(t)
         self._publish_footprint()
+        self._update_inflation()
         self._publish_status(t, cmd)
         self._publish_opponent_marker()
         self._publish_goal(cmd)
 
         if cmd.goal_pose is not None:
+            self._last_cmd_direct = False
             if not self._nav_matches(cmd.goal_pose):
                 self._send_nav_goal(cmd.goal_pose)
         else:
+            self._last_cmd_direct = True
             if self._nav_target is not None:
                 self._cancel_nav()
             tw = Twist()

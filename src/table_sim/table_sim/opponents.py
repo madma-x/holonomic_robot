@@ -57,7 +57,7 @@ class ScriptedOpponent:
     def _initial_order(self):
         f = self.w.field
         sx, sy, _ = f.start_pose(self.team)
-        stacks = list(f.stacks)
+        stacks = [s for s in f.stacks if not s.steal_zone]
         dist = {s.name: math.hypot(s.x - sx, s.y - sy) for s in stacks}
         if self.behavior == 'mirror':
             return sorted(stacks, key=lambda s: (s.side != self.team, dist[s.name]))

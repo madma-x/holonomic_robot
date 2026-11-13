@@ -60,7 +60,12 @@ def load_params(path):
         d = yaml.safe_load(f) or {}
     for v in d.values():          # accept a ROS params file
         if isinstance(v, dict) and 'ros__parameters' in v:
-            return dict(v['ros__parameters'])
+            d = dict(v['ros__parameters'])
+            break
+    # Same as strategy_node: dock_poses_file is relative to the params file.
+    dpf = d.get('dock_poses_file')
+    if dpf and not os.path.isabs(dpf):
+        d['dock_poses_file'] = os.path.join(os.path.dirname(os.path.abspath(path)), dpf)
     return d
 
 
@@ -148,7 +153,9 @@ def run_match(field, sim_cfg, team, behavior, brain_spec, params, seed=0, avoid=
                               pose=(r.x, r.y, r.th), ranges=ranges, angle_min=a_min,
                               angle_inc=inc, lidar_yaw=lidar_yaw, cam=cam,
                               tool_busy=r.action is not None, result=pending,
-                              flip_busy=r.flip_action is not None, flip_result=flip_pending)
+                              flip_busy=r.flip_action is not None, flip_result=flip_pending,
+                              **({'opp_xy': (world.robots['opp'].x, world.robots['opp'].y)}
+                                 if params.get('opponent_beacon') else {}))
         pending, flip_pending = None, None
         cmd = brain.step(obs, control_dt)
         world.set_cmd('us', cmd.vx, cmd.vy, cmd.wz)
@@ -314,7 +321,7 @@ def main(argv=None):
     multi = len(behaviors) * len(teams) > 1
     rows = []
     t0 = time.time()
-    print(f"{'team':6} {'opponent':13} {'seed':>4} | {'us':>4} {'them':>4} | boxes stacks carried end     contacts")
+    print(f"{'team':6} {'opponent':13} {'seed':>4} | {'us':>4} {'them':>4} | boxes W T D carried end     contacts faults")
     for team in teams:
         for b in behaviors:
             last = None
@@ -326,8 +333,8 @@ def main(argv=None):
                                 verbose=args.verbose)
                 u, th = res['us'], res['them']
                 print(f"{team:6} {b:13} {seed:4d} | {u['total']:4d} {th['total']:4d} | "
-                      f"{u['boxes']:5d} {u['full_stacks']:6d} {u['carried']:7d} "
-                      f"{u['end_zone']:7} {u['contacts']:3d}")
+                      f"{u['boxes']:5d} {u['walls']} {u['towers']} {u['doors']} {u['carried']:7d} "
+                      f"{u['end_zone']:7} {u['contacts']:3d} {u.get('castle_faults', 0):6d}")
                 rows.append({k: v for k, v in res.items() if k not in ('world', 'frames')})
                 last = res
             # --speed/--fps were declared but never passed through, so they

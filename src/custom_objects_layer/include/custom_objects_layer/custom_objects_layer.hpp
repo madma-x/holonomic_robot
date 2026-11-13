@@ -33,6 +33,10 @@ private:
     double size_x{0.15};
     double size_y{0.20};
     double theta{0.0};
+    bool operator==(const Obj & o) const
+    {
+      return x == o.x && y == o.y && size_x == o.size_x && size_y == o.size_y && theta == o.theta;
+    }
   };
 
   void markersCallback(const visualization_msgs::msg::MarkerArray::SharedPtr msg);
@@ -47,6 +51,10 @@ private:
   std::mutex mtx_;
   std::unordered_map<std::string, Obj> objects_;
   std::unordered_map<std::string, Obj> prev_objects_;  // objects painted in the last updateCosts
+  // updateBounds covers every object only when this is set (start-up, after a costmap clear); otherwise
+  // only objects added / removed / moved since the last updateCosts - static ones (keep-out zones,
+  // built piles) then stop forcing a near-full-map reinflation every cycle
+  bool full_redraw_{true};
   std::string topic_;
   int lethal_cost_{254};
 };

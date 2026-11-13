@@ -130,6 +130,7 @@ class TableRenderer:
     # ------------------------------------------------------------- frame
     def draw(self, fr):
         from matplotlib.patches import Circle, Polygon
+        from .geometry import rect_poly
         ax, f = self.ax, self.f
         fr = normalize_frame(fr)
         for a in self._dyn:
@@ -146,6 +147,8 @@ class TableRenderer:
 
         # --- stacks
         for s in f.stacks:
+            if s.steal_zone:          # drawn as the zone's pile
+                continue
             n = fr['stacks'].get(s.name, 0)
             if n:
                 self._patch(Polygon(s.poly, closed=True, fc=BOX_FC, ec=BOX_EC, lw=1.2))
@@ -166,6 +169,20 @@ class TableRenderer:
                                 lw=2.5 if n >= z.capacity else 1.2))
             self._dyn.append(ax.text(z.x, z.y, f'{n}/{z.capacity}', ha='center',
                                      va='center', fontsize=8, weight='bold'))
+
+        # --- over-picked stacks discarded next to a built wall (extras, +1 each)
+        for _name, v in (fr.get('extra') or {}).items():
+            x, y, th, n = v[:4]
+            vert = len(v) > 5 and bool(v[5])          # a standing box (discarded vertical)
+            poly = rect_poly(x, y, f.box_width if vert else f.box_length, f.box_width, th)
+            self._patch(Polygon(poly, closed=True, fc=BOX_FC, ec='orange', lw=1.8))
+            self._dyn.append(ax.text(x, y, f'+{n}', ha='center', va='center', fontsize=8, weight='bold'))
+
+        # --- stacks put down on the bare floor (regrip), dashed red outline
+        for _name, (x, y, th, n) in (fr.get('floor') or {}).items():
+            poly = rect_poly(x, y, f.box_length, f.box_width, th)
+            self._patch(Polygon(poly, closed=True, fc=BOX_FC, ec='red', lw=1.5, ls='--'))
+            self._dyn.append(ax.text(x, y, str(n), ha='center', va='center', fontsize=8, weight='bold'))
 
         # --- trails
         for name, col in (('us', 'red'), ('opp', 'white')):

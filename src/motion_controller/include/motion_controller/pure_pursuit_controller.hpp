@@ -65,6 +65,13 @@ private:
 
   size_t findClosestPathIndex(const geometry_msgs::msg::PoseStamped & pose) const;
   LookaheadPoint findLookaheadPoint(size_t closest_index, double lookahead_distance) const;
+  // Fixed docking line for the final approach, derived from the PLAN's own
+  // geometry (not the robot's current, possibly already-drifted pose) - the
+  // direction from the point docking_lookback_dist_ back along the path to
+  // the goal. Cached once per setPlan() so the line doesn't wobble tick to
+  // tick as the robot corrects onto it. Falls back to the goal orientation
+  // if the plan is shorter than docking_lookback_dist_ (nothing to measure).
+  void updateApproachAxis();
   // Ramps (vx_world, vy_world, wz) toward the target at max_a_/max_aw_,
   // holding the ramped state in last_vx_world_/last_vy_world_/last_wz_, then
   // converts to a body-frame Twist using `yaw` for the output. World-frame
@@ -220,6 +227,28 @@ private:
   // declared, read, and then never used anywhere.
   double goal_dist_tolerance_ {0.05};
   double goal_yaw_tolerance_ {0.175};   // 10 deg
+
+  // Terminal docking stage: inside docking_distance_ of the goal, steer in
+  // the approach-axis frame (along-track toward the goal, cross-track back
+  // onto the fixed docking line from updateApproachAxis()) instead of
+  // chasing the pure-pursuit lookahead point. Pure pursuit's lookahead point
+  // sits ON the path, so once the robot carries side velocity INTO the dock
+  // (e.g. handed off from a curved upstream segment) the lookahead-derived
+  // command only ever asks for whatever residual position error remains -
+  // small near the goal - while the real lateral momentum is governed solely
+  // by the general accel ramp, which isn't tied to how far off the docking
+  // line the robot actually is. Separating cross-track from along-track lets
+  // k_lateral_ correct that offset directly instead of waiting on it to show
+  // up as position error against a moving lookahead target.
+  bool docking_enabled_ {true};
+  double docking_distance_ {0.3};
+  double docking_lookback_dist_ {0.4};
+  // 0 = derive from k_xy_ (same sentinel convention as max_v_/max_a_ above).
+  double k_lateral_ {0.0};
+
+  bool has_approach_axis_ {false};
+  double approach_axis_x_ {1.0};
+  double approach_axis_y_ {0.0};
 
   double output_rotate_deg_ {0.0};
   bool output_invert_x_ {false};

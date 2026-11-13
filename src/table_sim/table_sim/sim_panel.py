@@ -254,8 +254,8 @@ class Panel:
         self.lbl_y.config(text=f"YELLOW {y['total']}")
         self.lbl_b.config(text=f"{b['total']} BLUE")
         self.lbl_detail.config(text=(
-            f"yellow: {y['boxes']} boxes, {y['full_stacks']} full stacks, end zone {y['end_zone']}\n"
-            f"blue:   {b['boxes']} boxes, {b['full_stacks']} full stacks, end zone {b['end_zone']}"))
+            f"yellow: {y['boxes']} boxes, {y['walls']}W {y['towers']}T {y['doors']}D, end zone {y['end_zone']}\n"
+            f"blue:   {b['boxes']} boxes, {b['walls']}W {b['towers']}T {b['doors']}D, end zone {b['end_zone']}"))
 
         if strat is None:
             self.lbl_strategy.config(text='strategy_node: not running (no /strategy/status)')
